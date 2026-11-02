@@ -1,0 +1,71 @@
+{
+  "_comment": "Synthetic ticket for the decision-record and resume-card tests. Each entry is the keyword arguments of one Ledger.append call (key, kind, payload, and an optional provenance_class); a string \"@<key>\" in a payload is replaced by the id of the event appended under that key.",
+  "item_id": "TK-100",
+  "events": [
+    {"key": "created", "kind": "item.created",
+     "payload": {"type": "ticket", "title": "Synthetic ticket for decision records"}},
+    {"key": "branch", "kind": "item.linked",
+     "payload": {"rel": "branch", "target": "feature/tk-100"}},
+    {"key": "pr", "kind": "item.linked",
+     "payload": {"rel": "pr", "target": "example-org/example-repo#7"}},
+    {"key": "reply", "kind": "utterance.captured", "provenance_class": "submitted-prompt",
+     "payload":{"text": "Go with the shared store; keep the markdown export out of it."}},
+    {"key": "store", "kind": "decision.recorded",
+     "payload": {
+       "who": "the owner",
+       "who_kind": "person",
+       "standing": "lean",
+       "effect": "Resume reads the shared store first; the markdown export is not consulted.",
+       "tags": [{"type": "ticket", "id": "TK-100"}, {"type": "initiative", "id": "INIT-STORE"}],
+       "verbatim": "I lean towards the shared store.",
+       "phase": "plan",
+       "evidence": "docs/plan.md"
+     }},
+    {"key": "naming", "kind": "decision.recorded",
+     "payload": {
+       "who": "tech lead",
+       "who_kind": "role",
+       "relayed_by": "the owner",
+       "standing": "lean",
+       "effect": "Branch names follow the team convention.",
+       "tags": [{"type": "ticket", "id": "TK-100"}, {"type": "team", "id": "TEAM-A"}],
+       "verbatim": "Prefer feature/<key> branch names.",
+       "phase": "orient"
+     }},
+    {"key": "store-settled", "kind": "decision.standing",
+     "payload": {"decision_event_id": "@store", "standing": "settled", "source_event_id": "@reply"}},
+    {"key": "store-result", "kind": "decision.result",
+     "payload": {"decision_event_id": "@store", "result": "Resume took one read instead of three.",
+                 "evidence": "example-org/example-repo#7"}},
+    {"key": "naming-2", "kind": "decision.recorded",
+     "payload": {
+       "who": "tech lead",
+       "who_kind": "role",
+       "relayed_by": "the owner",
+       "standing": "lean",
+       "effect": "Branch names carry the ticket key in upper case.",
+       "tags": [{"type": "ticket", "id": "TK-100"}, {"type": "team", "id": "TEAM-A"}],
+       "verbatim": "Use feature/<KEY> with the key in upper case.",
+       "phase": "review"
+     }},
+    {"key": "naming-superseded", "kind": "decision.standing",
+     "payload": {"decision_event_id": "@naming", "standing": "superseded", "superseded_by": "@naming-2"}},
+    {"key": "tried", "kind": "item.tried",
+     "payload": {"what": "A per-session cache of the export", "outcome": "Stale after every merge", "phase": "build"}},
+    {"key": "progress-1", "kind": "item.progress",
+     "payload": {"text": "Schema drafted", "phase": "build"}},
+    {"key": "progress-2", "kind": "item.progress",
+     "payload": {"text": "Tests half written", "phase": "build"}},
+    {"key": "review-1", "kind": "review.recorded",
+     "payload": {"round": 1, "verdict": "changes", "findings": ["The guard is only in the CLI"], "reviewer": "fresh-context reviewer"}},
+    {"key": "review-2", "kind": "review.recorded",
+     "payload": {"round": 2, "verdict": "pass"}},
+    {"key": "stopped", "kind": "item.stopped",
+     "payload": {
+       "point": "Review passed; waiting on the outward go.",
+       "phase": "review",
+       "skills": ["review", "pr"],
+       "refs": ["skills/_lib/ledger/decisions.py", "example-org/example-repo#7"]
+     }}
+  ]
+}

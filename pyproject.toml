@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ledger"
+version = "0.1.0"
+description = "An append-only, hash-chained SQLite ledger for work items, decisions and their provenance, driven by one CLI."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Andrew Smith" }]
+dependencies = []
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Operating System :: OS Independent",
+    "Topic :: Database",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+ledger = "ledger.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["ledger", "ledger.*"]
+exclude = ["ledger.tests", "ledger.tests.*"]
+
+[tool.setuptools.package-data]
+ledger = ["migrations/*.sql"]
+
+[tool.pytest.ini_options]
+testpaths = ["ledger/tests", "tests"]
+pythonpath = ["."]

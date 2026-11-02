@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+.venv/
+
+# Ledger data never belongs in this repository.
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
