@@ -168,6 +168,7 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `decisions` | list decision records with their current standing | no |
 | `entities` | render the entity registry as markdown tables or JSON, naming the ledger revision | no |
 | `context` | print a bounded orientation pack for an item or initiative and its linked items | no |
+| `grants` | render trust grants from their election records, or `--check` that one is standing | no |
 | `export-item` | print one item's events (ephemeral ones decay after close) | no |
 | `search` | full-text search over items, decisions, utterances and markdown roots | no |
 | `index` | build or rebuild the derived search index | no |

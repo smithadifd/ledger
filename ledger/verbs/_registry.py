@@ -24,6 +24,7 @@ from ledger.verbs import entities
 from ledger.verbs import entity
 from ledger.verbs import export
 from ledger.verbs import export_item
+from ledger.verbs import grants
 from ledger.verbs import guidance
 from ledger.verbs import index
 from ledger.verbs import link
@@ -53,6 +54,7 @@ MODULES = (
     entity,
     export,
     export_item,
+    grants,
     guidance,
     index,
     link,

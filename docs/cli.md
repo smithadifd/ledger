@@ -174,6 +174,18 @@ to `## <section>: N more`, and every section after it then prints only its
 floor, so depth-2 items go first. An unknown id exits 1, as `card` does. The
 card stays the per-item view.
 
+**`grants [--check GRANT_ID]`** List trust grants from election records. A
+`decision.elected` whose `question_id` starts `grant:`, `countersign:` or
+`rung:` is a grant, keyed by that id across items; the newest election per id
+decides. `granted` is `STANDING` when it verifies and `UNVERIFIED` when it
+does not; any other `chosen` (`withdrawn`) is `WITHDRAWN` without verifying.
+Verified means the `quote_ref` is an `utterance.captured` a person wrote
+(`submitted-prompt` or `tool-answer`) and every quote is a byte-exact
+substring of it. The table prints one row per grant, sorted by grant id,
+under a line naming the ledger revision; `--json` prints the same rows.
+`--check` exits 0 when the grant is `STANDING`, else 3 with `grant_withdrawn`,
+`grant_unverified` or `grant_unknown`. It reports; no gate reads it.
+
 **`export-item ITEM [--ticket]`** One item's events, oldest first, without
 ephemeral events recorded before its latest close. `--ticket` instead prints
 the `### Ticket:` section its source locator points at, read with `git show`

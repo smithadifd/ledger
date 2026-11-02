@@ -74,3 +74,19 @@ migrations 0001 to 0009), in one change on top of the carve.
   `entities` and `context`.
 - `ledger/__main__.py` is still the one file here with no counterpart at
   the source commit; it was not touched.
+
+### 2026-11-02: pin moved to `205e30d6e2308036ef44750e5ce98e9f13c6df36`
+
+The tree was re-copied from `skills/_lib/ledger/` of the claude-toolkit
+repository at commit `205e30d6e2308036ef44750e5ce98e9f13c6df36` (schema
+migrations 0001 to 0009, unchanged), in one change on top of the previous pin
+move.
+
+- 88 files were compared, byte for byte, against that commit: no
+  difference for any of them. 85 are unchanged from the previous pin; 1
+  changed (`verbs/_registry.py`); 2 are new (`verbs/grants.py`,
+  `tests/test_grants.py`). No file was removed at the source.
+- New in the tree: the `grants` verb, which reads trust grants from election
+  records.
+- `ledger/__main__.py` is still the one file here with no counterpart at
+  the source commit; it was not touched.
