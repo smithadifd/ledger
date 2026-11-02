@@ -158,6 +158,7 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `append` | append a validated event of any non-reserved kind | yes |
 | `append-many` | append several events for one item in one transaction (JSON array on stdin) | yes |
 | `spec` | `set`, `show` or `diff` an item's versioned spec | `set` |
+| `entity` | `register` an automation, project, machine or model, or `set` its state fields | yes |
 | `elect` | record an election with quote provenance | yes |
 | `pick` | record a question-picker answer as an utterance plus an election | yes |
 | `guidance` | `set`, `list` or `withdraw` a dated burn-or-protect note for a resource pool | `set`, `withdraw` |
@@ -165,6 +166,8 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `ready` | list open items with no open blocker | no |
 | `card` | render a bounded resume card for an item | no |
 | `decisions` | list decision records with their current standing | no |
+| `entities` | render the entity registry as markdown tables or JSON, naming the ledger revision | no |
+| `context` | print a bounded orientation pack for an item or initiative and its linked items | no |
 | `export-item` | print one item's events (ephemeral ones decay after close) | no |
 | `search` | full-text search over items, decisions, utterances and markdown roots | no |
 | `index` | build or rebuild the derived search index | no |
