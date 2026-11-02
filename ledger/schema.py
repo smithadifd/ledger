@@ -80,12 +80,45 @@ _SKILL = {
     "pattern": r"[A-Za-z0-9][A-Za-z0-9._:/-]*",
 }
 
+# The entity registry (verbs/entity.py writes it, v_entities reads it): an
+# automation, project, machine or model, keyed by its type and a stable id.
+ENTITY_REGISTERED_KIND = "entity.registered"
+ENTITY_STATE_KIND = "entity.state"
+ENTITY_TYPES = ("automation", "project", "machine", "model")
+# One token, unique within its type: a launchd label, a repository name, a
+# host name, a model id.
+_ENTITY_ID = {
+    "type": "string",
+    "min_len": 1,
+    "max_len": 200,
+    "pattern": r"[A-Za-z0-9][A-Za-z0-9._:/@+-]*",
+}
+# A short state value that cannot hold prose: one token, no whitespace.
+_ENTITY_TOKEN = {
+    "type": "string",
+    "min_len": 1,
+    "max_len": 64,
+    "pattern": r"[A-Za-z0-9][A-Za-z0-9._-]*",
+}
+# The state an entity carries, in the order a rendered table shows it. An
+# entity.state event names any non-empty subset; any other key is refused.
+# schedule is the one free-text field (the leak lint's --ledger-db check
+# reads it, with the title); wrapper is a path or command with no whitespace.
+_ENTITY_STATE = {
+    "schedule": {"type": "string", "min_len": 1, "max_len": 120, "single_line": True},
+    "wrapper": {"type": "string", "min_len": 1, "max_len": 300, "pattern": r"\S+"},
+    "host": _ENTITY_TOKEN,
+    "risk_class": _ENTITY_TOKEN,
+    "status": _ENTITY_TOKEN,
+}
+ENTITY_STATE_FIELDS = tuple(_ENTITY_STATE)
+
 DURABLE = "durable"
 EPHEMERAL = "ephemeral"
 SYSTEM_CLAIM_KIND = "ledger.system"
 
 
-# item_id: "required" | "optional"
+# item_id: "required" | "optional" | "absent" (refused when given)
 SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
     ("item.created", 1): {
         "item_id": "required",
@@ -442,6 +475,35 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
         },
         "optional": {"source": _SOURCE},
     },
+    # One registered entity. Only register_entity (verbs/entity.py) writes
+    # it: the store reserves the kind, and a second registration of the same
+    # (type, id) is refused. The title is free text on one line.
+    (ENTITY_REGISTERED_KIND, 1): {
+        "item_id": "absent",
+        "required": {
+            "type": {"enum": ENTITY_TYPES},
+            "id": _ENTITY_ID,
+            "title": {"type": "string", "min_len": 1, "max_len": 200, "single_line": True},
+        },
+        "optional": {},
+    },
+    # A change to a registered entity's state: a non-empty map holding only
+    # the fields whose value changed. Only set_entity_state (verbs/entity.py)
+    # writes it; v_entities takes each field's value from its newest event.
+    (ENTITY_STATE_KIND, 1): {
+        "item_id": "absent",
+        "required": {
+            "type": {"enum": ENTITY_TYPES},
+            "id": _ENTITY_ID,
+            "state": {
+                "type": "object",
+                "min_keys": 1,
+                "required": {},
+                "optional": _ENTITY_STATE,
+            },
+        },
+        "optional": {},
+    },
     # The system (for example work or home) this database belongs to. Only
     # Ledger.claim_system writes it, once, so it rides the hash chain into
     # exports and restores. The write path, restore and verify each refuse
@@ -464,6 +526,8 @@ DURABILITY: dict[str, str] = {
     "item.linked": DURABLE,
     "item.note": DURABLE,
     SPEC_KIND: DURABLE,
+    ENTITY_REGISTERED_KIND: DURABLE,
+    ENTITY_STATE_KIND: DURABLE,
     "item.tried": DURABLE,
     "item.stopped": DURABLE,
     "item.progress": EPHEMERAL,
@@ -572,6 +636,9 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
     if field_type == "object":
         if type(value) is not dict:
             _fail(f"bad-type:{path}")
+        min_keys = spec.get("min_keys", 0)
+        if min_keys and len(value) < min_keys:
+            _fail(f"bad-type:{path}")
         _check_object(value, spec.get("required", {}), spec.get("optional", {}), path)
         return
     _fail(f"bad-type:{path}")
@@ -618,6 +685,10 @@ def validate_item_id(kind: str, item_id: str | None, payload_version: int = 1) -
     mode = schema["item_id"]
     if item_id is not None and type(item_id) is not str:
         _fail("bad-type:item_id")
+    if mode == "absent":
+        if item_id:
+            _fail("unexpected-key:item_id")
+        return None
     if mode == "required":
         if not item_id:
             _fail("missing-key:item_id")

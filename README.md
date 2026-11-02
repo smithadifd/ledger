@@ -42,7 +42,7 @@ the first write it prints:
 
 ```text
 path: /tmp/ledger-demo/ledger.db
-schema_version: 8
+schema_version: 9
 search: missing (ledger index rebuilds it)
 ```
 

@@ -54,3 +54,23 @@ the claude-toolkit repository at commit
   not carried over: it wires that repository's plugin verbs and search root
   into `ledger.cli.main`, which is the embedding described in
   [docs/embedding.md](docs/embedding.md), and stays with that repository.
+
+## Pin moves
+
+### 2026-11-02: pin moved to `259f280ba6af0a5af2a45beebdc88ba8a5f0b1d9`
+
+The tree was re-copied from `skills/_lib/ledger/` of the claude-toolkit
+repository at commit `259f280ba6af0a5af2a45beebdc88ba8a5f0b1d9` (schema
+migrations 0001 to 0009), in one change on top of the carve.
+
+- 86 files were compared, byte for byte, against that commit: no
+  difference for any of them. 74 are unchanged from the carve; 6 changed
+  (`schema.py`, `store.py`, `verbs/_registry.py`, and the tests
+  `test_cli.py`, `test_ledger.py`, `test_loop_writer_identity.py`); 6 are new
+  (`migrations/0009_entities.sql`, `verbs/entity.py`, `verbs/entities.py`,
+  `verbs/context.py`, `tests/test_entities.py`, `tests/test_context.py`).
+  No file was removed at the source.
+- New in the tree: migration 0009 (`v_entities`) and the verbs `entity`,
+  `entities` and `context`.
+- `ledger/__main__.py` is still the one file here with no counterpart at
+  the source commit; it was not touched.

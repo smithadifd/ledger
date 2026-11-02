@@ -16,9 +16,12 @@ from ledger.verbs import append_many
 from ledger.verbs import backup
 from ledger.verbs import card
 from ledger.verbs import claim
+from ledger.verbs import context
 from ledger.verbs import decisions
 from ledger.verbs import doctor
 from ledger.verbs import elect
+from ledger.verbs import entities
+from ledger.verbs import entity
 from ledger.verbs import export
 from ledger.verbs import export_item
 from ledger.verbs import guidance
@@ -42,9 +45,12 @@ MODULES = (
     backup,
     card,
     claim,
+    context,
     decisions,
     doctor,
     elect,
+    entities,
+    entity,
     export,
     export_item,
     guidance,

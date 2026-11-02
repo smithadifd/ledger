@@ -108,6 +108,9 @@ def test_every_v1_kind_is_registered() -> None:
         "ledger.system",
         # set_spec alone writes it (test_item_spec covers it).
         "item.spec",
+        # the entity verb alone writes them (test_entities covers them).
+        "entity.registered",
+        "entity.state",
     }
 
 
@@ -564,6 +567,7 @@ def test_schema_version_recorded_and_migrate_is_idempotent(tmp_path: Path) -> No
         (6, "0006_claim_lease.sql"),
         (7, "0007_actor_operator.sql"),
         (8, "0008_item_spec_version.sql"),
+        (9, "0009_entities.sql"),
     ]
 
 

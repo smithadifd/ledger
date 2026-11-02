@@ -677,6 +677,7 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
         "append-many",
         "claim",
         "elect",
+        "entity",
         "guidance",
         "link",
         "new",
@@ -822,6 +823,34 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
                     "safe",
                     "--scope",
                     "this item",
+                )
+                assert code == 0, err
+            elif action == "entity":
+                # An entity is registry state, not item state: its events
+                # carry no item id, so they never close an item or link a
+                # merge, even under an id that echoes the item's.
+                entity_type = rng.choice(("automation", "project", "machine", "model"))
+                entity_id = f"{item_id}.{step}"
+                code, _out, err = invoke(
+                    monkeypatch,
+                    db,
+                    "entity",
+                    "register",
+                    entity_type,
+                    entity_id,
+                    "--title",
+                    f"Entity {suffix}",
+                )
+                assert code == 0, err
+                code, _out, err = invoke(
+                    monkeypatch,
+                    db,
+                    "entity",
+                    "set",
+                    entity_type,
+                    entity_id,
+                    "--status",
+                    "closed",
                 )
                 assert code == 0, err
             elif action == "guidance":

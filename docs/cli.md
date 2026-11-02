@@ -101,6 +101,25 @@ prints a version; `diff ITEM [FROM [TO]]` prints the change field by field.
 A claim stamps the spec version it was made against, and the card shows
 `spec moved: vN → vM` when the spec changed under a claim.
 
+## Entity verbs
+
+**`entity register TYPE ID --title TITLE`**
+**`entity set TYPE ID [--schedule S] [--wrapper W] [--host H] [--risk-class R] [--status S]`**
+Keep a registry of automations, projects, machines and models as ledger
+state, keyed by type and a stable id. `register` adds an entity; registering
+a key that exists is refused. `set` appends only the fields whose value
+changed, and when none did it writes nothing and reports `unchanged`; a state
+field the schema does not name is refused. `entity` is the only writer of the
+reserved `entity.registered` and `entity.state` kinds (`append` and
+`append-many` refuse them) and needs `LEDGER_HARNESS`.
+
+**`entities [--type TYPE] [--format md|json]`** List the registry from
+`v_entities`. `--format json` prints a list of
+`{type, id, title, state, revision}`, where `revision` is the entity's newest
+event id: the shape a drift check compares against a live registry.
+`--format md`, the default, prints one table per type under a line naming the
+ledger revision (the newest event id) it was rendered from.
+
 ## Event verbs
 
 **`append --kind KIND --payload JSON [--item ID] [--idempotency-key K] [--channel C] [--provenance-class P] [--payload-version N] [--expect-revision ID]`**
@@ -142,6 +161,18 @@ items whose lease expired.
 source event ids), fields, decisions, open questions with their options, the
 next step, links, blockers, notes and resume sections. `--md` also writes a
 markdown copy.
+
+**`context ITEM [--budget N]`** A read-only orientation pack for an item or
+an initiative (an item of type `initiative`; its members link to it with
+`link --rel item`). The header names the item, its revision as the card names
+it and the line `orientation only; not authority`. Then come the current spec,
+decisions with their standing, open questions, linked documents, the last five
+notes, and the items linked to it either way (depth 1) and to those (depth
+2). Every content line starts `event=<id>`. `--budget` counts words (default
+600). The header and spec always print; a section that does not fit collapses
+to `## <section>: N more`, and every section after it then prints only its
+floor, so depth-2 items go first. An unknown id exits 1, as `card` does. The
+card stays the per-item view.
 
 **`export-item ITEM [--ticket]`** One item's events, oldest first, without
 ephemeral events recorded before its latest close. `--ticket` instead prints

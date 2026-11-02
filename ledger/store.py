@@ -34,6 +34,8 @@ from .decisions import check_event as check_decision_event
 from .decisions import decision_records
 from .paths import SharedDatabaseError, SyncPathError, SyncPathWarning, resolve_db_path
 from .schema import (
+    ENTITY_REGISTERED_KIND,
+    ENTITY_STATE_KIND,
     SPEC_KIND,
     SYSTEM_CLAIM_KIND,
     ValidationError,
@@ -48,8 +50,10 @@ _MIGRATION_NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _RECORDED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 RESERVED_KIND_PREFIX = "loop."
 # Kinds one writer owns: claim_system writes the system claim, set_spec
-# (verbs/spec.py) writes item.spec. Generic appends refuse them.
-RESERVED_KINDS = (SYSTEM_CLAIM_KIND, SPEC_KIND)
+# (verbs/spec.py) writes item.spec, and register_entity and set_entity_state
+# (verbs/entity.py) write the entity kinds. Generic appends refuse them.
+ENTITY_KINDS = (ENTITY_REGISTERED_KIND, ENTITY_STATE_KIND)
+RESERVED_KINDS = (SYSTEM_CLAIM_KIND, SPEC_KIND, *ENTITY_KINDS)
 RESERVED_NOTE_PREFIXES = ("work:", "loop:")
 
 # Non-Cf members of Unicode's Default_Ignorable_Code_Point property. Cf
@@ -656,6 +660,17 @@ class Ledger:
             raise ValidationError("spec-writer-capability-required")
         # The spec writer owns item.spec only.
         if kwargs.get("kind") != SPEC_KIND:
+            raise ValidationError(f"reserved-kind:{kwargs.get('kind')}")
+        return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
+
+    def _append_entity_event(self, capability: object, **kwargs: Any) -> Event:
+        """Append an entity event only for the entity writer (verbs/entity.py)."""
+        from .verbs.entity import _ENTITY_WRITER_CAPABILITY
+
+        if capability is not _ENTITY_WRITER_CAPABILITY:
+            raise ValidationError("entity-writer-capability-required")
+        # The entity writer owns entity.registered and entity.state only.
+        if kwargs.get("kind") not in ENTITY_KINDS:
             raise ValidationError(f"reserved-kind:{kwargs.get('kind')}")
         return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
 

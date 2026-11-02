@@ -45,3 +45,4 @@ The schema is a numbered series of SQL files in `ledger/migrations/`, named
 | 6 | `0006_claim_lease.sql` | `v_leases`; `v_ready` treats a claim whose lease expired as open |
 | 7 | `0007_actor_operator.sql` | `v_events`, and an `operator` column on `v_leases`, split from the `<operator>/<agent>` actor |
 | 8 | `0008_item_spec_version.sql` | `v_items.spec_version`, the item's current spec version |
+| 9 | `0009_entities.sql` | `v_entities`: one row per registered entity (automation, project, machine or model) with its current state fields and newest revision |
