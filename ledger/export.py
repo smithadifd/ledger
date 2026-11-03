@@ -21,6 +21,7 @@ import json
 import math
 import os
 import re
+import secrets
 import subprocess
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -117,14 +118,54 @@ def canonical_stream(events: list[Event]) -> bytes:
     )
 
 
+_REQUIRED_STR_FIELDS = ("kind", "idempotency_key", "recorded_at", "prev_hash", "hash")
+_NULLABLE_STR_FIELDS = (
+    "item_id",
+    "actor",
+    "harness",
+    "model",
+    "session",
+    "channel",
+    "provenance_class",
+)
+
+
+def _record_int(record: Mapping[str, Any], field: str) -> int:
+    if field not in record:
+        raise ChainBroken(f"exported event is missing field {field}")
+    value = record[field]
+    if type(value) is not int:
+        raise ChainBroken(f"exported event field {field} must be an integer")
+    return value
+
+
 def event_from_record(record: Mapping[str, Any]) -> Event:
+    """Build an Event from an exported record; any bad shape is ``ChainBroken``.
+
+    A missing field, or one of the wrong type, names the field. ``load_export``
+    adds the event file name to the message.
+    """
+    if "payload" not in record:
+        raise ChainBroken("exported event is missing field payload")
     payload = record["payload"]
     if type(payload) is not dict:
         raise ChainBroken("exported event payload is not an object")
+    event_id = _record_int(record, "id")
+    payload_version = _record_int(record, "payload_version")
+    for field in _REQUIRED_STR_FIELDS:
+        if field not in record:
+            raise ChainBroken(f"exported event is missing field {field}")
+        if type(record[field]) is not str:
+            raise ChainBroken(f"exported event field {field} must be a string")
+    for field in _NULLABLE_STR_FIELDS:
+        if field not in record:
+            raise ChainBroken(f"exported event is missing field {field}")
+        if record[field] is not None and type(record[field]) is not str:
+            raise ChainBroken(f"exported event field {field} must be a string or null")
     return Event(
-        id=int(record["id"]),
+        id=event_id,
         kind=record["kind"],
-        payload_version=int(record["payload_version"]),
+        payload_version=payload_version,
         payload=payload,
         item_id=record["item_id"],
         idempotency_key=record["idempotency_key"],
@@ -201,14 +242,53 @@ def verify_stream_digest(export_dir: Path, events: list[Event]) -> str:
     return expected
 
 
+_TMP_ATTEMPTS = 16
+_TMP_FLAGS = (
+    os.O_WRONLY
+    | os.O_CREAT
+    | os.O_EXCL
+    | getattr(os, "O_NOFOLLOW", 0)
+    | getattr(os, "O_CLOEXEC", 0)
+)
+
+
+def _create_temp(directory: Path, name: str) -> tuple[int, str]:
+    """Create a fresh temp file next to the target and return (fd, path).
+
+    O_EXCL makes the create fail on any pre-existing name, including a
+    symlink, so nothing is written through it. Mode 0o666 lets the kernel
+    apply the caller's umask atomically; the process-wide mask is never read
+    or changed, so no other thread can see a transient mask.
+    """
+    for _ in range(_TMP_ATTEMPTS):
+        tmp_name = str(directory / f"{name}.{secrets.token_hex(8)}.tmp")
+        try:
+            return os.open(tmp_name, _TMP_FLAGS, 0o666), tmp_name
+        except FileExistsError:
+            continue
+    raise LedgerError(f"could not create a temporary file for {name}")
+
+
 def _atomic_write(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    with open(tmp, "wb") as handle:
-        handle.write(data)
-        handle.flush()
-        os.fsync(handle.fileno())
-    os.replace(tmp, path)
+    fd, tmp_name = _create_temp(path.parent, path.name)
+    try:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException:
+            os.close(fd)
+            raise
+        with handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except FileNotFoundError:
+            pass
+        raise
     dir_fd = os.open(str(path.parent), os.O_RDONLY)
     try:
         os.fsync(dir_fd)
@@ -463,7 +543,10 @@ def load_export(export_dir: Path) -> list[Event]:
             raise ChainBroken(f"exported file {path.name}: {exc}") from exc
         if type(record) is not dict:
             raise ChainBroken(f"exported file {path.name}: not an object")
-        event = event_from_record(record)
+        try:
+            event = event_from_record(record)
+        except ChainBroken as exc:
+            raise ChainBroken(f"exported file {path.name}: {exc}") from exc
         if event.id != file_id:
             raise ChainBroken(
                 f"exported file {path.name}: id {event.id} does not match filename"

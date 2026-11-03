@@ -90,3 +90,20 @@ move.
   records.
 - `ledger/__main__.py` is still the one file here with no counterpart at
   the source commit; it was not touched.
+
+### 2026-11-02: pin moved to `b9a3e807f7b8af662c4af06316ba4c118b498208`
+
+The tree was re-copied from `skills/_lib/ledger/` of the claude-toolkit
+repository at commit `b9a3e807f7b8af662c4af06316ba4c118b498208` (schema
+migrations 0001 to 0009, unchanged), in one change on top of the previous pin
+move.
+
+- 88 files were compared, byte for byte, against that commit: no
+  difference for any of them. 86 are unchanged from the previous pin; 2
+  changed (`export.py`, `tests/test_export_backup_restore.py`); none are new.
+  No file was removed at the source.
+- Changed in the tree: the export writes its temp file exclusively
+  (`O_EXCL`, mode `0o666` under the caller's umask) and never touches the
+  process umask; restore refuses an incomplete event cleanly.
+- `ledger/__main__.py` is still the one file here with no counterpart at
+  the source commit; it was not touched.

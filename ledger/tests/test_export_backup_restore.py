@@ -847,3 +847,234 @@ def test_backup_snapshots_wal_events_not_yet_checkpointed(tmp_path: Path) -> Non
     finally:
         copy.close()
         lg.close()
+
+
+def test_export_does_not_write_through_preexisting_tmp_symlink(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_bytes(b"precious bytes\n")
+    for name in (event_filename(1), "watermark.json", "stream-digest.json"):
+        (export_dir / (name + ".tmp")).symlink_to(outside)
+    _seed(db, 1)
+    lg = open_ledger(db)
+    export_events(lg, export_dir)
+    lg.close()
+    assert outside.read_bytes() == b"precious bytes\n"
+    assert len(verify_export(export_dir)) == 1
+    assert not (export_dir / event_filename(1)).is_symlink()
+
+
+def _export_with_record(tmp_path: Path, mutate) -> Path:
+    db = _db(tmp_path)
+    export_dir = tmp_path / "export"
+    _seed(db, 1)
+    lg = open_ledger(db)
+    export_events(lg, export_dir)
+    lg.close()
+    path = export_dir / event_filename(1)
+    path.write_text(canonical_dumps(mutate(json.loads(path.read_text("utf-8")))) + "\n",
+                    encoding="utf-8")
+    return export_dir
+
+
+def _restore_json(monkeypatch, tmp_path: Path, export_dir: Path):
+    dest = tmp_path / "fresh.db"
+    code, out, err = invoke(
+        monkeypatch,
+        ["--json", "--db", str(dest), "restore", "--dir", str(export_dir),
+         "--system", "home"],
+    )
+    return dest, code, out, err
+
+
+def test_restore_refuses_empty_event_record(tmp_path: Path, monkeypatch) -> None:
+    export_dir = _export_with_record(tmp_path, lambda record: {})
+    with pytest.raises(ChainBroken, match=r"0000000000000001\.json.*missing field payload"):
+        verify_export(export_dir)
+    dest, code, out, err = _restore_json(monkeypatch, tmp_path, export_dir)
+    assert code == EXIT_INTEGRITY
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "integrity"
+    assert "0000000000000001.json" in payload["error"]["message"]
+    assert "Traceback" not in err
+    assert not dest.exists()
+
+
+def test_restore_refuses_non_numeric_event_id(tmp_path: Path, monkeypatch) -> None:
+    def mutate(record):
+        record["id"] = "not-a-number"
+        return record
+
+    export_dir = _export_with_record(tmp_path, mutate)
+    with pytest.raises(ChainBroken, match=r"0000000000000001\.json.*field id"):
+        verify_export(export_dir)
+    dest, code, out, err = _restore_json(monkeypatch, tmp_path, export_dir)
+    assert code == EXIT_INTEGRITY
+    payload = json.loads(out)
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "integrity"
+    assert "field id" in payload["error"]["message"]
+    assert "Traceback" not in err
+    assert not dest.exists()
+
+
+def _export_mode_files(export_dir: Path) -> list[Path]:
+    return [
+        export_dir / event_filename(1),
+        export_dir / "watermark.json",
+        export_dir / "stream-digest.json",
+    ]
+
+
+@pytest.mark.parametrize(
+    "mask, expected",
+    [(0o077, 0o600), (0o022, 0o644), (0o002, 0o664), (0o000, 0o666)],
+)
+def test_export_files_follow_the_callers_umask(tmp_path: Path, mask, expected) -> None:
+    db = _db(tmp_path)
+    export_dir = tmp_path / "export"
+    _seed(db, 1)
+    lg = open_ledger(db)
+    old = os.umask(mask)
+    try:
+        export_events(lg, export_dir)
+    finally:
+        os.umask(old)
+        lg.close()
+    for path in _export_mode_files(export_dir):
+        assert path.stat().st_mode & 0o777 == expected, path.name
+
+
+def _open_fd_count() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def test_failed_write_closes_the_descriptor_and_removes_the_temp_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import ledger.export as export_mod
+
+    target = tmp_path / "out" / "file.json"
+    target.parent.mkdir()
+
+    def boom(fd):
+        raise OSError("injected fsync failure")
+
+    monkeypatch.setattr(export_mod.os, "fsync", boom)
+    before = _open_fd_count()
+    for _ in range(5):
+        with pytest.raises(OSError, match="injected fsync failure"):
+            export_mod._atomic_write(target, b"data\n")
+    assert _open_fd_count() == before
+    assert list(target.parent.iterdir()) == []
+
+
+def test_failed_fdopen_closes_the_descriptor_and_removes_the_temp_file(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import ledger.export as export_mod
+
+    target = tmp_path / "out" / "file.json"
+    target.parent.mkdir()
+
+    def boom(fd, mode):
+        raise OSError("injected fdopen failure")
+
+    monkeypatch.setattr(export_mod.os, "fdopen", boom)
+    before = _open_fd_count()
+    for _ in range(5):
+        with pytest.raises(OSError, match="injected fdopen failure"):
+            export_mod._atomic_write(target, b"data\n")
+    assert _open_fd_count() == before
+    assert list(target.parent.iterdir()) == []
+
+
+def test_export_never_touches_the_process_umask(tmp_path: Path, monkeypatch) -> None:
+    import ledger.export as export_mod
+
+    def boom(mask):
+        raise AssertionError("export must not call os.umask")
+
+    monkeypatch.setattr(export_mod.os, "umask", boom)
+    db = _db(tmp_path)
+    export_dir = tmp_path / "export"
+    _seed(db, 1)
+    lg = open_ledger(db)
+    try:
+        export_events(lg, export_dir)
+    finally:
+        lg.close()
+    assert len(verify_export(export_dir)) == 1
+
+
+def test_temp_name_collision_is_not_overwritten(tmp_path: Path, monkeypatch) -> None:
+    import ledger.export as export_mod
+
+    target = tmp_path / "out" / "file.json"
+    target.parent.mkdir()
+    squatter = target.parent / "file.json.aaaaaaaaaaaaaaaa.tmp"
+    squatter.write_bytes(b"precious bytes\n")
+    tokens = iter(["aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"])
+    monkeypatch.setattr(export_mod.secrets, "token_hex", lambda n: next(tokens))
+    export_mod._atomic_write(target, b"data\n")
+    assert squatter.read_bytes() == b"precious bytes\n"
+    assert target.read_bytes() == b"data\n"
+    assert sorted(p.name for p in target.parent.iterdir()) == [
+        "file.json",
+        "file.json.aaaaaaaaaaaaaaaa.tmp",
+    ]
+
+
+def test_temp_name_exhaustion_raises(tmp_path: Path, monkeypatch) -> None:
+    import ledger.export as export_mod
+
+    target = tmp_path / "out" / "file.json"
+    target.parent.mkdir()
+    (target.parent / "file.json.cccccccccccccccc.tmp").write_bytes(b"x")
+    monkeypatch.setattr(export_mod.secrets, "token_hex", lambda n: "cccccccccccccccc")
+    with pytest.raises(LedgerError, match="could not create a temporary file"):
+        export_mod._atomic_write(target, b"data\n")
+    assert not target.exists()
+
+
+def _restore_refusal(tmp_path: Path, mutate, field: str) -> None:
+    export_dir = _export_with_record(tmp_path, mutate)
+    with pytest.raises(
+        ChainBroken, match=rf"0000000000000001\.json.*field {field}"
+    ):
+        verify_export(export_dir)
+
+
+def test_restore_refuses_missing_required_string_field(tmp_path: Path) -> None:
+    def mutate(record):
+        del record["idempotency_key"]
+        return record
+
+    _restore_refusal(tmp_path, mutate, "idempotency_key")
+
+
+def test_restore_refuses_null_kind(tmp_path: Path) -> None:
+    def mutate(record):
+        record["kind"] = None
+        return record
+
+    _restore_refusal(tmp_path, mutate, "kind")
+
+
+def test_restore_refuses_missing_nullable_field(tmp_path: Path) -> None:
+    def mutate(record):
+        del record["actor"]
+        return record
+
+    _restore_refusal(tmp_path, mutate, "actor")
+
+
+def test_restore_refuses_non_string_actor(tmp_path: Path) -> None:
+    def mutate(record):
+        record["actor"] = 5
+        return record
+
+    _restore_refusal(tmp_path, mutate, "actor")
