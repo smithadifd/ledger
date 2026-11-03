@@ -124,21 +124,34 @@ $ cat step.json
  {"kind": "item.state", "item_id": "tk-1", "payload": {"status": "claimed"},         "idempotency_key": "tk-1:claim:1"}]
 $ ledger --json append-many tk-1 --expect-revision 5 < step.json
 {"ok": true, "data": {"item_id": "tk-1", "events": [{"id": 6, "kind": "item.note", ...}, {"id": 7, "kind": "item.state", ...}]}}
-$ ledger --json append-many tk-1 --expect-revision 5 < step.json
-{"ok": false, "error": {"code": "stale_revision", "message": "stale revision for item tk-1: expected 5, current is 7 (...)"}}   # exit 5
 ```
 
 A pass that crashed after the batch landed replays the same step on resume.
-The idempotency keys make that safe: the replay returns the stored events
-and writes nothing, and the chain is unchanged.
+The idempotency keys make that safe: the replay returns the stored events,
+exits 0 and writes nothing, whatever revision it names, and the chain is
+unchanged.
 
 ```sh
-$ ledger --json append-many tk-1 < step.json
+$ ledger --json append-many tk-1 --expect-revision 5 < step.json
 {"ok": true, "data": {"item_id": "tk-1", "events": [{"id": 6, "idempotency_key": "tk-1:plan:1", ...}, {"id": 7, "idempotency_key": "tk-1:claim:1", ...}]}}
+```
+
+A lost race is a *different* step written from stale knowledge: another
+session has moved the item to revision 7, and this one still believes it is
+at 5. The write is refused, the pass reports it and stops, and the next open
+re-reads the events before deciding again:
+
+```sh
+$ cat step2.json
+[{"kind": "item.note", "item_id": "tk-1", "payload": {"text": "build: started"}, "idempotency_key": "tk-1:build:1"}]
+$ ledger --json append-many tk-1 --expect-revision 5 < step2.json
+{"ok": false, "error": {"code": "stale_revision", "message": "stale revision for item tk-1: expected 5, current is 7 (...)"}}   # exit 5
+$ ledger --json append-many tk-1 --expect-revision 7 < step2.json
+{"ok": true, "data": {"item_id": "tk-1", "events": [{"id": 8, "kind": "item.note", "idempotency_key": "tk-1:build:1", ...}]}}
 $ ledger --json export-item tk-1
-{"ok": true, "data": {"item_id": "tk-1", "events": [{"id": 5, "kind": "item.created", ...}, {"id": 6, "kind": "item.note", "idempotency_key": "tk-1:plan:1", ...}, {"id": 7, "kind": "item.state", "idempotency_key": "tk-1:claim:1", ...}]}}
+{"ok": true, "data": {"item_id": "tk-1", "events": [{"id": 5, "kind": "item.created", ...}, {"id": 6, "kind": "item.note", "idempotency_key": "tk-1:plan:1", ...}, {"id": 7, "kind": "item.state", "idempotency_key": "tk-1:claim:1", ...}, {"id": 8, "kind": "item.note", "idempotency_key": "tk-1:build:1", ...}]}}
 $ ledger verify
-ok events=7
+ok events=8
 ```
 
 ## Writing your own integration
