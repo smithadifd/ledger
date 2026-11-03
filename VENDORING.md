@@ -40,7 +40,7 @@ bumps its pin and re-copies the tree in one change.
 ## Carve record
 
 This repository was carved, without history, from `skills/_lib/ledger/` of
-the claude-toolkit repository at commit
+its origin repository (a private toolkit) at commit
 `b96a61b74e15459c2988d4274aafa55b7593b499` (schema migrations 0001 to
 0008).
 
@@ -59,8 +59,8 @@ the claude-toolkit repository at commit
 
 ### 2026-11-02: pin moved to `259f280ba6af0a5af2a45beebdc88ba8a5f0b1d9`
 
-The tree was re-copied from `skills/_lib/ledger/` of the claude-toolkit
-repository at commit `259f280ba6af0a5af2a45beebdc88ba8a5f0b1d9` (schema
+The tree was re-copied from `skills/_lib/ledger/` of the origin
+repository (a private toolkit) at commit `259f280ba6af0a5af2a45beebdc88ba8a5f0b1d9` (schema
 migrations 0001 to 0009), in one change on top of the carve.
 
 - 86 files were compared, byte for byte, against that commit: no
@@ -77,8 +77,8 @@ migrations 0001 to 0009), in one change on top of the carve.
 
 ### 2026-11-02: pin moved to `205e30d6e2308036ef44750e5ce98e9f13c6df36`
 
-The tree was re-copied from `skills/_lib/ledger/` of the claude-toolkit
-repository at commit `205e30d6e2308036ef44750e5ce98e9f13c6df36` (schema
+The tree was re-copied from `skills/_lib/ledger/` of the origin
+repository (a private toolkit) at commit `205e30d6e2308036ef44750e5ce98e9f13c6df36` (schema
 migrations 0001 to 0009, unchanged), in one change on top of the previous pin
 move.
 
@@ -93,8 +93,8 @@ move.
 
 ### 2026-11-02: pin moved to `b9a3e807f7b8af662c4af06316ba4c118b498208`
 
-The tree was re-copied from `skills/_lib/ledger/` of the claude-toolkit
-repository at commit `b9a3e807f7b8af662c4af06316ba4c118b498208` (schema
+The tree was re-copied from `skills/_lib/ledger/` of the origin
+repository (a private toolkit) at commit `b9a3e807f7b8af662c4af06316ba4c118b498208` (schema
 migrations 0001 to 0009, unchanged), in one change on top of the previous pin
 move.
 
