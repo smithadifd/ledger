@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Test suite
+        run: python -m pytest -q -p no:cacheprovider
+      - name: Verb registry is current
+        run: python -m ledger.gen_verb_registry --check
+      - name: Doctor on a fresh database
+        env:
+          LEDGER_HARNESS: ci
+        run: |
+          mkdir -p "$RUNNER_TEMP/ledger-ci"
+          db="$RUNNER_TEMP/ledger-ci/ledger.db"
+          python -m ledger --db "$db" new --type ticket --title "CI smoke item"
+          python -m ledger --db "$db" doctor
+          python -m ledger --db "$db" verify
