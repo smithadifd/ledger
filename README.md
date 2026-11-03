@@ -430,7 +430,8 @@ Little here is new. Each line names what the ledger took from the source.
 To report a problem or ask a question, open an issue on the repository's
 GitHub issue tracker. Say which verb it concerns, what you ran, what you
 expected and what happened; `ledger --json` output and the exit code are the
-most useful things to include.
+most useful things to include. Report a security problem privately instead,
+as [SECURITY.md](SECURITY.md) describes.
 
 To propose a change, open a pull request from a branch. Keep it to one
 change, and add or update a test that fails without it. Before you ask for
