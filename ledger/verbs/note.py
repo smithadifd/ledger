@@ -33,7 +33,7 @@ def add_arguments(parser) -> None:
     parser.epilog = EPILOG
     parser.formatter_class = argparse.RawDescriptionHelpFormatter
     parser.add_argument("item")
-    parser.add_argument("text", nargs="?", metavar="TEXT", help="the note's text")
+    parser.add_argument("text", nargs="*", metavar="TEXT", help="the note's text")
     parser.add_argument(
         "--text", dest="text_option", metavar="TEXT", help="the note's text, as a flag"
     )
@@ -41,11 +41,11 @@ def add_arguments(parser) -> None:
 
 
 def _text(args) -> str:
-    positional = getattr(args, "text", None)
+    positional = list(getattr(args, "text", None) or [])
     option = getattr(args, "text_option", None)
-    if (positional is None) == (option is None):
+    if len(positional) + (option is not None) != 1:
         raise UsageError(USAGE)
-    return positional if positional is not None else option
+    return positional[0] if positional else option
 
 
 def run(args, ctx: Context) -> Result:
@@ -76,4 +76,5 @@ VERB = Verb(
     add_arguments=add_arguments,
     run=run,
     writes=True,
+    late_positional="text",
 )

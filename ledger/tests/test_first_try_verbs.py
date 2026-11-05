@@ -551,3 +551,79 @@ def test_next_step_resume_command_keeps_a_hostile_id_one_token(tmp_path, monkeyp
     code, out, err = invoke(monkeypatch, ["--db", db, *tokens[1:]])
     assert code == 0, err
     assert item_id in out
+
+
+# --- positionals that follow an option (older argparse leaves them over) ----
+
+
+def _parsed(verb_name, dests, extras):
+    import argparse
+
+    from ledger import cli
+    from ledger.verbs import discover_verbs
+
+    verb = discover_verbs()[verb_name]
+    args = argparse.Namespace(_verb=verb, **dests)
+    return cli._take_late_positionals(cli.LedgerParser(prog="ledger"), args, extras)
+
+
+@pytest.mark.parametrize(
+    ("verb", "dest", "start", "extras", "want"),
+    [
+        ("link", "positional_target", [], ["feat/retry"], ["feat/retry"]),
+        ("note", "text", [], ["late words"], ["late words"]),
+        ("search", "query", ["zebra"], ["stripes"], ["zebra", "stripes"]),
+    ],
+)
+def test_positionals_left_over_after_an_option_are_taken_by_the_verb(
+    verb, dest, start, extras, want
+):
+    # Python 3.11's argparse hands a positional that follows an option back as
+    # an extra; the verb that declares it takes it in order.
+    assert getattr(_parsed(verb, {dest: list(start)}, extras), dest) == want
+
+
+@pytest.mark.parametrize(
+    ("verb", "dest", "extras"),
+    [
+        ("link", "positional_target", ["--nope"]),  # an unknown option is still an error
+        ("new", "title", ["stray"]),  # a verb with no late positional refuses extras
+    ],
+)
+def test_other_leftover_arguments_stay_a_usage_error(verb, dest, extras):
+    from ledger.verbs import UsageError
+
+    with pytest.raises(UsageError) as refused:
+        _parsed(verb, {dest: []}, extras)
+    assert "unrecognized arguments" in str(refused.value)
+
+
+def test_note_and_search_take_a_positional_after_an_option(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    _seed(monkeypatch, db)
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "note", ITEM, "--expect-revision", "1", "after the flag"]
+    )
+    assert code == 0, err
+    assert _events(db)[-1] == ("item.note", {"text": "after the flag"})
+
+    code, out, err = invoke(
+        monkeypatch, ["--json", "--db", db, "search", "--limit", "5", "after", "flag"]
+    )
+    assert code == 0, err
+    assert json.loads(out)["data"]["query"] == "after flag"
+
+
+def test_link_takes_a_target_after_rel_and_extra_words_are_refused(tmp_path, monkeypatch):
+    db = _db(tmp_path)
+    _seed(monkeypatch, db)
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "link", ITEM, "--rel", "branch", "feat/retry"]
+    )
+    assert code == 0, err
+    assert _events(db)[-1] == ("item.linked", {"rel": "branch", "target": "feat/retry"})
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "link", ITEM, "--rel", "branch", "a", "b"]
+    )
+    assert code == EXIT_USAGE
+    assert "link ITEM TARGET" in err

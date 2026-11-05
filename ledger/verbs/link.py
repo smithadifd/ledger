@@ -174,4 +174,5 @@ VERB = Verb(
     add_arguments=add_arguments,
     run=run,
     writes=True,
+    late_positional="positional_target",
 )

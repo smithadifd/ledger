@@ -122,6 +122,27 @@ def _ok(json_mode: bool, result: Result) -> int:
     return result.exit_code
 
 
+def _take_late_positionals(
+    parser: argparse.ArgumentParser, args: argparse.Namespace, extras: list[str]
+) -> argparse.Namespace:
+    """Give leftover positionals to the verb's ``late_positional`` list.
+
+    Older argparse (3.11) does not fill a positional that comes after an
+    option (``link ITEM --rel pr 123``) and returns it as an extra; newer
+    versions fill it, so there is nothing left. Anything else left over, an
+    option or any extra for a verb that declares no such positional, is the
+    usual usage error.
+    """
+    if not extras:
+        return args
+    verb = getattr(args, "_verb", None)
+    dest = getattr(verb, "late_positional", None)
+    if dest is None or any(extra.startswith("-") for extra in extras):
+        parser.error("unrecognized arguments: " + " ".join(extras))
+    setattr(args, dest, [*(getattr(args, dest, None) or []), *extras])
+    return args
+
+
 def _run(
     argv: list[str],
     json_mode: bool,
@@ -136,7 +157,8 @@ def _run(
             raise RuntimeError(f"duplicate ledger verb: {name}")
         table[name] = extra
     parser = build_parser(table)
-    args = parser.parse_args(argv)
+    args, extras = parser.parse_known_args(argv)
+    args = _take_late_positionals(parser, args, extras)
     json_mode = bool(getattr(args, "json", False) or json_mode)
     db = args.db or _env("LEDGER_DB")
     if not db:

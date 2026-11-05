@@ -120,4 +120,5 @@ VERB = Verb(
     help="full-text search over items, decisions, standards and ADRs",
     add_arguments=add_arguments,
     run=run,
+    late_positional="query",
 )
