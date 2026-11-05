@@ -25,7 +25,31 @@ from ledger.verbs.resume import SHORT_FORM, _entry_text
 from test_cli import invoke, seed
 
 REPO = Path(__file__).resolve().parents[2]
-CONTRACT = REPO / "docs" / "agent-contract.md"
+
+
+def _docs_root() -> Path:
+    """Where the repository files (README, docs/) are read from.
+
+    ``LEDGER_REPO_ROOT`` names a repository root; unset, it is the folder that
+    holds ``ledger/``. A copy of ``ledger/`` alone has no such files beside it.
+    """
+    override = os.environ.get("LEDGER_REPO_ROOT")
+    return Path(override) if override else REPO
+
+
+def _missing_docs(root: Path) -> list[str]:
+    return [rel for rel in ("README.md", "docs/agent-contract.md")
+            if not (root / rel).is_file()]
+
+
+def _need_docs() -> Path:
+    """The docs root, or a named skip when the repository files are absent."""
+    root = _docs_root()
+    missing = _missing_docs(root)
+    if missing:
+        pytest.skip(f"repository files absent under {root} ({', '.join(missing)}): "
+                    "vendored copy; set LEDGER_REPO_ROOT to a repository root to run")
+    return root
 
 
 def _db(tmp_path: Path) -> str:
@@ -59,7 +83,7 @@ def _run_printed(command: str) -> subprocess.CompletedProcess[str]:
 
 
 def _triggers() -> list[str]:
-    text = CONTRACT.read_text(encoding="utf-8")
+    text = (_need_docs() / "docs" / "agent-contract.md").read_text(encoding="utf-8")
     section = text.split("## Write triggers", 1)[1].split("\n## ", 1)[0]
     return re.findall(r"^- \*\*(.+?)\*\*", section, flags=re.MULTILINE)
 
@@ -367,7 +391,26 @@ def test_actor_stamps_in_the_environment_reach_the_event(tmp_path, monkeypatch) 
 
 
 def test_readme_and_contract_page_never_say_pick_up() -> None:
-    for path in (REPO / "README.md", CONTRACT):
+    root = _need_docs()
+    for path in (root / "README.md", root / "docs" / "agent-contract.md"):
         assert "pick up" not in path.read_text(encoding="utf-8").lower(), path
-    readme = (REPO / "README.md").read_text(encoding="utf-8")
+    readme = (root / "README.md").read_text(encoding="utf-8")
     assert "docs/agent-contract.md" in readme and "ledger resume --brief" in readme
+
+
+def test_repository_files_are_present_in_this_repository(monkeypatch) -> None:
+    """In this repository the repository-file tests must run, never skip."""
+    monkeypatch.delenv("LEDGER_REPO_ROOT", raising=False)
+    if not (REPO / "pyproject.toml").is_file():
+        return  # a vendored copy: the doc tests skip by name
+    assert _missing_docs(_docs_root()) == []
+
+
+def test_repo_root_override_points_the_doc_tests_elsewhere(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LEDGER_REPO_ROOT", str(tmp_path))
+    assert _docs_root() == tmp_path
+    assert _missing_docs(tmp_path) == ["README.md", "docs/agent-contract.md"]
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "README.md").write_text("x", encoding="utf-8")
+    (tmp_path / "docs" / "agent-contract.md").write_text("x", encoding="utf-8")
+    assert _missing_docs(tmp_path) == []
