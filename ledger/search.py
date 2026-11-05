@@ -281,6 +281,39 @@ def _event_micros(recorded_at: Any) -> int | None:
     return _micros(moment)
 
 
+def newest_event_times(
+    events: Iterable[tuple[str | None, Any]],
+) -> dict[str, tuple[int, str]]:
+    """Each item's newest event time, by recorded time, from (item_id, recorded_at).
+
+    An item's date is its newest event of any kind; events with no item or an
+    unparseable time are skipped, and on a tie the first event wins.
+    """
+    newest: dict[str, tuple[int, str]] = {}
+    for item_id, recorded_at in events:
+        if item_id is None:
+            continue
+        micros = _event_micros(recorded_at)
+        if micros is not None and (item_id not in newest or micros > newest[item_id][0]):
+            newest[item_id] = (micros, recorded_at)
+    return newest
+
+
+def in_window(micros: int | None, since: datetime | None, until: datetime | None) -> bool:
+    """True when ``micros`` lies in the inclusive ``since``..``until`` window.
+
+    No bound keeps everything; with a bound, a document with no date is out,
+    as in the index's ``ts >= ? AND ts <= ?`` filter.
+    """
+    if since is None and until is None:
+        return True
+    if micros is None:
+        return False
+    if since is not None and micros < _micros(since):
+        return False
+    return until is None or micros <= _micros(until)
+
+
 def _mtime_date(mtime_ns: int) -> tuple[str, int]:
     micros = mtime_ns // 1000
     moment = _EPOCH + timedelta(microseconds=micros)
@@ -302,16 +335,11 @@ def initiative_links(events: Iterable[Event]) -> set[tuple[str, str]]:
 def ledger_docs(items: Sequence[Mapping[str, Any]], events: Sequence[Event]) -> list[Doc]:
     statuses = {row["item_id"]: row["status"] for row in items}
     # An item's date is its newest event by recorded time, any kind.
-    newest: dict[str, tuple[int, str]] = {}
+    newest = newest_event_times((event.item_id, event.recorded_at) for event in events)
     notes: dict[str, list[str]] = {}
     for event in events:
         if event.item_id is None:
             continue
-        micros = _event_micros(event.recorded_at)
-        if micros is not None and (
-            event.item_id not in newest or micros > newest[event.item_id][0]
-        ):
-            newest[event.item_id] = (micros, event.recorded_at)
         if event.kind == "item.note":
             notes.setdefault(event.item_id, []).append(event.payload.get("text", ""))
         elif event.kind == "item.linked":
@@ -750,7 +778,13 @@ def search(
     index_state = index_status(resolved, fallback_root)
     refreshed = index_state["status"] != "current"
     if refreshed:
-        build_index(resolved, fallback_root)
+        try:
+            build_index(resolved, fallback_root)
+        except (OSError, sqlite3.Error) as exc:
+            # Never answer from the stale index it could not replace.
+            raise SearchError(
+                f"cannot rebuild the stale search index {search_db_path(resolved)}: {exc}"
+            ) from exc
     index = search_db_path(resolved)
     sql = (
         "SELECT fts_corpus.doc_type, fts_corpus.doc_id, fts_corpus.title, "

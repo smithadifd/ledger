@@ -62,6 +62,10 @@ class Verb:
     add_arguments: Callable[[Any], None]
     run: Callable[[Any, Context], Result]
     writes: bool = False
+    # The name of a list-valued positional that may follow an option. Python
+    # 3.11's argparse leaves such a positional over as an unrecognized
+    # argument (3.12 fills it), so the CLI hands the leftovers to this one.
+    late_positional: str | None = None
 
 
 @dataclass
