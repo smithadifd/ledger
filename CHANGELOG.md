@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.6 — 2026-11-05
+
+`ledger link --rel duplicate-of --idempotency-key K` now reserves `K` itself. Before, it wrote its two events under `K:link` and `K:close` and never looked at `K`, so a plain `link` under `K` followed by a `duplicate-of` call under the same `K` succeeded, wrote both events and closed the item. Now the link event of a duplicate-of is written under `K` (the same slot a plain link uses) and the close under `K:close`. The same key with another mode, target or content is refused as `conflict` (exit 3) and writes nothing; a retry of the same call still returns both stored events; only one of the pair present still refuses as `partial_write`. A duplicate-of written under 0.1.5 stored its link as `K:link`, which this version does not read as `K`; retry such a call across the upgrade with a new key (LC34).
+
+Upgrade with `@v0.1.6`.
+
 ## 0.1.5 — 2026-11-05
 
 Two fixes for everyday agent use. Nothing is renamed, and every command that worked in 0.1.4 works the same way.

@@ -185,13 +185,91 @@ def test_duplicate_of_refuses_a_half_written_key_by_name(monkeypatch, db: str) -
     code, _out, err = _run(
         monkeypatch, db, "append", "--kind", "item.linked", "--item", "it-a",
         "--payload", json.dumps({"rel": "duplicate-of", "target": "it-b"}),
-        "--idempotency-key", "d-1:link",
+        "--idempotency-key", "d-1",
     )
     assert code == 0, err
     before = _count(db)
     code, out, _err = _run(monkeypatch, db, *_dup("--idempotency-key", "d-1"))
     assert code == EXIT_REFUSED
     assert out["error"]["code"] == "partial_write"
+    assert _count(db) == before
+
+
+def _lone_dup_link(monkeypatch, db: str, item: str, target: str) -> None:
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "new", "--id", "it-c", "--type", "ticket", "--title", "c"]
+    )
+    assert code == 0, err
+    code, _out, err = _run(
+        monkeypatch, db, "append", "--kind", "item.linked", "--item", item,
+        "--payload", json.dumps({"rel": "duplicate-of", "target": target}),
+        "--idempotency-key", "d-1",
+    )
+    assert code == 0, err
+
+
+def test_duplicate_of_lone_link_with_other_target_conflicts(monkeypatch, db: str) -> None:
+    _lone_dup_link(monkeypatch, db, "it-a", "it-c")
+    before = _count(db)
+    code, out, _err = _run(monkeypatch, db, *_dup("--idempotency-key", "d-1"))
+    assert code == EXIT_REFUSED
+    assert out["error"]["code"] == "conflict"
+    assert _count(db) == before
+
+
+def test_duplicate_of_lone_link_on_other_item_conflicts(monkeypatch, db: str) -> None:
+    _lone_dup_link(monkeypatch, db, "it-c", "it-b")
+    before = _count(db)
+    code, out, _err = _run(monkeypatch, db, *_dup("--idempotency-key", "d-1"))
+    assert code == EXIT_REFUSED
+    assert out["error"]["code"] == "conflict"
+    assert _count(db) == before
+
+
+def test_duplicate_of_refuses_a_lone_close_by_name(monkeypatch, db: str) -> None:
+    # Only the close event exists under the key's close slot.
+    code, _out, err = _run(
+        monkeypatch, db, "append", "--kind", "item.state", "--item", "it-a",
+        "--payload", json.dumps({"status": "closed", "reason": "x"}),
+        "--idempotency-key", "d-1:close",
+    )
+    assert code == 0, err
+    before = _count(db)
+    code, out, _err = _run(monkeypatch, db, *_dup("--idempotency-key", "d-1"))
+    assert code == EXIT_REFUSED
+    assert out["error"]["code"] == "partial_write"
+    assert _count(db) == before
+
+
+def _status(db: str, item_id: str) -> str:
+    with open_ledger(db, create=False) as lg:
+        return lg.item(item_id)["status"]
+
+
+def test_plain_link_then_duplicate_of_same_key_conflicts(monkeypatch, db: str) -> None:
+    code, _out, err = _run(
+        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "pr-1",
+        "--idempotency-key", "k-1",
+    )
+    assert code == 0, err
+    before = _count(db)
+    code, out, _err = _run(monkeypatch, db, *_dup("--idempotency-key", "k-1"))
+    assert code == EXIT_REFUSED
+    assert out["error"]["code"] == "conflict"
+    assert _count(db) == before
+    assert _status(db, "it-a") != "closed"
+
+
+def test_duplicate_of_then_plain_link_same_key_conflicts(monkeypatch, db: str) -> None:
+    code, _out, err = _run(monkeypatch, db, *_dup("--idempotency-key", "k-1"))
+    assert code == 0, err
+    before = _count(db)
+    code, out, _err = _run(
+        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "pr-1",
+        "--idempotency-key", "k-1",
+    )
+    assert code == EXIT_REFUSED
+    assert out["error"]["code"] == "conflict"
     assert _count(db) == before
 
 
