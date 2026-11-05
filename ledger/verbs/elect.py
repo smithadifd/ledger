@@ -78,6 +78,12 @@ def add_arguments(parser) -> None:
         type=int,
         help="event id of the open decision.asked this election answers",
     )
+    parser.add_argument(
+        "--idempotency-key",
+        metavar="KEY",
+        help="make a retry safe: the same key and content returns the stored "
+        "event and writes nothing; the same key with different content is refused",
+    )
 
 
 def _require_nonempty(name: str, value: str) -> None:
@@ -273,7 +279,7 @@ def run(args, ctx: Context) -> Result:
             quote_ref=args.quote_ref,
             quotes=args.quotes,
             asked_event_id=args.ask,
-            idempotency_key=new_key(),
+            idempotency_key=getattr(args, "idempotency_key", None) or new_key(),
             **actor_kwargs(ctx),
         )
     finally:
