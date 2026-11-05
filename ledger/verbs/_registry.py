@@ -35,6 +35,7 @@ from ledger.verbs import pick
 from ledger.verbs import query
 from ledger.verbs import ready
 from ledger.verbs import restore
+from ledger.verbs import resume
 from ledger.verbs import search
 from ledger.verbs import spec
 from ledger.verbs import state
@@ -65,6 +66,7 @@ MODULES = (
     query,
     ready,
     restore,
+    resume,
     search,
     spec,
     state,

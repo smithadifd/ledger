@@ -227,3 +227,15 @@ budget) should be spent down (`burn`) or held back (`protect`), and why. One
 item stands for one pool and direction; setting it again appends a new
 version and the latest wins; `withdraw` closes it early. Guidance is advice
 for whatever reads it: the ledger records it and enforces nothing.
+
+## Resume
+
+**`resume [--item ID] [--brief]`**
+For each open item that has an `item.stopped` event, print the newest stop
+(its point, the skills to invoke next, the files to read) and the commands
+that continue it: `ledger --db PATH resume --item ID` and
+`ledger --db PATH card ID`. With `--item`, show only that item (exit 1 when
+it does not exist). `--brief` first prints the short form of the agent
+contract ([agent-contract.md](agent-contract.md)), so a session-start hook can
+print both. It never writes, and a database that does not exist yet prints
+`no open items` and exits 0.
