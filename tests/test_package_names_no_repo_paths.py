@@ -22,15 +22,27 @@ the repository name split across statements. Per module, flat over all scopes:
   ``+`` concatenation whose leading constant part, or another repo-named name,
   has a first path component that is one of the repository's top-level
   entries; this joins the same fixed point;
+* destructuring pairs element-wise when target and value are tuples or lists
+  of equal length without a starred element (nested ones recursively); any
+  other destructuring (starred, unequal length, non-literal value) pairs each
+  target with the whole value, which never makes a name repo-named;
 * a ``/`` expression, ``joinpath(...)``, ``os.path.join(...)``/``join(...)`` or
   ``Path(...)`` call is flagged when its subtree holds a traversal or a
   tainted name AND a string constant or repo-named name for one of the
   repository's top-level entries; the joining expression's file:line is reported.
 
-Not read: names built at run time (``getattr``, ``exec``, string formatting or
-concatenation), values imported from another module, and taint that flows
-through function arguments or return values. A Python file that does not parse
-is itself a violation.
+Not read: a repository entry that is not the leading part of the string (an
+f-string or ``+`` whose first piece is not the entry, ``"".join(...)``,
+``str.format``, ``%``), names set through ``getattr``/``setattr``/``exec``/
+``globals()``, starred or unequal-length destructuring, values imported from
+another module, and taint that flows through function arguments, return values
+or containers (``d["k"]``). A Python file that does not parse is itself a
+violation.
+
+Scope: this guards against a maintainer accidentally putting a repository path
+back into the package. It is not an adversarial gate (anyone who can write an
+evasion can edit this test). The binding gate for a vendored copy is the
+consumer's own layer lint. Forms outside the grammar above are knowingly unread.
 
 Bare prose ("the docs folder", "the README") passes. There is no opt-out marker.
 """
@@ -110,9 +122,22 @@ def _targets(node: ast.AST) -> list[str]:
 
 def _assignments(tree: ast.AST) -> list[tuple[list[str], ast.AST]]:
     out: list[tuple[list[str], ast.AST]] = []
+
+    def pair(target: ast.AST, value: ast.AST) -> None:
+        if (isinstance(target, (ast.Tuple, ast.List))
+                and isinstance(value, (ast.Tuple, ast.List))
+                and len(target.elts) == len(value.elts)
+                and not any(isinstance(e, ast.Starred)
+                            for e in (*target.elts, *value.elts))):
+            for t, v in zip(target.elts, value.elts):
+                pair(t, v)
+        else:
+            out.append((_targets(target), value))
+
     for n in ast.walk(tree):
         if isinstance(n, ast.Assign):
-            out.append(([k for t in n.targets for k in _targets(t)], n.value))
+            for t in n.targets:
+                pair(t, n.value)
         elif isinstance(n, (ast.AnnAssign, ast.NamedExpr)) and n.value is not None:
             out.append((_targets(n.target), n.value))
     return out
@@ -248,3 +273,14 @@ def test_repo_entry_held_in_a_name_is_caught() -> None:
 def test_there_is_no_opt_out_marker() -> None:
     assert violations("x.md", "see docs/x.md  lint: allow-repo-path")
     assert violations("x.py", "# lint: allow-repo-path\nB = Path(__file__).parent\nP = B / 'docs'\n")
+
+
+def test_destructuring_pairs_elementwise_when_it_can() -> None:
+    head = "PKG_PARENT = Path(__file__).resolve().parent.parent\n"
+    for line in ('R, O = "docs", "ledger"', 'R, O = ["docs", "ledger"]',
+                 '(R, (O, P)) = ("docs", ("ledger", "x"))'):
+        assert len(ast_violations("x.py", head + line + "\nx = PKG_PARENT / R\n")) == 1, line
+    assert ast_violations("x.py", head + 'R, O = "docs", "ledger"\nx = PKG_PARENT / O\n') == []
+    # a starred form is knowingly unread: the grammar boundary is pinned here
+    starred = head + 'R, *O = "docs", "ledger"\nx = PKG_PARENT / R\n'
+    assert ast_violations("x.py", starred) == []
