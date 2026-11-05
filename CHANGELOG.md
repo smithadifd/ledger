@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 — 2026-11-05
+
+Test-only release; the CLI is unchanged from 0.1.1. Two tests that read the repository's README and agent-contract page now skip by name in a copy of `ledger/` vendored without them, and `LEDGER_REPO_ROOT` points them at a repository root. Upgrade the same way as 0.1.1, with `@v0.1.2`.
+
 ## 0.1.1 — 2026-11-05
 
 This release is for the agent using the ledger, not only the person who installed it.
