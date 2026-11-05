@@ -37,6 +37,7 @@ examples:
   ledger link it-1a2b3c4d5e6f ~/notes/brief.md
   ledger link it-1a2b3c4d5e6f --rel pr --target https://github.com/owner/repo/pull/12
   ledger link it-1a2b3c4d5e6f --rel branch feat/retry
+  ledger link it-1a2b3c4d5e6f --rel branch feat/retry-2 --idempotency-key run-7-link-1
 """
 
 USAGE = (
@@ -64,6 +65,12 @@ def add_arguments(parser) -> None:
         f"{DUPLICATE_OF} also closes the item as a duplicate of the target",
     )
     parser.add_argument("--target", help="the target, as a flag")
+    parser.add_argument(
+        "--idempotency-key",
+        metavar="KEY",
+        help="make a retry safe: the same key and content returns the stored "
+        "event and writes nothing; the same key with different content is refused",
+    )
 
 
 def _target(args) -> str:
@@ -84,8 +91,36 @@ def _closed_as_duplicate(lg, item_id: str) -> bool:
     )
 
 
+def _check_duplicate_state(lg, loser: str, kept: str) -> None:
+    row = lg.item(loser)
+    if row is None:
+        raise CliError(
+            f"item not found: {loser}", code="not_found", exit_code=EXIT_NOT_FOUND
+        )
+    if row["status"] == "closed":
+        raise CliError(
+            f"{loser} is already closed", code="closed", exit_code=EXIT_REFUSED
+        )
+    target = lg.item(kept)
+    if target is None:
+        raise CliError(
+            f"item not found: {kept}", code="not_found", exit_code=EXIT_NOT_FOUND
+        )
+    if target["status"] == "closed" and _closed_as_duplicate(lg, kept):
+        raise CliError(
+            f"{kept} is itself closed as a duplicate; link to the item it duplicates",
+            code="duplicate_chain",
+            exit_code=EXIT_REFUSED,
+        )
+
+
 def _duplicate(args, ctx: Context) -> Result:
     loser, kept = args.item, args.target
+    # One user key names the whole call: the link is <key>:link and the close
+    # is <key>:close, so a retry finds both and writes nothing.
+    base_key = getattr(args, "idempotency_key", None) or new_key()
+    link_key = f"{base_key}:link"
+    close_key = f"{base_key}:close"
     if loser == kept:
         raise CliError(
             f"an item cannot be a duplicate of itself: {loser}",
@@ -97,38 +132,36 @@ def _duplicate(args, ctx: Context) -> Result:
         require_item(lg, loser)
         # One write transaction: the checks read the state the appends land on.
         with lg.transaction():
-            row = lg.item(loser)
-            if row is None:
+            stored = (
+                lg.event_by_key(link_key) is not None,
+                lg.event_by_key(close_key) is not None,
+            )
+            if stored == (True, False) or stored == (False, True):
+                # One event of the pair exists under this key; finishing or
+                # duplicating it could not be proven safe, so write nothing.
                 raise CliError(
-                    f"item not found: {loser}", code="not_found", exit_code=EXIT_NOT_FOUND
-                )
-            if row["status"] == "closed":
-                raise CliError(
-                    f"{loser} is already closed", code="closed", exit_code=EXIT_REFUSED
-                )
-            target = lg.item(kept)
-            if target is None:
-                raise CliError(
-                    f"item not found: {kept}", code="not_found", exit_code=EXIT_NOT_FOUND
-                )
-            if target["status"] == "closed" and _closed_as_duplicate(lg, kept):
-                raise CliError(
-                    f"{kept} is itself closed as a duplicate; link to the item it duplicates",
-                    code="duplicate_chain",
+                    f"idempotency key {base_key!r} names only one of the two events "
+                    "a duplicate-of link writes; use a different key",
+                    code="partial_write",
                     exit_code=EXIT_REFUSED,
                 )
+            # A retry (both stored) skips the state checks: they would refuse
+            # the item the first call already closed. The appends below return
+            # the stored events, or refuse by name when the content differs.
+            if stored == (False, False):
+                _check_duplicate_state(lg, loser, kept)
             link = lg.append(
                 kind="item.linked",
                 payload={"rel": DUPLICATE_OF, "target": kept},
                 item_id=loser,
-                idempotency_key=new_key(),
+                idempotency_key=link_key,
                 **actor_kwargs(ctx),
             )
             closed = lg.append(
                 kind="item.state",
                 payload={"status": "closed", "reason": f"duplicate of {kept}"},
                 item_id=loser,
-                idempotency_key=new_key(),
+                idempotency_key=close_key,
                 **actor_kwargs(ctx),
             )
     finally:
@@ -157,7 +190,7 @@ def run(args, ctx: Context) -> Result:
             kind="item.linked",
             payload={"rel": args.rel, "target": args.target},
             item_id=args.item,
-            idempotency_key=new_key(),
+            idempotency_key=getattr(args, "idempotency_key", None) or new_key(),
             **actor_kwargs(ctx),
         )
     finally:
