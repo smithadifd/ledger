@@ -62,7 +62,9 @@ def add_arguments(parser) -> None:
 def _commands(db: str, item_id: str) -> tuple[str, str]:
     base = f"ledger --db {shlex.quote(db)}"
     item = shlex.quote(item_id)
-    return f"{base} resume --item {item}", f"{base} card {item}"
+    # ``--item=`` and ``card --`` keep an id that starts with a hyphen a value,
+    # not an option, so the printed commands run for every valid id.
+    return f"{base} resume --item={item}", f"{base} card -- {item}"
 
 
 def _stop_row(event) -> dict[str, Any]:
@@ -112,18 +114,26 @@ def run(args, ctx: Context) -> Result:
         lg = open_ledger_readonly(resolved)
         try:
             db = str(lg.path)
-            if args.item_id:
-                item = require_item(lg, args.item_id)
-                stops = lg.events(item_id=args.item_id, kind="item.stopped")
-                entries.append(_entry(db, item, stops[-1] if stops else None))
-            else:
-                newest: dict[str, Any] = {}
-                for event in lg.events(kind="item.stopped"):
-                    newest[event.item_id] = event
-                for row in lg.items():
-                    if row["status"] == "closed" or row["item_id"] not in newest:
-                        continue
-                    entries.append(_entry(db, row, newest[row["item_id"]]))
+            # One read transaction: the stops and the items come from the same
+            # snapshot, so a writer appending between the two reads cannot make
+            # an open item with a stop vanish from the list.
+            conn = lg._conn
+            conn.execute("BEGIN")
+            try:
+                if args.item_id:
+                    stops = lg.events(item_id=args.item_id, kind="item.stopped")
+                    item = require_item(lg, args.item_id)
+                    entries.append(_entry(db, item, stops[-1] if stops else None))
+                else:
+                    newest: dict[str, Any] = {}
+                    for event in lg.events(kind="item.stopped"):
+                        newest[event.item_id] = event
+                    for row in lg.items():
+                        if row["status"] == "closed" or row["item_id"] not in newest:
+                            continue
+                        entries.append(_entry(db, row, newest[row["item_id"]]))
+            finally:
+                conn.execute("ROLLBACK")
         finally:
             lg.close()
     elif args.item_id:

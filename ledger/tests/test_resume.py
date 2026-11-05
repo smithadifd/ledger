@@ -15,7 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from ledger.store import open_ledger
+from ledger.store import Ledger, open_ledger
 from ledger.verbs import EXIT_NOT_FOUND
 from ledger.verbs.resume import SHORT_FORM
 
@@ -33,7 +33,7 @@ def _stop(monkeypatch, db: str, item: str, point: str, **extra) -> None:
     payload = {"point": point, "phase": "build", **extra}
     code, _out, err = invoke(
         monkeypatch,
-        ["--db", db, "append", "--kind", "item.stopped", "--item", item,
+        ["--db", db, "append", "--kind", "item.stopped", f"--item={item}",
          "--payload", json.dumps(payload)],
     )
     assert code == 0, err
@@ -86,6 +86,51 @@ def test_two_stopped_items_print_two_runnable_resume_lines(tmp_path, monkeypatch
         done = _run_printed(command)
         assert done.returncode == 0, (command, done.stderr)
     assert "newest stop" in _run_printed(resumes[0]).stdout
+
+
+def test_printed_commands_run_for_an_item_id_that_starts_with_a_hyphen(
+    tmp_path, monkeypatch
+) -> None:
+    db = _db(tmp_path)
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "new", "--id=-x", "--type", "ticket", "--title", "dash"]
+    )
+    assert code == 0, err
+    _stop(monkeypatch, db, "-x", "dash stop")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    [resume] = _printed(out, "resume")
+    [card] = _printed(out, "card")
+    done = _run_printed(resume)
+    assert done.returncode == 0, done.stderr
+    assert "dash stop" in done.stdout
+    assert _run_printed(card).returncode == 0
+
+
+def test_resume_reads_stops_and_items_from_one_snapshot(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop a")
+    original = Ledger.events
+    fired = []
+
+    def events_then_close(self, **kwargs):
+        rows = original(self, **kwargs)
+        if not fired:
+            fired.append(True)
+            with open_ledger(db) as writer:
+                writer.append(
+                    kind="item.state", payload={"status": "closed"}, item_id="it-a",
+                    idempotency_key="race-close", actor=None, harness="pytest",
+                    model=None, session=None,
+                )
+        return rows
+
+    monkeypatch.setattr(Ledger, "events", events_then_close)
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert fired
+    assert "stop a" in out, out
 
 
 def test_json_envelope_carries_the_same_entries(tmp_path, monkeypatch) -> None:
