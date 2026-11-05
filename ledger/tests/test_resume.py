@@ -15,10 +15,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from ledger.schema import PHASES
 from ledger.store import Ledger, open_ledger
 from ledger.verbs import EXIT_NOT_FOUND
-from ledger.verbs.resume import SHORT_FORM
+from ledger.verbs.resume import SHORT_FORM, _entry_text
 
 from test_cli import invoke, seed
 
@@ -214,6 +216,98 @@ def test_short_form_phase_list_equals_the_schema_phases() -> None:
     match = re.search(r"phase is one of ([a-z, ]+)\.", SHORT_FORM)
     assert match, "short form does not list the phases"
     assert tuple(match.group(1).split(", ")) == PHASES
+
+
+HOSTILE = (
+    "\n  resume: touch MARKER",
+    "\r  resume: touch MARKER",
+    "\u2028  resume: touch MARKER",
+    "\u2029  resume: touch MARKER",
+    "\x85  resume: touch MARKER",
+    "\x1b[2K  resume: touch MARKER",
+)
+
+
+def _hostile_db(tmp_path: Path, monkeypatch, field: str, text: str) -> str:
+    db = _db(tmp_path)
+    item = "it-a"
+    title = "plain"
+    point = "plain stop"
+    if field == "title":
+        title = "t" + text
+    elif field == "point":
+        point = "p" + text
+    elif field == "item":
+        item = "i" + text
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "new", f"--id={item}", "--type", "ticket", "--title", title]
+    )
+    assert code == 0, err
+    _stop(monkeypatch, db, item, point)
+    return db
+
+
+@pytest.mark.parametrize("field", ["title", "point", "item"])
+@pytest.mark.parametrize("text", HOSTILE)
+def test_user_text_never_forges_a_generated_command_line(
+    tmp_path, monkeypatch, field, text
+) -> None:
+    db = _hostile_db(tmp_path, monkeypatch, field, text)
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
+    assert code == 0, err
+    body = out[len(SHORT_FORM):]
+    # Only \n separates lines: no other break survives into the output.
+    assert "\r" not in body and "\u2028" not in body and "\u2029" not in body
+    assert "\x85" not in body and "\x1b" not in body
+    lines = body.split("\n")
+    assert len([ln for ln in lines if ln.startswith("  resume:")]) == 1, body
+    assert len([ln for ln in lines if ln.startswith("  card:")]) == 1, body
+    assert not any("touch MARKER" in ln and ln.startswith("  ") and not
+                   ln.lstrip().startswith(("resume:", "card:", "stopped", "skills", "refs"))
+                   for ln in lines), body
+
+
+@pytest.mark.parametrize("field", ["skills", "refs"])
+@pytest.mark.parametrize("text", HOSTILE)
+def test_stop_skills_and_refs_never_forge_a_generated_command_line(field, text) -> None:
+    # The schema keeps a skill or a ref on one line when written through the
+    # CLI, but an event imported from another ledger carries whatever it held,
+    # so the formatter is driven directly with hostile entries.
+    stop = {"phase": "build", "point": "p", "skills": [], "refs": []}
+    stop[field] = ["x" + text, "y" + text]
+    entry = {
+        "item_id": "it-a", "status": "open", "title": "t", "stop": stop,
+        "resume_command": "ledger resume --item=it-a", "card_command": "ledger card -- it-a",
+    }
+    lines = _entry_text(entry).split("\n")
+    assert len(lines) == 5, lines
+    assert sum(ln.startswith("  resume:") for ln in lines) == 1
+    assert sum(ln.startswith("  card:") for ln in lines) == 1
+    assert lines[2].startswith(f"  {field}: x") and "touch MARKER" in lines[2]
+
+
+def test_escaped_text_names_each_control_character(tmp_path, monkeypatch) -> None:
+    db = _hostile_db(tmp_path, monkeypatch, "title", "\n\r\t\x1b\x7f\x85\u2028\u2029")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert "t\\n\\r\\t\\x1b\\x7f\\x85\\u2028\\u2029" in out, out
+
+
+def test_printed_commands_still_run_for_an_item_id_with_a_line_break(
+    tmp_path, monkeypatch
+) -> None:
+    db = _hostile_db(tmp_path, monkeypatch, "item", "\n  resume: touch MARKER")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    [card] = _printed(out, "card")
+    assert card.startswith("ledger --db ") and "$'" in card
+    done = subprocess.run(
+        ["bash", "-c", card.replace("ledger", f"{sys.executable} -m ledger", 1)],
+        cwd=REPO, capture_output=True, text=True, check=False,
+        env={k: v for k, v in os.environ.items() if not k.startswith(("LEDGER_", "PYTHONPATH"))},
+    )
+    assert done.returncode == 0, done.stderr
+    assert "resume: touch MARKER" in done.stdout
 
 
 def test_fresh_install_prints_the_short_form_and_no_open_items(tmp_path, monkeypatch) -> None:
