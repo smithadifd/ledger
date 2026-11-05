@@ -145,10 +145,11 @@ same content is returned (exit 0, the first event's id) and nothing is
 written; an earlier event with different content is refused as a `conflict`
 (exit 3). `note`, `elect` and a plain `link` write one event under `K` itself.
 `link --rel duplicate-of` writes two events in one transaction, under
-`K:link` (the link) and `K:close` (the close), so a retry returns both and
-writes none. If only one of the two exists under `K` (it was written by some
-other call), the call is refused as `partial_write` and writes nothing; use a
-different key.
+`K` (the link, the same slot a plain `link` uses) and `K:close` (the close), so
+a retry returns both and writes none, and a plain `link` and a `duplicate-of`
+under one `K` refuse as a `conflict`. If only one of the two exists (it was
+written by some other call), the call is refused as `partial_write` and writes
+nothing; use a different key.
 
 **`append-many ITEM [--expect-revision ID]`** Read a JSON array of
 `{kind, payload, ...}` objects from stdin and append them for one item in

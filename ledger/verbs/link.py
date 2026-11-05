@@ -116,10 +116,12 @@ def _check_duplicate_state(lg, loser: str, kept: str) -> None:
 
 def _duplicate(args, ctx: Context) -> Result:
     loser, kept = args.item, args.target
-    # One user key names the whole call: the link is <key>:link and the close
-    # is <key>:close, so a retry finds both and writes nothing.
+    # One user key names the whole call: the link event is written under the
+    # key itself (the same slot a plain link uses, so the two modes collide on
+    # one key) and the close under <key>:close, so a retry finds both and
+    # writes nothing.
     base_key = getattr(args, "idempotency_key", None) or new_key()
-    link_key = f"{base_key}:link"
+    link_key = base_key
     close_key = f"{base_key}:close"
     if loser == kept:
         raise CliError(
@@ -132,11 +134,17 @@ def _duplicate(args, ctx: Context) -> Result:
         require_item(lg, loser)
         # One write transaction: the checks read the state the appends land on.
         with lg.transaction():
-            stored = (
-                lg.event_by_key(link_key) is not None,
-                lg.event_by_key(close_key) is not None,
+            link_found = lg.event_by_key(link_key)
+            stored = (link_found is not None, lg.event_by_key(close_key) is not None)
+            # A lone event under the key that is not a duplicate-of link (a
+            # plain link, a note) is another write intent: the appends below
+            # refuse it as a conflict, so it is not a half-written pair.
+            link_is_ours = (
+                link_found is not None
+                and link_found.kind == "item.linked"
+                and link_found.payload.get("rel") == DUPLICATE_OF
             )
-            if stored == (True, False) or stored == (False, True):
+            if (stored == (True, False) and link_is_ours) or stored == (False, True):
                 # One event of the pair exists under this key; finishing or
                 # duplicating it could not be proven safe, so write nothing.
                 raise CliError(
