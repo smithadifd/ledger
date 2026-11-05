@@ -242,7 +242,9 @@ working tree. It indexes current items with their notes and links, questions
 and elections, person utterances, and, under each root in `search_roots`, the
 markdown files in `standards/` and `decisions/` plus any markdown file an
 item or decision names, chunked at `##` headings. The index stores a manifest
-of what it was built from; `doctor` reports it `missing`, `stale` or
-`current`, and `search` rebuilds a stale index before reading. Results are
+of what it was built from; `doctor` reports it `missing`, `stale`,
+`behind` (current to event N, with M new events to be indexed on the next
+search) or `current`, and `search` rebuilds a missing, stale or behind index
+before reading. Results are
 ranked by BM25 and can be filtered by type, item status, item, initiative
 and date.
