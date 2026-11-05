@@ -260,7 +260,7 @@ def test_stale_index_search_returns_the_document_and_doctor_reads_current(
     code, _out, err = invoke(monkeypatch, ["--db", db, "index"])
     assert code == 0, err
     invoke(monkeypatch, ["--db", db, "note", ITEM, "--text", "quokka findings"])
-    assert _doctor_search(monkeypatch, db) == "stale"
+    assert _doctor_search(monkeypatch, db) == "behind"
 
     code, out, err = invoke(monkeypatch, ["--json", "--db", db, "search", "quokka"])
 
@@ -277,7 +277,7 @@ def test_search_that_cannot_rewrite_a_stale_index_refuses_by_name(tmp_path, monk
     code, _out, err = invoke(monkeypatch, ["--db", db, "index"])
     assert code == 0, err
     invoke(monkeypatch, ["--db", db, "note", ITEM, "--text", "quokka findings"])
-    assert _doctor_search(monkeypatch, db) == "stale"
+    assert _doctor_search(monkeypatch, db) == "behind"
 
     def refuse_write(*_args, **_kwargs):
         raise PermissionError(13, "Permission denied")
@@ -287,10 +287,10 @@ def test_search_that_cannot_rewrite_a_stale_index_refuses_by_name(tmp_path, monk
 
     assert code == EXIT_REFUSED
     assert out == ""
-    assert "cannot rebuild the stale search index" in err
+    assert "cannot rebuild the search index" in err
     assert "search.db" in err
     assert "Traceback" not in err
-    assert _doctor_search(monkeypatch, db) == "stale"
+    assert _doctor_search(monkeypatch, db) == "behind"
 
 
 # --- export-item completeness ----------------------------------------------

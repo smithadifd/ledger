@@ -209,15 +209,21 @@ from the current repository.
 **`search WORD... [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
 Full-text search, ranked by BM25; the words may be quoted or separate.
 Types: `item`, `decision`, `utterance`, `standard`, `adr`, `doc`. Rebuilds
-the index first when it is missing or stale, and refuses by name (exit 3)
-when it cannot rewrite the stale index, rather than answering from it.
+the index first when it is missing, stale or behind new events, and refuses by name (exit 3)
+when it cannot rewrite the index, rather than answering from it.
 
 **`index [--rebuild]`** Build `search.db` beside the database.
 
 ## Integrity and durability verbs
 
 **`doctor`** Print the resolved database path and schema version, the search
-index's state (`missing`, `stale`, `current`) and any expired claims. Exits
+index's state (`missing`, `stale`, `current`) and any expired claims. A
+write after the last index build is not stale: doctor reports `current to
+event N, M new events will be indexed on the next search` (JSON status
+`behind`, with `indexed_to_event` and `new_events`), and `search` rebuilds
+before it answers. `stale` is kept for a real mismatch: a different format,
+ranker, database or roots, an added, edited or deleted source file, or an
+event log that no longer matches what was indexed. Exits
 1 when the database does not exist and 3 when it is unusable; the index and
 claim reports never change the exit code.
 

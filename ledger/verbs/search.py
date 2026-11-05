@@ -1,4 +1,4 @@
-"""Search the derived index; refresh it first when it is missing or stale."""
+"""Search the derived index; refresh it first when it is missing, stale or behind."""
 from __future__ import annotations
 
 from ledger.schema import ITEM_STATUSES
