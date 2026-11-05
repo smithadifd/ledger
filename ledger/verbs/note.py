@@ -24,6 +24,7 @@ The text is given once: after the item, or with --text, never both.
 examples:
   ledger note it-1a2b3c4d5e6f "tried the retry; it worked"
   ledger note it-1a2b3c4d5e6f --text "the same note, flag form"
+  ledger note it-1a2b3c4d5e6f --text "safe to retry" --idempotency-key run-7-note-1
 """
 
 USAGE = "note takes exactly one text: note ITEM TEXT (or note ITEM --text TEXT)"
@@ -36,6 +37,12 @@ def add_arguments(parser) -> None:
     parser.add_argument("text", nargs="*", metavar="TEXT", help="the note's text")
     parser.add_argument(
         "--text", dest="text_option", metavar="TEXT", help="the note's text, as a flag"
+    )
+    parser.add_argument(
+        "--idempotency-key",
+        metavar="KEY",
+        help="make a retry safe: the same key and content returns the stored "
+        "event and writes nothing; the same key with different content is refused",
     )
     add_expect_revision_argument(parser)
 
@@ -58,7 +65,7 @@ def run(args, ctx: Context) -> Result:
             kind="item.note",
             payload={"text": text},
             item_id=args.item,
-            idempotency_key=new_key(),
+            idempotency_key=getattr(args, "idempotency_key", None) or new_key(),
             expect_revision=expect,
             **actor_kwargs(ctx),
         )

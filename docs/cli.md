@@ -85,6 +85,9 @@ start with `work:` or `loop:` are reserved.
 ledger note it-1a2b3c4d5e6f "tried the retry; it worked"
 ```
 
+**`note ... [--idempotency-key K]`**, **`link ... [--idempotency-key K]`** and
+**`elect ... [--idempotency-key K]`** take the same retry key `append` does.
+
 **`state ITEM --status STATUS [--owner O] [--claim C] [--blocked-by X] [--expect-revision ID]`**
 Set the item's status.
 
@@ -98,6 +101,7 @@ defaults to `url` and is one of `pr`, `branch`, `session`, `item`, `url`,
 `blocks`, `duplicate-of`; it goes after `--rel`, never as a bare word.
 `duplicate-of` also closes the item, in the same transaction, as a duplicate
 of `TARGET`; both cards show the relation. There is no merge verb.
+`--idempotency-key K` makes a retry safe (see Retrying with a key below).
 
 **`spec set|show|diff ITEM ...`** An item's spec is its versioned content:
 `--title`, `--body` or `--body-file`, `--acceptance`, `--size` (`S`, `M`,
@@ -133,6 +137,18 @@ ledger revision (the newest event id) it was rendered from.
 Append one validated event of any kind that is not reserved (`loop.*`,
 `ledger.system` and `item.spec` are reserved). Retrying with the same key and
 content returns the stored event.
+
+**Retrying with a key.** `append`, `pick`, `note`, `link` and `elect` take
+`--idempotency-key K`. Without it every call writes a fresh event. With it:
+no earlier event under `K` means the call writes; an earlier event with the
+same content is returned (exit 0, the first event's id) and nothing is
+written; an earlier event with different content is refused as a `conflict`
+(exit 3). `note`, `elect` and a plain `link` write one event under `K` itself.
+`link --rel duplicate-of` writes two events in one transaction, under
+`K:link` (the link) and `K:close` (the close), so a retry returns both and
+writes none. If only one of the two exists under `K` (it was written by some
+other call), the call is refused as `partial_write` and writes nothing; use a
+different key.
 
 **`append-many ITEM [--expect-revision ID]`** Read a JSON array of
 `{kind, payload, ...}` objects from stdin and append them for one item in
