@@ -18,9 +18,13 @@ the repository name split across statements. Per module, flat over all scopes:
   tuple targets, or ``self.x``-style dotted attributes) an expression that
   contains ``.parent``, ``.parents``, ``dirname(...)`` or a ``".."`` string, or
   that uses an already-tainted name; this repeats to a fixed point;
+* a name is *repo-named* when it is assigned a string constant, an f-string or
+  ``+`` concatenation whose leading constant part, or another repo-named name,
+  has a first path component that is one of the repository's top-level
+  entries; this joins the same fixed point;
 * a ``/`` expression, ``joinpath(...)``, ``os.path.join(...)``/``join(...)`` or
   ``Path(...)`` call is flagged when its subtree holds a traversal or a
-  tainted name AND a string constant whose first path component is one of the
+  tainted name AND a string constant or repo-named name for one of the
   repository's top-level entries; the joining expression's file:line is reported.
 
 Not read: names built at run time (``getattr``, ``exec``, string formatting or
@@ -28,8 +32,7 @@ concatenation), values imported from another module, and taint that flows
 through function arguments or return values. A Python file that does not parse
 is itself a violation.
 
-Bare prose ("the docs folder", "the README") passes. A line may carry the
-marker ``lint: allow-repo-path`` to opt out; none do today.
+Bare prose ("the docs folder", "the README") passes. There is no opt-out marker.
 """
 from __future__ import annotations
 
@@ -74,12 +77,28 @@ def _traverses(node: ast.AST, tainted: set[str]) -> bool:
     return False
 
 
-def _names_repo_entry(node: ast.AST) -> bool:
+def _is_repo_const(n: ast.AST) -> bool:
+    return (isinstance(n, ast.Constant) and isinstance(n.value, str)
+            and n.value.split("/", 1)[0] in _REPO_FIRST)
+
+
+def _names_repo_entry(node: ast.AST, repo_names: set[str]) -> bool:
     return any(
-        isinstance(n, ast.Constant) and isinstance(n.value, str)
-        and n.value.split("/", 1)[0] in _REPO_FIRST
+        _is_repo_const(n)
+        or (isinstance(n, (ast.Name, ast.Attribute)) and _key(n) in repo_names)
         for n in ast.walk(node)
     )
+
+
+def _repo_value(node: ast.AST, repo_names: set[str]) -> bool:
+    """A string value that starts with a repository entry (leading part only)."""
+    if _is_repo_const(node):
+        return True
+    if isinstance(node, ast.JoinedStr):
+        return bool(node.values) and _repo_value(node.values[0], repo_names)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return _repo_value(node.left, repo_names)
+    return isinstance(node, (ast.Name, ast.Attribute)) and _key(node) in repo_names
 
 
 def _targets(node: ast.AST) -> list[str]:
@@ -115,6 +134,7 @@ def ast_violations(rel: str, text: str) -> list[str]:
         return [f"{rel}:{exc.lineno or 0}: does not parse ({exc.msg})"]
     assigned = _assignments(tree)
     tainted: set[str] = set()
+    repo_names: set[str] = set()
     changed = True
     while changed:
         changed = False
@@ -122,12 +142,15 @@ def ast_violations(rel: str, text: str) -> list[str]:
             if _traverses(value, tainted) and not set(names) <= tainted:
                 tainted |= set(names)
                 changed = True
+            if _repo_value(value, repo_names) and not set(names) <= repo_names:
+                repo_names |= set(names)
+                changed = True
     found: list[str] = []
     covered: set[int] = set()
     for n in ast.walk(tree):
         if id(n) in covered or not _joins(n):
             continue
-        if _traverses(n, tainted) and _names_repo_entry(n):
+        if _traverses(n, tainted) and _names_repo_entry(n, repo_names):
             found.append(f"{rel}:{n.lineno}: {ast.unparse(n)[:100]}")
             covered |= {id(c) for c in ast.walk(n)}
     return found
@@ -136,8 +159,6 @@ def ast_violations(rel: str, text: str) -> list[str]:
 def violations(rel: str, text: str) -> list[str]:
     found = []
     for number, line in enumerate(text.splitlines(), 1):
-        if "lint: allow-repo-path" in line:
-            continue
         if _TOKEN.search(line) or (_PARENT.search(line) and _QUOTED.search(line)):
             found.append(f"{rel}:{number}: {line.strip()[:100]}")
     if rel.endswith(".py"):
@@ -211,3 +232,19 @@ def test_benign_paths_and_unparseable_files() -> None:
     assert ast_violations("x.py", benign) == []
     broken = ast_violations("x.py", "def (:\n")
     assert len(broken) == 1 and "does not parse" in broken[0]
+
+
+def test_repo_entry_held_in_a_name_is_caught() -> None:
+    head = "PKG_PARENT = Path(__file__).resolve().parent.parent\n"
+    direct = head + 'REPO_DIR = "docs"\nx = PKG_PARENT / REPO_DIR / "agent-contract.md"\n'
+    assert len(ast_violations("x.py", direct)) == 1
+    chained = head + 'D = "docs"\nE = D\nx = PKG_PARENT / E\n'
+    assert len(ast_violations("x.py", chained)) == 1
+    fstring = head + 'D = f"docs/{n}"\nx = PKG_PARENT / D\n'
+    assert len(ast_violations("x.py", fstring)) == 1
+    assert ast_violations("x.py", head + 'D = "ledger"\nx = PKG_PARENT / D\n') == []
+
+
+def test_there_is_no_opt_out_marker() -> None:
+    assert violations("x.md", "see docs/x.md  lint: allow-repo-path")
+    assert violations("x.py", "# lint: allow-repo-path\nB = Path(__file__).parent\nP = B / 'docs'\n")
