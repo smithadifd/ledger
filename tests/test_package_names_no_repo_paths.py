@@ -18,9 +18,10 @@ the repository name split across statements. Per module, flat over all scopes:
   tuple targets, or ``self.x``-style dotted attributes) an expression that
   contains ``.parent``, ``.parents``, ``dirname(...)`` or a ``".."`` string, or
   that uses an already-tainted name; this repeats to a fixed point;
-* a name is *repo-named* when it is assigned a string constant, an f-string or
-  ``+`` concatenation whose leading constant part, or another repo-named name,
-  has a first path component that is one of the repository's top-level
+* a name is *repo-named* when it is assigned a string constant, an f-string
+  whose leading part is a literal, a ``+`` concatenation whose leftmost operand
+  is a literal or another repo-named name, or another repo-named name, where
+  the literal's first path component is one of the repository's top-level
   entries; this joins the same fixed point;
 * destructuring pairs element-wise when target and value are tuples or lists
   of equal length without a starred element (nested ones recursively); any
@@ -31,8 +32,10 @@ the repository name split across statements. Per module, flat over all scopes:
   tainted name AND a string constant or repo-named name for one of the
   repository's top-level entries; the joining expression's file:line is reported.
 
-Not read: a repository entry that is not the leading part of the string (an
-f-string or ``+`` whose first piece is not the entry, ``"".join(...)``,
+Not read: a repository entry that is not a literal leading part of the string
+(an f-string whose leading part is an interpolated name, such as
+``f"{D}/x"``, or any f-string or ``+`` whose first piece is not the entry,
+``"".join(...)``,
 ``str.format``, ``%``), names set through ``getattr``/``setattr``/``exec``/
 ``globals()``, starred or unequal-length destructuring, values imported from
 another module, and taint that flows through function arguments, return values
@@ -284,3 +287,9 @@ def test_destructuring_pairs_elementwise_when_it_can() -> None:
     # a starred form is knowingly unread: the grammar boundary is pinned here
     starred = head + 'R, *O = "docs", "ledger"\nx = PKG_PARENT / R\n'
     assert ast_violations("x.py", starred) == []
+
+
+def test_fstring_with_a_leading_name_is_knowingly_unread() -> None:
+    src = ('PKG_PARENT = Path(__file__).resolve().parent.parent\n'
+           'D = "docs"\nE = f"{D}/x"\nx = PKG_PARENT / E\n')
+    assert ast_violations("x.py", src) == []
