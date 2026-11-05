@@ -77,8 +77,13 @@ refused, naming the existing item. A source of the form
 `path:line@commit` lets `export-item --ticket` read the item's text back from
 git.
 
-**`note ITEM --text TEXT [--expect-revision ID]`** Append a note. Notes that
+**`note ITEM TEXT [--expect-revision ID]`** Append a note. The text is
+given once, after the item or as `--text TEXT`, never both. Notes that
 start with `work:` or `loop:` are reserved.
+
+```sh
+ledger note it-1a2b3c4d5e6f "tried the retry; it worked"
+```
 
 **`state ITEM --status STATUS [--owner O] [--claim C] [--blocked-by X] [--expect-revision ID]`**
 Set the item's status.
@@ -87,8 +92,10 @@ Set the item's status.
 Claim the item with a lease. The holder defaults to the actor. `--capacity`
 refuses the claim when N items are already claimed.
 
-**`link ITEM --rel REL --target TARGET`** Link the item. `REL` is one of
-`pr`, `branch`, `session`, `item`, `url`, `blocks`, `duplicate-of`.
+**`link ITEM TARGET [--rel REL]`** Link the item. The target is given once,
+after the item or as `--target TARGET`, and may be a local file path. `REL`
+defaults to `url` and is one of `pr`, `branch`, `session`, `item`, `url`,
+`blocks`, `duplicate-of`; it goes after `--rel`, never as a bare word.
 `duplicate-of` also closes the item, in the same transaction, as a duplicate
 of `TARGET`; both cards show the relation. There is no merge verb.
 
@@ -134,9 +141,12 @@ one transaction: all land or none do.
 ## Decision verbs
 
 **`elect ITEM --question Q --chosen LABEL --chosen-description D --rejected LABEL... --scope S --quote-ref EVENT --quote SPAN... [--ask EVENT]`**
-Record an election. Every `--quote` must be a byte-exact substring of the
+Record an election. Every flag but `--ask` is required, and `--rejected`
+and `--quote` are repeatable: give `--rejected` once for each alternative that
+was not chosen. Every `--quote` must be a byte-exact substring of the
 text of the `utterance.captured` event named by `--quote-ref`. `--ask`
-closes exactly that open question.
+closes exactly that open question. `ledger elect --help` has a worked
+example.
 
 **`pick ITEM --question Q --option LABEL[::DESCRIPTION]... --chosen LABEL [--free-text T] --scope S [--ask EVENT] [--idempotency-key K]`**
 Record a question-picker answer: an utterance holding the question, the
@@ -150,8 +160,10 @@ List decision records with their current standing.
 
 ## Reading verbs
 
-**`query [--item ID] [--type TYPE] [--status STATUS] [--limit N]`** Current
-items, at most 50 unless `--limit` says otherwise. Exit 1 when nothing
+**`query [--item ID] [--type TYPE] [--status STATUS] [--since DATE] [--until DATE] [--limit N]`**
+Current items, at most 50 unless `--limit` says otherwise. `--since` and
+`--until` keep the items whose newest event falls in the window, with the
+same date forms and the same refusals as `search`. Exit 1 when nothing
 matches.
 
 **`ready [--limit N]`** Open items with no open blocker, including claimed
@@ -187,14 +199,18 @@ under a line naming the ledger revision; `--json` prints the same rows.
 `grant_unverified` or `grant_unknown`. It reports; no gate reads it.
 
 **`export-item ITEM [--ticket]`** One item's events, oldest first, without
-ephemeral events recorded before its latest close. `--ticket` instead prints
+ephemeral events recorded before its latest close, then one completeness
+line: `completeness: N events returned, M events on the item, K decayed`
+(with `--json`, a `completeness` object in `data` with `events_returned`,
+`events_on_item` and `events_decayed`). `--ticket` instead prints
 the `### Ticket:` section its source locator points at, read with `git show`
 from the current repository.
 
-**`search QUERY [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
-Full-text search, ranked by BM25. Types: `item`, `decision`, `utterance`,
-`standard`, `adr`, `doc`. Rebuilds the index first when it is missing or
-stale.
+**`search WORD... [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
+Full-text search, ranked by BM25; the words may be quoted or separate.
+Types: `item`, `decision`, `utterance`, `standard`, `adr`, `doc`. Rebuilds
+the index first when it is missing or stale, and refuses by name (exit 3)
+when it cannot rewrite the stale index, rather than answering from it.
 
 **`index [--rebuild]`** Build `search.db` beside the database.
 

@@ -512,6 +512,30 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
     return ticket_section(blob, line)
 
 
+def item_export_counted(
+    lg: Ledger, item_id: str
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """``item_export`` plus how complete it is: the events returned, the events
+    on the item, and the events decayed out of the view.
+
+    Decayed events are the ephemeral ones before the latest close
+    (``decay_boundary``), so ``events_on_item`` is always ``events_returned``
+    plus ``events_decayed``, and a reader can tell whether it holds the whole
+    record. Raises KeyError for an unknown item.
+    """
+    item = lg.item(item_id)
+    if item is None:
+        raise KeyError(item_id)
+    events = lg.events(item_id=item_id)
+    boundary = decay_boundary(events, item["status"] == "closed")
+    shown = [event_record(event) for event in events if not decayed(event, boundary)]
+    return shown, {
+        "events_returned": len(shown),
+        "events_on_item": len(events),
+        "events_decayed": len(events) - len(shown),
+    }
+
+
 def item_export(lg: Ledger, item_id: str) -> list[dict[str, Any]]:
     """Every event of one item as a record, oldest first.
 
@@ -520,12 +544,7 @@ def item_export(lg: Ledger, item_id: str) -> list[dict[str, Any]]:
     only this view of the item drops them. Raises KeyError for an unknown
     item.
     """
-    item = lg.item(item_id)
-    if item is None:
-        raise KeyError(item_id)
-    events = lg.events(item_id=item_id)
-    boundary = decay_boundary(events, item["status"] == "closed")
-    return [event_record(event) for event in events if not decayed(event, boundary)]
+    return item_export_counted(lg, item_id)[0]
 
 
 def load_export(export_dir: Path) -> list[Event]:
