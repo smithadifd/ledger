@@ -81,7 +81,7 @@ status: open
 ## Notes
 - event=2: Ask: show the interplay
 
-This card is a projection, not authority
+This card is a projection; the events are the authority (ledger export-item topic-demo)
 $ ledger --json state topic-demo --status closed
 {"ok": true, "data": {"event": {"id": 4, "kind": "item.state", "payload": {"status": "closed"}, ...}}}
 ```

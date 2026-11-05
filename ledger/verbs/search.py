@@ -14,10 +14,20 @@ from ledger.verbs import (
 )
 
 DEFAULT_SEARCH_LIMIT = 10
+SINCE_HELP = (
+    "YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|+HH:MM], inclusive, UTC unless it has an offset; compares "
+    "an event's recorded time, an item's newest event, a file's mtime"
+)
+UNTIL_HELP = "ISO date or date-time, inclusive (a bare date keeps the whole day)"
 
 
 def add_arguments(parser) -> None:
-    parser.add_argument("query", help="free text; each word is matched, ranked by bm25")
+    parser.add_argument(
+        "query",
+        nargs="+",
+        metavar="WORD",
+        help="free text, quoted or as separate words; each word is matched, ranked by bm25",
+    )
     parser.add_argument(
         "--limit",
         type=int,
@@ -39,17 +49,8 @@ def add_arguments(parser) -> None:
         metavar="ID",
         help="only documents of items linked to this initiative (link --rel item)",
     )
-    parser.add_argument(
-        "--since",
-        metavar="DATE",
-        help="YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|+HH:MM], inclusive, UTC unless it has an offset; compares "
-        "an event's recorded time, an item's newest event, a file's mtime",
-    )
-    parser.add_argument(
-        "--until",
-        metavar="DATE",
-        help="ISO date or date-time, inclusive (a bare date keeps the whole day)",
-    )
+    parser.add_argument("--since", metavar="DATE", help=SINCE_HELP)
+    parser.add_argument("--until", metavar="DATE", help=UNTIL_HELP)
 
 
 def _limit(value: int | None) -> int:
@@ -60,7 +61,11 @@ def _limit(value: int | None) -> int:
     return value
 
 
-def _when(value: str | None, flag: str, *, end_of_day: bool):
+def when_option(value: str | None, flag: str, *, end_of_day: bool):
+    """A ``--since``/``--until`` value as an aware UTC datetime, or a usage error.
+
+    ``query`` shares this with ``search`` so the two refuse the same forms.
+    """
     if value is None:
         return None
     try:
@@ -85,14 +90,15 @@ def _text(cards: list[dict]) -> str:
 
 def run(args, ctx: Context) -> Result:
     limit = _limit(args.limit)
-    since = _when(args.since, "--since", end_of_day=False)
-    until = _when(args.until, "--until", end_of_day=True)
+    query = args.query if isinstance(args.query, str) else " ".join(args.query)
+    since = when_option(args.since, "--since", end_of_day=False)
+    until = when_option(args.until, "--until", end_of_day=True)
     if since is not None and until is not None and since > until:
         raise UsageError("--since is after --until")
     try:
         data = search(
             ctx.db,
-            args.query,
+            query,
             limit=limit,
             doc_type=args.doc_type,
             status=args.status,

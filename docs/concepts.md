@@ -104,7 +104,8 @@ Every fact has one owner, and everything else that shows it is a view:
   are shown in them; the ledger stays the owner of the state.
 - **Cards and the search index are disposable.** Each names the event ids it
   was built from, so a stale copy is detectable, and each can be thrown away
-  and rebuilt. A card ends with "This card is a projection, not authority".
+  and rebuilt. A card ends with "This card is a projection; the events are the authority",
+  and each cut it makes names the command that prints the events.
 
 Inside the ledger, some fields have exactly one writer, and the store refuses
 every other path:

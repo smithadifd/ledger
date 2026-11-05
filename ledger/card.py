@@ -34,7 +34,7 @@ Format (stable — a later reader should parse this layout, not invent one):
     ## Conversation pointers
     ## Truncated    (only when a section was dropped)
 
-    This card is a projection, not authority
+    This card is a projection; the events are the authority (ledger export-item <item>)
 
 The spec line names the item's current spec version (its latest item.spec
 event, also named in source_event_ids). The moved line appears only while
@@ -80,16 +80,17 @@ When the shown rows would name more event ids than the header holds, the
 oldest rows are capped first (links, notes, decisions, then questions), so
 the header always names every row the card shows. Owner, claim and title
 are then trimmed to what the cap needs, never below FIELD_MIN_WORDS words,
-each marked "(+K words cut)".
+each marked "(+K words cut; ledger export-item <item> --json)".
 
 Truncation drops Links, then Notes, then shortens ask fields (ask texts,
 then option descriptions, then the other fields; each down to
-ASK_MIN_WORDS words, marked "… (+K words cut; full text in event <id>)"),
+ASK_MIN_WORDS words, marked "… (+K words cut; full text in event <id>; ledger
+export-item <item> --json)"),
 then caps older Decisions, then Blockers, then Open questions, and only
 then trims a pathologically long title or next step, one word at a time,
-from the end (marked "(+K words cut)"). Option labels, status and the
-revision line are never trimmed. Each capped section keeps a "(+K cut)"
-marker. The next step reads the full card, so capping never changes it;
+from the end (marked "(+K words cut; ledger export-item <item> --json)"). Option labels, status and the
+revision line are never trimmed. Each capped section keeps a
+"(+K cut; ledger export-item <item> --json)" marker. The next step reads the full card, so capping never changes it;
 names inside it (blockers, claimant, chosen option) are clipped to a few
 words each, so its structure is never trimmed.
 
@@ -97,7 +98,8 @@ source_event_ids names the creation and state events, the shown rows,
 and the events the next step reads. Past SOURCE_ID_LIMIT ids it keeps the
 creation and state events, the newest open ask and the latest election,
 then every shown row, then the newest of the rest, and ends with
-"(+K cut)". The printed card is at most WORD_LIMIT words.
+"(+K cut; ledger export-item <item> --json)". The printed card is at most
+WORD_LIMIT words.
 """
 from __future__ import annotations
 
@@ -109,7 +111,7 @@ from .schema import SPEC_KIND
 from .store import Ledger
 
 WORD_LIMIT = 400
-FOOTER = "This card is a projection, not authority"
+FOOTER = "This card is a projection; the events are the authority"
 DROP_ORDER = ("links", "notes")
 CAP_ORDER = ("decisions", "blockers", "open_questions")
 # Rows that show an event id, capped oldest first when the header ids
@@ -200,6 +202,7 @@ def derive_next_step(
     claim: str | None,
     item_type: str = "",
     chosen: str | None = None,
+    item_id: str = "",
 ) -> str:
     """Project a next step from current status, blockers, and open questions.
 
@@ -225,7 +228,7 @@ def derive_next_step(
             _clip(name, STEP_NAME_WORDS) for name in blockers[:NEXT_STEP_BLOCKERS]
         )
         if len(blockers) > NEXT_STEP_BLOCKERS:
-            named += f" {_cut_count(len(blockers) - NEXT_STEP_BLOCKERS)}"
+            named += f" {_cut_count(len(blockers) - NEXT_STEP_BLOCKERS, item_id)}"
         clear = f"Clear blockers: {named}."
     if open_questions:
         if blockers:
@@ -319,7 +322,7 @@ class Card:
             "spec_claim_version": self.spec_claim_version,
             "spec_moved": spec_moved_line(self.spec_claim_version, self.spec_version),
             "truncated": list(self.truncated),
-            "footer": FOOTER,
+            "footer": footer_line(self.item_id),
         }
 
 
@@ -399,43 +402,56 @@ def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
     return _fmt_list(lines)
 
 
-# Markers name what was cut and, where one event holds it, that event's id.
-# No CLI verb prints an item's events yet, so no marker points at a command.
+# Markers name what was cut, where one event holds it that event's id, and
+# the command that prints the item's events and so recovers it.
 
 
-def _cut_count(count: int) -> str:
+def recover_command(item_id: str) -> str:
+    """The command that prints every event the card was cut from."""
+    return f"ledger export-item {item_id} --json"
+
+
+def footer_line(item_id: str) -> str:
+    """The card's last line: a projection, with what is authoritative."""
+    return f"{FOOTER} (ledger export-item {item_id})"
+
+
+def _cut_count(count: int, item_id: str) -> str:
     """Marker for rows or ids cut from a section or the header."""
-    return f"(+{count} cut)"
+    return f"(+{count} cut; {recover_command(item_id)})"
 
 
-def _cut_words(count: int) -> str:
+def _cut_words(count: int, item_id: str) -> str:
     """Marker for words trimmed from the title or next step."""
-    return f"(+{count} words cut)"
+    return f"(+{count} words cut; {recover_command(item_id)})"
 
 
-def _cut_marker(count: int, event_id: int) -> str:
+def _cut_marker(count: int, event_id: int, item_id: str) -> str:
     """Inline marker for words cut from an ask field held by ``event_id``."""
-    return f"… (+{count} words cut; full text in event {event_id})"
+    return (
+        f"… (+{count} words cut; full text in event {event_id}; "
+        f"{recover_command(item_id)})"
+    )
 
 
-# Words the ask marker adds; the count and the id are one token each.
-_MARKER_WORDS = len(_cut_marker(1, 1).split())
+# Words the ask marker adds; the count, the id and the item id are one token each.
+_MARKER_WORDS = len(_cut_marker(1, 1, "x").split())
 
 
-def _shown(row: Mapping[str, Any], path: str, value: str) -> str:
+def _shown(row: Mapping[str, Any], path: str, value: str, item_id: str) -> str:
     cut = int((row.get("omitted_words") or {}).get(path, 0))
     if cut <= 0:
         return value
-    return f"{value} {_cut_marker(cut, int(row['asked_event_id']))}"
+    return f"{value} {_cut_marker(cut, int(row['asked_event_id']), item_id)}"
 
 
-def _option_lines(row: Mapping[str, Any]) -> list[str]:
+def _option_lines(row: Mapping[str, Any], item_id: str) -> list[str]:
     lines: list[str] = []
     for index, option in enumerate(row.get("options") or []):
         label = str(option.get("label") or "").strip()
         description = str(option.get("description") or "").strip()
         if description:
-            description = _shown(row, f"options.{index}.description", description)
+            description = _shown(row, f"options.{index}.description", description, item_id)
         letter = chr(ord("A") + index) if index < 26 else str(index + 1)
         # An option pick already labels its options with letters.
         if len(label) == 1 and "A" <= label <= "Z":
@@ -459,19 +475,19 @@ def _default_only(payload: Mapping[str, Any]) -> bool:
     )
 
 
-def _fmt_questions(rows: tuple[dict[str, Any], ...]) -> str:
+def _fmt_questions(rows: tuple[dict[str, Any], ...], item_id: str) -> str:
     lines: list[str] = []
     for row in rows:
         lines.append(f"- event={row['asked_event_id']}: {row['question']}")
         if row.get("ask"):
-            lines.append(f"  ask: {_shown(row, 'ask', row['ask'])}")
+            lines.append(f"  ask: {_shown(row, 'ask', row['ask'], item_id)}")
         if row.get("options") and not row.get("default_only"):
             lines.append("  options:")
-            lines.extend(_option_lines(row))
+            lines.extend(_option_lines(row, item_id))
         for name in ASK_FIELDS:
             value = row.get(name)
             if value:
-                lines.append(f"  {name}: {_shown(row, name, value)}")
+                lines.append(f"  {name}: {_shown(row, name, value, item_id)}")
     return _fmt_list(lines)
 
 
@@ -527,14 +543,15 @@ def _fmt_tried(rows: tuple[dict[str, Any], ...]) -> str:
     return _fmt_list(lines)
 
 
-def _fmt_reviews(rows: tuple[dict[str, Any], ...]) -> str:
+def _fmt_reviews(rows: tuple[dict[str, Any], ...], item_id: str) -> str:
     lines: list[str] = []
     for row in rows:
         lines.append(f"- event={row['event_id']} round {row['round']}: {row['verdict']}")
         lines.extend(f"  finding: {finding}" for finding in row["findings"])
         if row.get("findings_cut"):
             lines.append(
-                f"  {_cut_count(row['findings_cut'])} findings; full list in event {row['event_id']}"
+                f"  {_cut_count(row['findings_cut'], item_id)} findings; "
+                f"full list in event {row['event_id']}"
             )
     return _fmt_list(lines)
 
@@ -578,7 +595,7 @@ def _with_marker(body: str, card: Card, section: str) -> str:
     count = _omitted_count(card, section)
     if count <= 0:
         return body
-    marker = _cut_count(count)
+    marker = _cut_count(count, card.item_id)
     if body == "(none)":
         return marker
     return f"{body}\n{marker}"
@@ -588,14 +605,14 @@ def _with_inline_marker(text: str, card: Card, section: str) -> str:
     count = _omitted_count(card, section)
     if count <= 0:
         return text
-    return f"{text} {_cut_words(count)}"
+    return f"{text} {_cut_words(count, card.item_id)}"
 
 
 def format_card(card: Card) -> str:
     """Render the stable text/markdown card, including the authority footer."""
     source = ", ".join(str(i) for i in card.source_event_ids)
     if card.source_omitted > 0:
-        source = f"{source} {_cut_count(card.source_omitted)}"
+        source = f"{source} {_cut_count(card.source_omitted, card.item_id)}"
     parts = [
         f"# {card.item_id}",
         f"revision: {card.revision_id} {card.revision_hash}",
@@ -616,7 +633,9 @@ def format_card(card: Card) -> str:
         _with_marker(_fmt_decisions(card.decisions), card, "decisions"),
         "",
         "## Open questions",
-        _with_marker(_fmt_questions(card.open_questions), card, "open_questions"),
+        _with_marker(
+            _fmt_questions(card.open_questions, card.item_id), card, "open_questions"
+        ),
         "",
         "## Next step",
         _with_inline_marker(card.next_step, card, "next_step"),
@@ -634,10 +653,11 @@ def format_card(card: Card) -> str:
         rows = getattr(card, section)
         if not rows and _omitted_count(card, section) <= 0:
             continue
-        parts.extend(["", f"## {heading}", _with_marker(fmt(rows), card, section)])
+        body = fmt(rows, card.item_id) if fmt is _fmt_reviews else fmt(rows)
+        parts.extend(["", f"## {heading}", _with_marker(body, card, section)])
     if card.truncated:
         parts.extend(["", "## Truncated", "dropped: " + ", ".join(card.truncated)])
-    parts.extend(["", FOOTER])
+    parts.extend(["", footer_line(card.item_id)])
     return "\n".join(parts) + "\n"
 
 
@@ -833,6 +853,7 @@ def bound_card(card: Card) -> Card:
                 claim=card.claim,
                 item_type=current.type,
                 chosen=_latest_choice(card.decisions),
+                item_id=current.item_id,
             )
         updated = replace(
             current,
@@ -1208,6 +1229,7 @@ def project_item(
         claim=claim,
         item_type=item["type"],
         chosen=_latest_choice(elected),
+        item_id=item_id,
     )
     base: set[int] = set()
     created_id = item.get("created_event_id")
@@ -1261,6 +1283,8 @@ __all__ = [
     "CAP_ORDER",
     "DROP_ORDER",
     "FOOTER",
+    "footer_line",
+    "recover_command",
     "RESUME_SECTIONS",
     "WORD_LIMIT",
     "Card",

@@ -16,8 +16,8 @@ from ledger.card import (
     _bound_ids,
     _key_step_ids,
     DROP_ORDER,
-    FOOTER,
     WORD_LIMIT,
+    footer_line,
     format_card,
     project_card,
     project_item,
@@ -210,7 +210,7 @@ def test_truncated_card_fits_word_limit(tmp_path: Path) -> None:
     assert "dropped: links, notes" in text
     assert "https://example.invalid" not in text
     assert "note-0 " not in text
-    assert "## Notes\n(+12 cut)\n" in text
+    assert "## Notes\n(+12 cut; ledger export-item it-1 --json)\n" in text
     assert "ledger query" not in text
     lg.close()
 
@@ -247,8 +247,9 @@ def test_footer_is_projection_not_authority(tmp_path: Path) -> None:
     lg = open_ledger(_db(tmp_path))
     _create(lg, "it-1", "ticket")
     text = format_card(project_card(lg, "it-1"))
-    assert text.rstrip().endswith(FOOTER)
-    assert "This card is a projection, not authority" in text
+    assert text.rstrip().endswith(footer_line("it-1"))
+    assert "This card is a projection; the events are the authority" in text
+    assert "(ledger export-item it-1)" in text
     lg.close()
 
 
@@ -381,7 +382,7 @@ def test_json_structured_same_content(tmp_path: Path, monkeypatch) -> None:
     assert data["revision"]["hash"]
     assert data["decisions"][0]["event_id"] == elected.id
     assert data["decisions"][0]["quote_ref"] == 1
-    assert data["footer"] == FOOTER
+    assert data["footer"] == footer_line(data["item_id"])
     assert f"revision: {data['revision']['id']} {data['revision']['hash']}" in text_out
     assert data["next_step"] in text_out
     assert f"event={elected.id} quote_ref=1" in text_out
@@ -401,7 +402,7 @@ def test_md_writes_human_copy(tmp_path: Path, monkeypatch) -> None:
     assert dest.exists()
     written = dest.read_text(encoding="utf-8")
     assert written == out
-    assert FOOTER in written
+    assert footer_line("it-1") in written
 
 
 def test_md_refuses_synced_root(tmp_path: Path, monkeypatch) -> None:
@@ -501,7 +502,7 @@ def test_decision_heavy_card_fits_and_keeps_latest(tmp_path: Path) -> None:
     assert "links" in card.truncated
     assert "notes" in card.truncated
     assert "(+" in text
-    assert re.search(r"^\(\+\d+ cut\)$", text, re.M)
+    assert re.search(r"^\(\+\d+ cut; ledger export-item \S+ --json\)$", text, re.M)
     assert "ledger query" not in text
     lg.close()
 
@@ -526,7 +527,7 @@ def test_blocker_heavy_card_fits(tmp_path: Path) -> None:
     assert card.next_step in text
     assert "status: blocked" in text
     assert f"revision: {card.revision_id}" in text
-    assert re.search(r"^\(\+\d+ cut\)$", text, re.M)
+    assert re.search(r"^\(\+\d+ cut; ledger export-item \S+ --json\)$", text, re.M)
     assert "ledger query" not in text
     lg.close()
 
@@ -556,7 +557,7 @@ def test_open_question_heavy_card_fits_and_keeps_latest(tmp_path: Path) -> None:
     assert "## Next step" in text
     assert card.next_step == "Answer open questions before continuing."
     assert card.next_step in text
-    assert re.search(r"^\(\+\d+ cut\)$", text, re.M)
+    assert re.search(r"^\(\+\d+ cut; ledger export-item \S+ --json\)$", text, re.M)
     assert "ledger query" not in text
     lg.close()
 
@@ -725,7 +726,7 @@ def test_md_overwrites_existing_via_replace(tmp_path: Path, monkeypatch) -> None
     written = dest.read_text(encoding="utf-8")
     assert written == out
     assert written != "stale\n"
-    assert FOOTER in written
+    assert footer_line("it-1") in written
     assert replaced
     src, dst = replaced[0]
     assert dst.resolve() == dest.resolve()
@@ -809,10 +810,10 @@ def test_blocker_flood_next_step_bounded(tmp_path: Path) -> None:
     assert word_count(text) <= WORD_LIMIT
     # The step names the first five blockers of the full set, then a count;
     # it does not follow the capped Blockers section.
-    assert card.next_step == "Clear blockers: b000, b001, b002, b003, b004 (+595 cut)."
+    assert card.next_step == "Clear blockers: b000, b001, b002, b003, b004 (+595 cut; ledger export-item it-1 --json)."
     assert "b599" not in card.next_step
     assert "## Blockers\n- b000\n" in text
-    assert re.search(r"^\(\+\d+ cut\)$", text, re.M)
+    assert re.search(r"^\(\+\d+ cut; ledger export-item \S+ --json\)$", text, re.M)
     data = card.as_dict()
     assert data["next_step"] == card.next_step
     assert "b599" not in data["next_step"]
@@ -830,7 +831,9 @@ def test_title_flood_bounded(tmp_path: Path) -> None:
     assert "w000" in card.title
     assert "w599" not in card.title
     assert "w599" not in text
-    assert re.search(r"^title: w000 .* \(\+\d+ words cut\)$", text, re.M)
+    assert re.search(
+        r"^title: w000 .* \(\+\d+ words cut; ledger export-item \S+ --json\)$", text, re.M
+    )
     assert "ledger query" not in text
     data = card.as_dict()
     assert data["title"] == card.title
@@ -1049,7 +1052,8 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
     assert cut > 0
     assert len(row["ask"].split()) + cut == 600
     assert _ask_text_line(text) == (
-        f"  ask: {row['ask']} … (+{cut} words cut; full text in event {asked.id})"
+        f"  ask: {row['ask']} … (+{cut} words cut; full text in event {asked.id}; "
+        "ledger export-item dc-1 --json)"
     )
     assert row["ask"].startswith("a000 a001")
     assert "a599" not in text
@@ -1110,7 +1114,8 @@ def test_huge_option_description_is_shortened(tmp_path: Path, monkeypatch) -> No
     assert len(description.split()) + cut == 500
     assert f"- event={asked.id}: pick the probe lane?" in text
     assert (
-        f"    A) {description} … (+{cut} words cut; full text in event {asked.id})\n"
+        f"    A) {description} … (+{cut} words cut; full text in event {asked.id}; "
+        "ledger export-item dc-1 --json)\n"
         in text
     )
     assert "    B) short\n" in text
@@ -1249,7 +1254,7 @@ def test_capped_away_question_still_needs_an_answer(tmp_path: Path) -> None:
     assert word_count(text) <= WORD_LIMIT
     assert card.open_questions == ()
     assert "open_questions" in card.truncated
-    assert "## Open questions\n(+1 cut)\n" in text
+    assert "## Open questions\n(+1 cut; ledger export-item dc-1 --json)\n" in text
     # The question is hidden, not answered, so the next step is unchanged,
     # and the header still names the ask it was derived from.
     assert card.next_step == "Answer open questions before continuing."
@@ -1485,7 +1490,9 @@ def test_four_hundred_asks_keep_header_inside_cap(tmp_path: Path, monkeypatch) -
     assert last is not None
     assert word_count(text) <= WORD_LIMIT
     header = text.splitlines()[2]
-    assert header.endswith(f" (+{card.source_omitted} cut)")
+    assert header.endswith(
+        f" (+{card.source_omitted} cut; ledger export-item dc-1 --json)"
+    )
     assert len(card.source_event_ids) == 40
     assert len(card.source_event_ids) + card.source_omitted == 401
     # The creation event and the newest ask are always named.
@@ -1562,7 +1569,7 @@ def test_huge_election_capped_still_names_choice_and_event(tmp_path: Path) -> No
     text = format_card(card)
     assert word_count(text) <= WORD_LIMIT
     assert card.decisions == ()
-    assert "## Decisions\n(+1 cut)\n" in text
+    assert "## Decisions\n(+1 cut; ledger export-item dc-1 --json)\n" in text
     assert card.next_step == "Decided: blue. Nothing left to answer."
     assert elected.id in card.source_event_ids
     lg.close()
@@ -1605,7 +1612,7 @@ def test_header_names_every_shown_row(tmp_path: Path) -> None:
     # 48 ids would not fit the 40-id header, so the oldest notes are capped
     # instead and the header names every row the card shows.
     assert card.truncated == ("notes",)
-    assert "## Notes\n" in text and "\n(+8 cut)\n" in text
+    assert "## Notes\n" in text and "\n(+8 cut; ledger export-item dc-1 --json)\n" in text
     assert card.source_omitted == 0
     assert len(card.source_event_ids) == 40
     assert _shown_event_ids(text) <= set(card.source_event_ids)
@@ -1667,7 +1674,9 @@ def test_blocker_flood_step_keeps_count_and_question(tmp_path: Path) -> None:
     assert word_count(text) <= WORD_LIMIT
     name = " ".join(["w0"] * 8) + " …"
     assert card.next_step.startswith(f"Clear blockers: {name}, ")
-    assert card.next_step.endswith(" (+1 cut); then answer open questions.")
+    assert card.next_step.endswith(
+        " (+1 cut; ledger export-item dc-1 --json); then answer open questions."
+    )
     assert card.next_step == full.next_step
     assert "next_step" not in card.truncated
     lg.close()
@@ -1691,7 +1700,7 @@ def test_long_owner_or_claim_is_trimmed(tmp_path: Path, field: str) -> None:
     assert "o599" not in text
     line = next(line for line in text.splitlines() if line.startswith(f"{field}: "))
     cut = 600 - len(value.split())
-    assert line == f"{field}: {value} (+{cut} words cut)"
+    assert line == f"{field}: {value} (+{cut} words cut; ledger export-item it-1 --json)"
     # The decision stays: the long field is trimmed before content is capped.
     assert "choose-00? -> yes-00" in text
     # The next step reads the full field, clipped to eight words.

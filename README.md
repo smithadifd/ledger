@@ -44,7 +44,7 @@ What that looks like in practice:
 - `elect` refuses a quote that is not a byte-exact substring of the captured
   utterance it cites, and `lint-quotes` re-checks every election later.
 - `card` renders a resume card that names the events it was built from and
-  ends with "This card is a projection, not authority".
+  ends with "This card is a projection; the events are the authority".
 - Every write refuses without `LEDGER_HARNESS`, so the log always says
   whether a shell, a scheduled job or an agent runtime wrote the line.
 - One database holds one system's work, and the file itself records which
@@ -154,7 +154,7 @@ status: open
 ## Progress
 - event=3: examples checked against a fresh database
 
-This card is a projection, not authority
+This card is a projection; the events are the authority (ledger export-item demo-1)
 ```
 
 `search` builds a derived full-text index (`search.db`, beside the database)

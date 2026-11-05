@@ -8,6 +8,8 @@ the relation (the kept item's as ``duplicated-by``). There is no merge verb.
 """
 from __future__ import annotations
 
+import argparse
+
 from ledger.schema import LINK_RELS
 from ledger.verbs import (
     EXIT_NOT_FOUND,
@@ -15,6 +17,7 @@ from ledger.verbs import (
     CliError,
     Context,
     Result,
+    UsageError,
     Verb,
     actor_kwargs,
     event_dict,
@@ -24,17 +27,54 @@ from ledger.verbs import (
 )
 
 DUPLICATE_OF = "duplicate-of"
+DEFAULT_REL = "url"
+
+EPILOG = """\
+The target is given once: after the item, or with --target. Without --rel the
+relation is url, so a local file path or a web address needs no flag.
+
+examples:
+  ledger link it-1a2b3c4d5e6f /home/me/notes/brief.md
+  ledger link it-1a2b3c4d5e6f --rel pr --target https://github.com/owner/repo/pull/12
+  ledger link it-1a2b3c4d5e6f --rel branch feat/retry
+"""
+
+USAGE = (
+    "link takes exactly one target: link ITEM TARGET [--rel REL] "
+    "(or link ITEM --target TARGET [--rel REL]); a relation goes after --rel, "
+    "never as a bare word"
+)
 
 
 def add_arguments(parser) -> None:
+    parser.epilog = EPILOG
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
     parser.add_argument("item")
     parser.add_argument(
-        "--rel",
-        required=True,
-        choices=LINK_RELS,
-        help=f"{DUPLICATE_OF} also closes the item as a duplicate of --target",
+        "positional_target",
+        nargs="*",
+        metavar="TARGET",
+        help="a path, URL, PR, branch, session or item id (or give --target)",
     )
-    parser.add_argument("--target", required=True)
+    parser.add_argument(
+        "--rel",
+        default=DEFAULT_REL,
+        choices=LINK_RELS,
+        help=f"the relation (default {DEFAULT_REL}); "
+        f"{DUPLICATE_OF} also closes the item as a duplicate of the target",
+    )
+    parser.add_argument("--target", help="the target, as a flag")
+
+
+def _target(args) -> str:
+    """The one target the argv names: positional or ``--target``, never both."""
+    named = list(getattr(args, "positional_target", None) or [])
+    option = getattr(args, "target", None)
+    if option is not None:
+        named.append(option)
+    if len(named) != 1:
+        raise UsageError(USAGE)
+    return named[0]
 
 
 def _closed_as_duplicate(lg, item_id: str) -> bool:
@@ -107,6 +147,7 @@ def _duplicate(args, ctx: Context) -> Result:
 
 
 def run(args, ctx: Context) -> Result:
+    args.target = _target(args)
     if args.rel == DUPLICATE_OF:
         return _duplicate(args, ctx)
     lg = open_db(ctx, write=True)

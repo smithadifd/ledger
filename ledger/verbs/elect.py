@@ -22,6 +22,7 @@ offered options is allowed: asks accept free-text answers.
 """
 from __future__ import annotations
 
+import argparse
 import json
 from typing import Any
 
@@ -39,7 +40,19 @@ from ledger.verbs import (
 )
 
 
+EPILOG = """\
+Every flag except --ask is required. --rejected and --quote are repeatable:
+give --rejected once for each alternative that was not chosen, and --quote once
+for each verbatim span of the captured utterance (--quote-ref is its event id).
+
+example:
+  ledger elect it-1a2b3c4d5e6f --question "Which retry policy?" --chosen backoff --chosen-description "Exponential backoff, three tries" --rejected fixed --rejected none --scope "the sync job" --quote-ref 2 --quote "use backoff"
+"""
+
+
 def add_arguments(parser) -> None:
+    parser.epilog = EPILOG
+    parser.formatter_class = argparse.RawDescriptionHelpFormatter
     parser.add_argument("item")
     parser.add_argument("--question", required=True)
     parser.add_argument("--chosen", required=True)
@@ -48,7 +61,8 @@ def add_arguments(parser) -> None:
         "--rejected",
         required=True,
         action="append",
-        help="rejected option label (repeat for each rejected alternative)",
+        help="rejected option label; required, and repeatable: give it once for each "
+        "rejected alternative",
     )
     parser.add_argument("--scope", required=True)
     parser.add_argument("--quote-ref", required=True, type=int)

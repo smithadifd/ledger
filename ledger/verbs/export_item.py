@@ -3,12 +3,16 @@
 The backup export (``ledger export``) keeps every event so a restore can
 replay the hash chain. This is the per-item view a reader pulls from.
 ``--ticket`` prints the recorded ``### Ticket:`` section once instead.
+
+The view ends with one completeness line (``--json``: a ``completeness``
+object in ``data``) naming the events returned, the events on the item and
+the events decayed, so a reader knows whether it holds the whole record.
 """
 from __future__ import annotations
 
 import json
 
-from ledger.export import item_export, item_ticket_text
+from ledger.export import item_export_counted, item_ticket_text
 from ledger.verbs import (
     EXIT_NOT_FOUND,
     CliError,
@@ -41,11 +45,19 @@ def run(args, ctx: Context) -> Result:
                     str(exc), code="not_found", exit_code=EXIT_NOT_FOUND,
                 ) from None
             return Result(data={"item_id": args.item, "ticket": text}, text=text)
-        records = item_export(lg, args.item)
+        records, completeness = item_export_counted(lg, args.item)
     finally:
         lg.close()
-    text = "\n".join(json.dumps(record, sort_keys=True) for record in records)
-    return Result(data={"item_id": args.item, "events": records}, text=text)
+    line = (
+        f"completeness: {completeness['events_returned']} events returned, "
+        f"{completeness['events_on_item']} events on the item, "
+        f"{completeness['events_decayed']} decayed"
+    )
+    text = "\n".join([*(json.dumps(record, sort_keys=True) for record in records), line])
+    return Result(
+        data={"item_id": args.item, "events": records, "completeness": completeness},
+        text=text,
+    )
 
 
 VERB = Verb(
