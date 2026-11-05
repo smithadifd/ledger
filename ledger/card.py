@@ -200,6 +200,7 @@ def derive_next_step(
     claim: str | None,
     item_type: str = "",
     chosen: str | None = None,
+    item_id: str = "",
 ) -> str:
     """Project a next step from current status, blockers, and open questions.
 
@@ -252,7 +253,7 @@ def derive_next_step(
         return UNASKED_DECISION_STEP
     if status == "blocked":
         return "Clear blockers."
-    return claimed or "Pick up this item."
+    return claimed or f"Resume with: ledger resume --item {item_id}".rstrip()
 
 
 @dataclass(frozen=True)
@@ -833,6 +834,7 @@ def bound_card(card: Card) -> Card:
                 claim=card.claim,
                 item_type=current.type,
                 chosen=_latest_choice(card.decisions),
+                item_id=current.item_id,
             )
         updated = replace(
             current,
@@ -1208,6 +1210,7 @@ def project_item(
         claim=claim,
         item_type=item["type"],
         chosen=_latest_choice(elected),
+        item_id=item_id,
     )
     base: set[int] = set()
     created_id = item.get("created_event_id")

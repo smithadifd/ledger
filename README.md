@@ -259,6 +259,7 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `query` | list current items, with filters and a row cap | no |
 | `ready` | list open items with no open blocker | no |
 | `card` | render a bounded resume card for an item | no |
+| `resume` | list each open item's newest stop and the command that continues it; `--brief` adds the agent contract's short form | no |
 | `decisions` | list decision records with their current standing | no |
 | `entities` | render the entity registry as markdown tables or JSON, naming the ledger revision | no |
 | `context` | print a bounded orientation pack for an item or initiative and its linked items | no |
@@ -305,6 +306,10 @@ trace.
 | `LEDGER_POINTER_SIDECAR` | env | an executable that returns conversation pointers for a card |
 | `search_roots` | `config.json` beside the database | absolute paths whose `standards/*.md` and `decisions/*.md` the search index includes |
 | `claim_ttl_seconds` | `config.json` beside the database | default claim lease (4 hours when unset) |
+
+## For agents
+
+An agent that has only the installed package should learn from the ledger itself that it exists and what to write. [docs/agent-contract.md](docs/agent-contract.md) is the one page for it: what to write without asking, the reading order, the actor stamps and how to end a session. `ledger resume --brief` prints its short form followed by every open item's stop point and the command to resume it, so a session-start hook can put both into the agent's context.
 
 ## Working with agent skills
 
