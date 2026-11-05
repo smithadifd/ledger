@@ -136,13 +136,16 @@ def _duplicate(args, ctx: Context) -> Result:
         with lg.transaction():
             link_found = lg.event_by_key(link_key)
             stored = (link_found is not None, lg.event_by_key(close_key) is not None)
-            # A lone event under the key that is not a duplicate-of link (a
-            # plain link, a note) is another write intent: the appends below
-            # refuse it as a conflict, so it is not a half-written pair.
+            # A lone event under the key is this call's half-written first
+            # event only when kind, rel, item and target all match. Anything
+            # else (a plain link, a note, another item or target) is another
+            # write intent: the appends below refuse it as a conflict.
             link_is_ours = (
                 link_found is not None
                 and link_found.kind == "item.linked"
+                and link_found.item_id == loser
                 and link_found.payload.get("rel") == DUPLICATE_OF
+                and link_found.payload.get("target") == kept
             )
             if (stored == (True, False) and link_is_ours) or stored == (False, True):
                 # One event of the pair exists under this key; finishing or
