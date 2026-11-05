@@ -46,7 +46,10 @@ Actor stamps: LEDGER_OPERATOR (the person), LEDGER_AGENT (this seat),
 LEDGER_HARNESS (the runtime; writes refuse without it), LEDGER_MODEL (the
 model), LEDGER_SESSION (the session id), all exported before you write.
 Close rule: end a session by appending item.stopped on each item you worked
-and printing the exact resume command, never prose.
+and printing the exact resume command, never prose. Replace ITEM:
+  ledger append --item ITEM --kind item.stopped --payload '{"point": "what is done and what is next", "phase": "build", "skills": ["review"], "refs": ["docs/plan.md"]}'
+  ledger resume --item ITEM
+phase is one of orient, plan, build, review, close. skills and refs are optional.
 """
 
 

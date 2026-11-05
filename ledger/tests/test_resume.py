@@ -15,6 +15,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from ledger.schema import PHASES
 from ledger.store import Ledger, open_ledger
 from ledger.verbs import EXIT_NOT_FOUND
 from ledger.verbs.resume import SHORT_FORM
@@ -187,6 +188,32 @@ def test_brief_short_form_is_short_and_names_every_trigger_on_the_page(
     assert code == 0, err
     assert out.startswith(SHORT_FORM)
     assert "stop a" in out[len(SHORT_FORM):]
+
+
+def _short_form_command(prefix: str) -> list[str]:
+    [line] = [ln for ln in SHORT_FORM.splitlines() if ln.startswith(f"  {prefix}")]
+    return shlex.split(line.replace("ITEM", "it-a"))
+
+
+def test_short_form_stop_example_appends_and_resume_shows_it(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    append = _short_form_command("ledger append")
+    assert append[0] == "ledger"
+    code, _out, err = invoke(monkeypatch, ["--db", db, *append[1:]])
+    assert code == 0, err
+    resume = _short_form_command("ledger resume")
+    assert resume[0] == "ledger"
+    code, out, err = invoke(monkeypatch, ["--db", db, *resume[1:]])
+    assert code == 0, err
+    assert "stopped (build): what is done and what is next" in out
+    assert "skills: review" in out
+
+
+def test_short_form_phase_list_equals_the_schema_phases() -> None:
+    match = re.search(r"phase is one of ([a-z, ]+)\.", SHORT_FORM)
+    assert match, "short form does not list the phases"
+    assert tuple(match.group(1).split(", ")) == PHASES
 
 
 def test_fresh_install_prints_the_short_form_and_no_open_items(tmp_path, monkeypatch) -> None:
