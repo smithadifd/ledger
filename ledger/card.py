@@ -255,7 +255,7 @@ def derive_next_step(
         return UNASKED_DECISION_STEP
     if status == "blocked":
         return "Clear blockers."
-    return claimed or "Pick up this item."
+    return claimed or f"Resume with: ledger resume --item {item_id}".rstrip()
 
 
 @dataclass(frozen=True)

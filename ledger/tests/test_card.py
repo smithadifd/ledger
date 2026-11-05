@@ -588,7 +588,7 @@ def test_empty_blocked_by_clears_blockers(tmp_path: Path) -> None:
     assert card.blockers == ()
     assert "Clear blockers" not in card.next_step
     assert "Clear blockers" not in text
-    assert card.next_step == "Pick up this item."
+    assert card.next_step == "Resume with: ledger resume --item it-1"
     lg.close()
 
 
@@ -638,7 +638,7 @@ def test_reopened_item_matches_ready_after_blocker_closes(
     assert code == 0, err
     assert "## Blockers\n(none)" in card_out
     assert "Clear blockers" not in card_out
-    assert "Pick up this item." in card_out
+    assert "Resume with: ledger resume --item C" in card_out
 
 
 def test_reopen_clears_blockers_while_blocker_still_open(tmp_path: Path) -> None:
@@ -660,7 +660,7 @@ def test_reopen_clears_blockers_while_blocker_still_open(tmp_path: Path) -> None
     assert card.status == "open"
     assert card.blockers == ()
     assert "Clear blockers" not in card.next_step
-    assert card.next_step == "Pick up this item."
+    assert card.next_step == "Resume with: ledger resume --item C"
     lg.close()
 
 
@@ -775,12 +775,12 @@ def test_blocks_link_direction_matches_ready(tmp_path: Path, monkeypatch) -> Non
     assert code == 0, err
     assert "## Blockers\n(none)" in out_a
     assert "Clear blockers" not in out_a
-    assert "Pick up this item." in out_a
+    assert "Resume with: ledger resume --item blk-a" in out_a
     code, out_b, err = invoke(monkeypatch, ["--db", db, "card", "blk-b"])
     assert code == 0, err
     assert "## Blockers\n- blk-a" in out_b
     assert "Clear blockers: blk-a." in out_b
-    assert "Pick up this item." not in out_b
+    assert "Resume with:" not in out_b
     lg = open_ledger(db)
     _append(lg, "item.state", {"status": "closed"}, "blk-a", "s-a")
     lg.close()
@@ -791,7 +791,7 @@ def test_blocks_link_direction_matches_ready(tmp_path: Path, monkeypatch) -> Non
     assert code == 0, err
     assert "## Blockers\n(none)" in out_b
     assert "Clear blockers" not in out_b
-    assert "Pick up this item." in out_b
+    assert "Resume with: ledger resume --item blk-b" in out_b
 
 
 def test_blocker_flood_next_step_bounded(tmp_path: Path) -> None:
@@ -1359,7 +1359,7 @@ def test_decision_next_step_says_what_is_true(tmp_path: Path, monkeypatch) -> No
         code, out, err = invoke(monkeypatch, ["--db", db, "card", item_id])
         assert code == 0, err
         assert f"## Next step\n{step}\n" in out, item_id
-        assert "Pick up this item." not in out
+        assert "Resume with:" not in out
         code, json_out, err = invoke(
             monkeypatch, ["--json", "--db", db, "card", item_id]
         )
