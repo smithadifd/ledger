@@ -372,7 +372,7 @@ python3 -m ledger.gen_verb_registry --check
 
 ## Status and roadmap
 
-Version 0.1.0, schema version 9. The event model, the hash chain, the export
+Version 0.1.1 (see [CHANGELOG.md](CHANGELOG.md)), schema version 9. The event model, the hash chain, the export
 format, the JSON envelope, the exit codes and the verb table above are what
 the repositories that vendor the ledger run on today. Until 1.0 a verb may
 gain or rename a flag; the events never change, a migration never rewrites
