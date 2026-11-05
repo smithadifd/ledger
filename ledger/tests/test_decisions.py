@@ -542,7 +542,7 @@ def test_reference_must_be_a_path_or_id_not_a_copy(ledger, ticket) -> None:
 @pytest.mark.parametrize("ref", [
     "skills/_lib/ledger/decisions.py",
     "skills/_lib/ledger/decisions.py:42",
-    "README.md",
+    "NOTES.md",
     "/srv/checkout/notes/plan.md:10-20",
     "example-org/example-repo#7",
     "#12",

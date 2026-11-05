@@ -19,7 +19,7 @@
        "tags": [{"type": "ticket", "id": "TK-100"}, {"type": "initiative", "id": "INIT-STORE"}],
        "verbatim": "I lean towards the shared store.",
        "phase": "plan",
-       "evidence": "docs/plan.md"
+       "evidence": "plan.md"
      }},
     {"key": "naming", "kind": "decision.recorded",
      "payload": {
