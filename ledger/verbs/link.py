@@ -34,7 +34,7 @@ The target is given once: after the item, or with --target. Without --rel the
 relation is url, so a local file path or a web address needs no flag.
 
 examples:
-  ledger link it-1a2b3c4d5e6f /home/me/notes/brief.md
+  ledger link it-1a2b3c4d5e6f ~/notes/brief.md
   ledger link it-1a2b3c4d5e6f --rel pr --target https://github.com/owner/repo/pull/12
   ledger link it-1a2b3c4d5e6f --rel branch feat/retry
 """
