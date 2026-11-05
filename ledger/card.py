@@ -34,7 +34,7 @@ Format (stable — a later reader should parse this layout, not invent one):
     ## Conversation pointers
     ## Truncated    (only when a section was dropped)
 
-    This card is a projection; the events are the authority (ledger export-item <item>)
+    This card is a projection; the events are the authority (ledger export-item -- <item>)
 
 The spec line names the item's current spec version (its latest item.spec
 event, also named in source_event_ids). The moved line appears only while
@@ -80,7 +80,7 @@ When the shown rows would name more event ids than the header holds, the
 oldest rows are capped first (links, notes, decisions, then questions), so
 the header always names every row the card shows. Owner, claim and title
 are then trimmed to what the cap needs, never below FIELD_MIN_WORDS words,
-each marked "(+K words cut; ledger export-item <item> --json)".
+each marked "(+K words cut; ledger export-item --json -- <item>)".
 
 Truncation drops Links, then Notes, then shortens ask fields (ask texts,
 then option descriptions, then the other fields; each down to
@@ -88,9 +88,9 @@ ASK_MIN_WORDS words, marked "… (+K words cut; full text in event <id>; ledger
 export-item <item> --json)"),
 then caps older Decisions, then Blockers, then Open questions, and only
 then trims a pathologically long title or next step, one word at a time,
-from the end (marked "(+K words cut; ledger export-item <item> --json)"). Option labels, status and the
+from the end (marked "(+K words cut; ledger export-item --json -- <item>)"). Option labels, status and the
 revision line are never trimmed. Each capped section keeps a
-"(+K cut; ledger export-item <item> --json)" marker. The next step reads the full card, so capping never changes it;
+"(+K cut; ledger export-item --json -- <item>)" marker. The next step reads the full card, so capping never changes it;
 names inside it (blockers, claimant, chosen option) are clipped to a few
 words each, so its structure is never trimmed.
 
@@ -98,11 +98,12 @@ source_event_ids names the creation and state events, the shown rows,
 and the events the next step reads. Past SOURCE_ID_LIMIT ids it keeps the
 creation and state events, the newest open ask and the latest election,
 then every shown row, then the newest of the rest, and ends with
-"(+K cut; ledger export-item <item> --json)". The printed card is at most
+"(+K cut; ledger export-item --json -- <item>)". The printed card is at most
 WORD_LIMIT words.
 """
 from __future__ import annotations
 
+import shlex
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Mapping
 
@@ -255,7 +256,9 @@ def derive_next_step(
         return UNASKED_DECISION_STEP
     if status == "blocked":
         return "Clear blockers."
-    return claimed or f"Resume with: ledger resume --item {item_id}".rstrip()
+    return claimed or (
+        f"Resume with: {shlex.join(['ledger', 'resume', f'--item={item_id}'])}".rstrip()
+    )
 
 
 @dataclass(frozen=True)
@@ -408,12 +411,14 @@ def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
 
 def recover_command(item_id: str) -> str:
     """The command that prints every event the card was cut from."""
-    return f"ledger export-item {item_id} --json"
+    # Flags first, then ``--``: an id with a leading hyphen or shell
+    # metacharacters stays one safe token in a copied command.
+    return shlex.join(["ledger", "export-item", "--json", "--", item_id])
 
 
 def footer_line(item_id: str) -> str:
     """The card's last line: a projection, with what is authoritative."""
-    return f"{FOOTER} (ledger export-item {item_id})"
+    return f"{FOOTER} ({shlex.join(['ledger', 'export-item', '--', item_id])})"
 
 
 def _cut_count(count: int, item_id: str) -> str:

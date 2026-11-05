@@ -375,7 +375,7 @@ def test_cut_notes_marker_names_the_recovery_command(tmp_path):
         text = format_card(project_card(lg, ITEM))
 
     assert re.search(
-        rf"## Notes\n\(\+\d+ cut; ledger export-item {ITEM} --json\)\n", text
+        rf"## Notes\n\(\+\d+ cut; ledger export-item --json -- {ITEM}\)\n", text
     )
     assert "(+" in text and not re.search(r"\(\+\d+ cut\)", text)
 
@@ -389,7 +389,7 @@ def test_card_footer_names_what_is_authoritative(tmp_path):
         text = format_card(project_card(lg, ITEM))
 
     assert text.rstrip("\n").endswith(
-        f"This card is a projection; the events are the authority (ledger export-item {ITEM})"
+        f"This card is a projection; the events are the authority (ledger export-item -- {ITEM})"
     )
 
 
@@ -484,3 +484,70 @@ def test_query_since_after_until_is_a_usage_error(dated_db, monkeypatch):
 
 def test_query_without_dates_is_unchanged(dated_db, monkeypatch):
     assert _query_ids(monkeypatch, dated_db) == ["it-new", "it-old"]
+
+
+# --- printed commands stay one safe token per id ---------------------------
+
+HOSTILE_IDS = ["x; touch PWN", "-lead", "a b$(touch PWN)"]
+
+
+@pytest.mark.parametrize("item_id", HOSTILE_IDS)
+def test_printed_commands_keep_a_hostile_id_one_token(tmp_path, monkeypatch, item_id):
+    import shlex
+    import subprocess
+
+    db = _db(tmp_path)
+    with open_ledger(db) as lg:
+        lg.append(
+            kind="item.created", item_id=item_id, idempotency_key="c", harness="pytest",
+            payload={"type": "ticket", "title": "hostile"},
+        )
+        for index in range(60):
+            lg.append(
+                kind="item.note", item_id=item_id, idempotency_key=f"n{index}",
+                harness="pytest",
+                payload={"text": " ".join(f"word{index}x{i}" for i in range(12))},
+            )
+        text = format_card(project_card(lg, item_id))
+
+    marker = re.search(r"## Notes\n\(\+\d+ cut; (ledger [^\n]*)\)\n", text)
+    footer = re.search(r"\((ledger export-item [^\n]*)\)\n\Z", text)
+    assert marker and footer
+    expected = {
+        marker.group(1): ["ledger", "export-item", "--json", "--", item_id],
+        footer.group(1): ["ledger", "export-item", "--", item_id],
+    }
+    for command, tokens in expected.items():
+        # One token for the id, however many metacharacters it holds.
+        assert shlex.split(command) == tokens
+        # A shell reads it as data: swap the program for printf and nothing runs.
+        proc = subprocess.run(
+            ["sh", "-c", command.replace("ledger", "printf '%s\\n'", 1)],
+            cwd=tmp_path, capture_output=True, text=True,
+        )
+        assert proc.stdout.splitlines() == tokens[1:]
+        assert not (tmp_path / "PWN").exists()
+        # And the ledger itself runs it: the id, hyphen first or not, is found.
+        code, out, err = invoke(monkeypatch, ["--db", db, *tokens[1:]])
+        assert code == 0, err
+        assert item_id in out
+
+
+@pytest.mark.parametrize("item_id", HOSTILE_IDS)
+def test_next_step_resume_command_keeps_a_hostile_id_one_token(tmp_path, monkeypatch, item_id):
+    import shlex
+
+    db = _db(tmp_path)
+    with open_ledger(db) as lg:
+        lg.append(
+            kind="item.created", item_id=item_id, idempotency_key="c", harness="pytest",
+            payload={"type": "ticket", "title": "hostile"},
+        )
+        step = project_card(lg, item_id).next_step
+
+    assert step.startswith("Resume with: ")
+    tokens = shlex.split(step[len("Resume with: "):])
+    assert tokens == ["ledger", "resume", f"--item={item_id}"]
+    code, out, err = invoke(monkeypatch, ["--db", db, *tokens[1:]])
+    assert code == 0, err
+    assert item_id in out

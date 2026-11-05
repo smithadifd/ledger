@@ -154,7 +154,7 @@ status: open
 ## Progress
 - event=3: examples checked against a fresh database
 
-This card is a projection; the events are the authority (ledger export-item demo-1)
+This card is a projection; the events are the authority (ledger export-item -- demo-1)
 ```
 
 `search` builds a derived full-text index (`search.db`, beside the database)
