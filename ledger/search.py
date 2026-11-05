@@ -593,10 +593,37 @@ def stored_manifest(index: Path) -> dict:
     return json.loads(row[0])
 
 
+def trailing_events(stored: Mapping[str, Any], events: Sequence[Event]) -> tuple[int | None, str]:
+    """Compare the index's recorded event position with the live event log.
+
+    Returns ``(new_events, reason)``. ``new_events`` is how many events were
+    appended after the index was built (0 when none), or ``None`` when the log
+    no longer matches what the index recorded: the recorded id is past the end,
+    or the event at that id has a different hash (a rewritten or truncated
+    log), or the record is unreadable. ``reason`` then says why. Anything
+    outside the clean-prefix case fails closed to ``None``.
+    """
+    last = stored.get("last_event_id")
+    recorded = stored.get("last_event_hash")
+    if type(last) is not int or last < 0:
+        return None, "last_event_id changed"
+    if not isinstance(recorded, str):
+        return None, "last_event_hash changed"
+    if last == 0:
+        # An index of an empty ledger recorded no hash.
+        return (len(events), "") if recorded == "" else (None, "last_event_hash changed")
+    at_id = next((event for event in events if event.id == last), None)
+    if at_id is None:
+        return None, "last_event_id changed"
+    if at_id.hash != recorded:
+        return None, "last_event_hash changed"
+    return sum(1 for event in events if event.id > last), ""
+
+
 def manifest_differences(stored: Mapping[str, Any], current: Mapping[str, Any]) -> list[str]:
     reasons = [
         f"{key} changed"
-        for key in ("format", "ranker", "db", "last_event_id", "last_event_hash", "roots")
+        for key in ("format", "ranker", "db", "roots")
         if stored.get(key) != current.get(key)
     ]
     old = stored.get("sources") or {}
@@ -611,7 +638,12 @@ def manifest_differences(stored: Mapping[str, Any], current: Mapping[str, Any]) 
 
 
 def index_status(db: Path | str, fallback_root: FallbackRoot | None = None) -> dict[str, Any]:
-    """``missing``, ``stale`` (with reasons) or ``current``. Writes nothing."""
+    """``missing``, ``stale`` (with reasons), ``behind`` or ``current``. Writes nothing.
+
+    ``behind`` means the index matches everything it recorded and only newer
+    events exist; ``stale`` is a real mismatch (format, ranker, database, roots,
+    source files, or an event log that no longer matches what was indexed).
+    """
     resolved = resolve_db_path(db)
     index = search_db_path(resolved)
     if not index.exists():
@@ -620,8 +652,26 @@ def index_status(db: Path | str, fallback_root: FallbackRoot | None = None) -> d
         stored = stored_manifest(index)
     except (sqlite3.Error, ValueError, SearchError) as exc:
         return {"path": str(index), "status": "stale", "reasons": [f"unreadable index: {exc}"]}
-    reasons = manifest_differences(stored, current_manifest(resolved, fallback_root))
-    return {"path": str(index), "status": "stale" if reasons else "current", "reasons": reasons}
+    roots, _note = resolve_roots(load_config(resolved), fallback_root)
+    last, _items, events = _read_ledger(resolved)
+    current = _manifest(resolved, last, events, roots, collect_sources(roots, linked_refs(events)))
+    reasons = manifest_differences(stored, current)
+    new_events, event_reason = trailing_events(stored, events)
+    if new_events is None:
+        reasons.append(event_reason)
+    if reasons:
+        return {"path": str(index), "status": "stale", "reasons": reasons}
+    if new_events:
+        # Events appended after the build are information, not a mismatch: the
+        # next search indexes them. ``search`` still rebuilds before answering.
+        return {
+            "path": str(index),
+            "status": "behind",
+            "reasons": [],
+            "indexed_to_event": stored["last_event_id"],
+            "new_events": new_events,
+        }
+    return {"path": str(index), "status": "current", "reasons": []}
 
 
 # --- build ------------------------------------------------------------------
@@ -781,9 +831,9 @@ def search(
         try:
             build_index(resolved, fallback_root)
         except (OSError, sqlite3.Error) as exc:
-            # Never answer from the stale index it could not replace.
+            # Never answer from the out-of-date index it could not replace.
             raise SearchError(
-                f"cannot rebuild the stale search index {search_db_path(resolved)}: {exc}"
+                f"cannot rebuild the search index {search_db_path(resolved)}: {exc}"
             ) from exc
     index = search_db_path(resolved)
     sql = (

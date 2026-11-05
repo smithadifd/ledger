@@ -242,7 +242,7 @@ def test_a_stale_index_is_rebuilt_before_a_filtered_search(db, monkeypatch):
                 "k7", "2026-04-01T09:00:00.000Z")
         _append(lg, "item.linked", "T-closed", {"rel": "item", "target": "INI-1"},
                 "k8", "2026-04-01T10:00:00.000Z")
-    assert search_mod.index_status(db)["status"] == "stale"
+    assert search_mod.index_status(db)["status"] == "behind"
     code, body = run_json(monkeypatch, db, "search", TEXT, "--limit", "50",
                           "--status", "open", "--initiative", "INI-1")
     assert code == EXIT_OK, body

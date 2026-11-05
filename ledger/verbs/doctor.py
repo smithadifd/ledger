@@ -1,7 +1,7 @@
 """Print the resolved DB path and schema version; non-zero if unusable.
 
-It also reports whether the derived search index is missing, stale or
-current. That report never changes the exit code.
+It also reports whether the derived search index is missing, stale,
+behind (only newer events) or current. That report never changes the exit code.
 
 It also lists claims whose lease has expired, with holder and age, so a dead
 seat's claim is noticed. That list never changes the exit code either.
@@ -110,12 +110,22 @@ def run(args, ctx: Context) -> Result:
         "search": found,
         "expired_claims": claims,
     }
-    hint = "" if found["status"] == "current" else " (ledger index rebuilds it)"
+    if found["status"] == "behind":
+        count = found["new_events"]
+        plural = "event" if count == 1 else "events"
+        shown = (
+            f"current to event {found['indexed_to_event']}, "
+            f"{count} new {plural} will be indexed on the next search"
+        )
+        hint = ""
+    else:
+        shown = found["status"]
+        hint = "" if found["status"] == "current" else " (ledger index rebuilds it)"
     return Result(
         data=data,
         text=(
             f"path: {resolved}\nschema_version: {version}\n"
-            f"search: {found['status']}{hint}\n"
+            f"search: {shown}{hint}\n"
         )
         + "".join(_expired_line(c) for c in claims["items"]),
     )

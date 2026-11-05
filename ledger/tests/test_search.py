@@ -271,7 +271,7 @@ def test_current_index_is_not_rebuilt(db, monkeypatch):
     assert body["data"]["rebuilt"] is True
 
 
-@pytest.mark.parametrize("change", ["edit", "add", "delete", "event", "link", "roots"])
+@pytest.mark.parametrize("change", ["edit", "add", "delete", "link", "roots"])
 def test_any_source_change_makes_the_index_stale(db, root, monkeypatch, change, tmp_path):
     run_json(monkeypatch, db, "index")
     assert _status(db) == "current"
@@ -283,9 +283,6 @@ def test_any_source_change_makes_the_index_stale(db, root, monkeypatch, change, 
         (root / "standards/new.md").write_text("# New\n")
     elif change == "delete":
         (root / "decisions/0005-feed-posture.md").unlink()
-    elif change == "event":
-        with open_ledger(db) as lg:
-            _append(lg, "item.created", "T-new", {"type": "ticket", "title": "new"}, "k9")
     elif change == "link":
         # A path named in an item payload, created after the index was built.
         with open_ledger(db) as lg:
@@ -301,6 +298,134 @@ def test_any_source_change_makes_the_index_stale(db, root, monkeypatch, change, 
     assert _status(db) == "stale"
     if change == "link":
         assert top(monkeypatch, db, "platypus")["id"] == "roadmaps/later.md#part"
+
+
+def _index_rows(db: Path) -> int:
+    conn = sqlite3.connect((db.parent / "search.db").as_uri() + "?mode=ro", uri=True)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM fts_corpus").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_trailing_events_are_behind_not_stale_and_search_finds_them(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "a fresh note about the capybara"}, "k9")
+    status = search_mod.index_status(db)
+    assert status["status"] == "behind"
+    assert status["reasons"] == []
+    assert status["new_events"] == 1
+    code, body = run_json(monkeypatch, db, "doctor")
+    assert code == EXIT_OK
+    assert body["data"]["search"]["status"] != "stale"
+    code, out, _err = invoke(monkeypatch, ["--db", str(db), "doctor"])
+    assert "search: current to event 8, 1 new event will be indexed on the next search" in out
+    assert "stale" not in out
+    code, body = run_json(monkeypatch, db, "search", "capybara")
+    assert code == EXIT_OK, body
+    assert body["data"]["cards"][0]["id"] == "T-feed"
+    assert body["data"]["refreshed"] is True
+    assert _status(db) == "current"
+    code, body = run_json(monkeypatch, db, "search", "capybara")
+    assert body["data"]["refreshed"] is False
+
+
+def test_index_verb_catches_up_when_behind(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    with open_ledger(db) as lg:
+        _append(lg, "item.created", "T-new", {"type": "ticket", "title": "new"}, "k9")
+    code, body = run_json(monkeypatch, db, "index")
+    assert body["data"]["rebuilt"] is True
+    assert _status(db) == "current"
+
+
+def test_behind_with_an_empty_ledger_index(tmp_path, monkeypatch):
+    monkeypatch.delenv("HARNESS_ROOT", raising=False)
+    path = tmp_path / "state" / "empty.db"
+    with open_ledger(path):
+        pass
+    run_json(monkeypatch, path, "index")
+    assert _status(path) == "current"
+    with open_ledger(path) as lg:
+        _append(lg, "item.created", "T-a", {"type": "ticket", "title": "a"}, "k1")
+    assert search_mod.index_status(path)["status"] == "behind"
+
+
+@pytest.mark.parametrize("changes", [{"last_event_hash": "f" * 64}, {"last_event_id": False}])
+def test_an_empty_ledger_index_with_a_bad_record_reads_as_stale(tmp_path, monkeypatch, changes):
+    monkeypatch.delenv("HARNESS_ROOT", raising=False)
+    path = tmp_path / "state" / "empty.db"
+    with open_ledger(path):
+        pass
+    run_json(monkeypatch, path, "index")
+    with open_ledger(path) as lg:
+        _append(lg, "item.created", "T-a", {"type": "ticket", "title": "a"}, "k1")
+    _rewrite_stored_manifest(path, **changes)
+    assert _status(path) == "stale"
+
+
+def _rewrite_stored_manifest(db: Path, **changes) -> None:
+    conn = sqlite3.connect(db.parent / "search.db")
+    try:
+        manifest = json.loads(
+            conn.execute("SELECT value FROM manifest WHERE key = 'manifest'").fetchone()[0])
+        manifest.update(changes)
+        conn.execute("UPDATE manifest SET value = ? WHERE key = 'manifest'",
+                     (json.dumps(manifest, sort_keys=True),))
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_a_rewritten_event_log_still_reads_as_stale(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "after the build"}, "k9")
+    # The event at the recorded id now has a different hash than the index saw.
+    _rewrite_stored_manifest(db, last_event_hash="0" * 64)
+    status = search_mod.index_status(db)
+    assert status["status"] == "stale"
+    assert "last_event_hash changed" in status["reasons"]
+    code, body = run_json(monkeypatch, db, "search", "quokka")
+    assert body["data"]["refreshed"] is True
+    assert _status(db) == "current"
+
+
+def test_a_truncated_event_log_still_reads_as_stale(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    _rewrite_stored_manifest(db, last_event_id=999)
+    status = search_mod.index_status(db)
+    assert status["status"] == "stale"
+    assert "last_event_id changed" in status["reasons"]
+
+
+@pytest.mark.parametrize("bad", [None, "8", -1, True])
+def test_an_unreadable_event_position_reads_as_stale(db, monkeypatch, bad):
+    run_json(monkeypatch, db, "index")
+    _rewrite_stored_manifest(db, last_event_id=bad)
+    assert _status(db) == "stale"
+
+
+def test_a_changed_ranker_is_stale_even_with_trailing_events(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "after the build"}, "k9")
+    _rewrite_stored_manifest(db, ranker="other")
+    assert _status(db) == "stale"
+
+
+def test_a_behind_index_is_never_answered_from(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    before = _index_rows(db)
+    with open_ledger(db) as lg:
+        _append(lg, "decision.asked", "T-feed", {
+            "question": "Which marmoset policy?", "options": [{"label": "a"}, {"label": "b"}],
+        }, "k9")
+    code, body = run_json(monkeypatch, db, "search", "marmoset")
+    assert code == EXIT_OK, body
+    assert body["data"]["cards"], body
+    assert _index_rows(db) == before + 1
 
 
 # --- doctor -------------------------------------------------------------------------
