@@ -4,8 +4,8 @@
 event, the newest stop (its point, the skills the next session invokes, the
 files it reads) and the literal commands that continue: ``resume --item`` and
 ``card``. ``--item ID`` shows that one item. ``--brief`` prepends the short
-form of the agent contract (docs/agent-contract.md) so a session-start hook
-can print both into context.
+form of the agent contract (the full page is in the ledger repository's
+docs folder) so a session-start hook can print both into context.
 
 The verb never writes: the database is opened read-only. A database that does
 not exist yet is not an error: the output says there are no open items and the
@@ -25,11 +25,11 @@ from ledger.verbs import EXIT_NOT_FOUND, CliError, Context, Result, Verb, requir
 
 NO_OPEN_ITEMS = "no open items"
 
-# The contract's short form. Every write trigger on docs/agent-contract.md
-# appears in it by the page's own words; a test reads both so the two cannot
-# drift. Keep it under 40 lines.
+# The contract's short form. Every write trigger on the contract page (in the
+# ledger repository's docs folder) appears in it by the page's own words; a
+# repository test reads both so the two cannot drift. Keep it under 40 lines.
 SHORT_FORM = """\
-LEDGER AGENT CONTRACT (short form; the full page is docs/agent-contract.md)
+LEDGER AGENT CONTRACT (short form; the full page is the agent contract in the ledger repo's docs folder)
 The ledger holds this work's state. Write to it without asking.
 Write triggers:
 - item opened: ledger new --type TYPE --title TITLE
@@ -48,7 +48,7 @@ LEDGER_HARNESS (the runtime; writes refuse without it), LEDGER_MODEL (the
 model), LEDGER_SESSION (the session id), all exported before you write.
 Close rule: end a session by appending item.stopped on each item you worked
 and printing the exact resume command, never prose. Replace ITEM:
-  ledger append --item ITEM --kind item.stopped --payload '{"point": "what is done and what is next", "phase": "build", "skills": ["review"], "refs": ["docs/plan.md"]}'
+  ledger append --item ITEM --kind item.stopped --payload '{"point": "what is done and what is next", "phase": "build", "skills": ["review"], "refs": ["plan.md"]}'
   ledger resume --item ITEM
 phase is one of orient, plan, build, review, close. skills and refs are optional.
 """

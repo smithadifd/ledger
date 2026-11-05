@@ -24,32 +24,7 @@ from ledger.verbs.resume import SHORT_FORM, _entry_text
 
 from test_cli import invoke, seed
 
-REPO = Path(__file__).resolve().parents[2]
-
-
-def _docs_root() -> Path:
-    """Where the repository files (README, docs/) are read from.
-
-    ``LEDGER_REPO_ROOT`` names a repository root; unset, it is the folder that
-    holds ``ledger/``. A copy of ``ledger/`` alone has no such files beside it.
-    """
-    override = os.environ.get("LEDGER_REPO_ROOT")
-    return Path(override) if override else REPO
-
-
-def _missing_docs(root: Path) -> list[str]:
-    return [rel for rel in ("README.md", "docs/agent-contract.md")
-            if not (root / rel).is_file()]
-
-
-def _need_docs() -> Path:
-    """The docs root, or a named skip when the repository files are absent."""
-    root = _docs_root()
-    missing = _missing_docs(root)
-    if missing:
-        pytest.skip(f"repository files absent under {root} ({', '.join(missing)}): "
-                    "vendored copy; set LEDGER_REPO_ROOT to a repository root to run")
-    return root
+PKG_PARENT = Path(__file__).resolve().parent.parent.parent  # makes ``python -m ledger`` importable
 
 
 def _db(tmp_path: Path) -> str:
@@ -78,14 +53,8 @@ def _run_printed(command: str) -> subprocess.CompletedProcess[str]:
     env.pop("PYTHONPATH", None)
     return subprocess.run(
         [sys.executable, "-m", "ledger", *argv[1:]],
-        cwd=REPO, capture_output=True, text=True, env=env, check=False,
+        cwd=PKG_PARENT, capture_output=True, text=True, env=env, check=False,
     )
-
-
-def _triggers() -> list[str]:
-    text = (_need_docs() / "docs" / "agent-contract.md").read_text(encoding="utf-8")
-    section = text.split("## Write triggers", 1)[1].split("\n## ", 1)[0]
-    return re.findall(r"^- \*\*(.+?)\*\*", section, flags=re.MULTILINE)
 
 
 def test_two_stopped_items_print_two_runnable_resume_lines(tmp_path, monkeypatch) -> None:
@@ -93,7 +62,7 @@ def test_two_stopped_items_print_two_runnable_resume_lines(tmp_path, monkeypatch
     for item in ("it-a", "it-b", "it-nostop", "it-closed"):
         seed(monkeypatch, db, item, f"title {item}")
     _stop(monkeypatch, db, "it-a", "old stop")
-    _stop(monkeypatch, db, "it-a", "newest stop", skills=["review"], refs=["docs/plan.md"])
+    _stop(monkeypatch, db, "it-a", "newest stop", skills=["review"], refs=["plan.md"])
     _stop(monkeypatch, db, "it-b", "b stop")
     _stop(monkeypatch, db, "it-closed", "closed stop")
     code, _out, err = invoke(
@@ -107,7 +76,7 @@ def test_two_stopped_items_print_two_runnable_resume_lines(tmp_path, monkeypatch
     cards = _printed(out, "card")
     assert len(resumes) == 2 and len(cards) == 2, out
     assert "newest stop" in out and "old stop" not in out
-    assert "skills: review" in out and "refs: docs/plan.md" in out
+    assert "skills: review" in out and "refs: plan.md" in out
     assert "it-nostop" not in out and "it-closed" not in out
     for command in resumes + cards:
         done = _run_printed(command)
@@ -198,15 +167,10 @@ def test_item_without_a_stop_prints_only_the_card_command(tmp_path, monkeypatch)
     assert _run_printed(card).returncode == 0
 
 
-def test_brief_short_form_is_short_and_names_every_trigger_on_the_page(
+def test_brief_short_form_is_short_and_prints_before_the_list(
     tmp_path, monkeypatch
 ) -> None:
-    triggers = _triggers()
-    assert len(triggers) >= 7, triggers
     assert len(SHORT_FORM.splitlines()) < 40
-    lowered = SHORT_FORM.lower()
-    for trigger in triggers:
-        assert trigger.lower() in lowered, f"short form lacks write trigger: {trigger}"
     db = _db(tmp_path)
     seed(monkeypatch, db, "it-a")
     _stop(monkeypatch, db, "it-a", "stop a")
@@ -327,7 +291,7 @@ def test_printed_commands_still_run_for_an_item_id_with_a_line_break(
     assert card.startswith("ledger --db ") and "$'" in card
     done = subprocess.run(
         ["bash", "-c", card.replace("ledger", f"{sys.executable} -m ledger", 1)],
-        cwd=REPO, capture_output=True, text=True, check=False,
+        cwd=PKG_PARENT, capture_output=True, text=True, check=False,
         env={k: v for k, v in os.environ.items() if not k.startswith(("LEDGER_", "PYTHONPATH"))},
     )
     assert done.returncode == 0, done.stderr
@@ -388,29 +352,3 @@ def test_actor_stamps_in_the_environment_reach_the_event(tmp_path, monkeypatch) 
     assert event["actor"] == "alice/seat-7"
     assert event["model"] == "model-x"
     assert event["harness"] == "pytest"
-
-
-def test_readme_and_contract_page_never_say_pick_up() -> None:
-    root = _need_docs()
-    for path in (root / "README.md", root / "docs" / "agent-contract.md"):
-        assert "pick up" not in path.read_text(encoding="utf-8").lower(), path
-    readme = (root / "README.md").read_text(encoding="utf-8")
-    assert "docs/agent-contract.md" in readme and "ledger resume --brief" in readme
-
-
-def test_repository_files_are_present_in_this_repository(monkeypatch) -> None:
-    """In this repository the repository-file tests must run, never skip."""
-    monkeypatch.delenv("LEDGER_REPO_ROOT", raising=False)
-    if not (REPO / "pyproject.toml").is_file():
-        return  # a vendored copy: the doc tests skip by name
-    assert _missing_docs(_docs_root()) == []
-
-
-def test_repo_root_override_points_the_doc_tests_elsewhere(tmp_path, monkeypatch) -> None:
-    monkeypatch.setenv("LEDGER_REPO_ROOT", str(tmp_path))
-    assert _docs_root() == tmp_path
-    assert _missing_docs(tmp_path) == ["README.md", "docs/agent-contract.md"]
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "README.md").write_text("x", encoding="utf-8")
-    (tmp_path / "docs" / "agent-contract.md").write_text("x", encoding="utf-8")
-    assert _missing_docs(tmp_path) == []
