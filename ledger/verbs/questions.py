@@ -6,6 +6,8 @@ from datetime import UTC, datetime
 from ledger.search import MAX_LIMIT, in_window
 from ledger.verbs import (
     DEFAULT_LIMIT,
+    EXIT_NOT_FOUND,
+    CliError,
     Context,
     Result,
     UsageError,
@@ -131,6 +133,8 @@ def run(args, ctx: Context) -> Result:
             matched.append(_question(row))
     finally:
         lg.close()
+    if not matched:
+        raise CliError("no open questions", code="empty", exit_code=EXIT_NOT_FOUND)
     capped = matched[:limit]
     return Result(
         data={

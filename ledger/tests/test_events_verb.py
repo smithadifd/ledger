@@ -9,7 +9,7 @@ from pathlib import Path
 from ledger.cli import main
 from ledger.search import MAX_LIMIT
 from ledger.store import open_ledger
-from ledger.verbs import EXIT_OK, EXIT_USAGE
+from ledger.verbs import EXIT_NOT_FOUND, EXIT_OK, EXIT_USAGE
 
 EVENT_KEYS = {
     "id",
@@ -250,14 +250,13 @@ def test_text_form_is_one_line_per_event(tmp_path, monkeypatch):
     assert "\n" not in note.strip()
 
 
-def test_empty_result_prints_nothing_and_exits_0(tmp_path, monkeypatch):
+def test_empty_result_exits_1_with_empty_code(tmp_path, monkeypatch):
     db = seed(tmp_path / "ledger.db")
     code, out, err = invoke(
         monkeypatch, ["--db", str(db), "events", "--item", "no-such"]
     )
-    assert code == EXIT_OK, err
+    assert code == EXIT_NOT_FOUND, err
     assert out == ""
     code, body, err = run_json(monkeypatch, db, "events", "--item", "no-such")
-    assert code == EXIT_OK, err
-    assert body["data"]["events"] == []
-    assert body["data"]["truncated"] is False
+    assert code == EXIT_NOT_FOUND, err
+    assert body["error"]["code"] == "empty"

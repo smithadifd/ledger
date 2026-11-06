@@ -175,17 +175,6 @@ outside the offered options is recorded as a typed answer.
 **`decisions [--item ITEM] [--tag TYPE:ID] [--standing lean|settled|superseded] [--limit N]`**
 List decision records with their current standing.
 
-**`questions [--item ID] [--type TYPE] [--since DATE] [--until DATE] [--limit N]`**
-Open asks across all items, oldest first. `--type` is the item's type.
-`--since` / `--until` filter on the ask's recorded time with the same date
-forms as `query`. An empty result prints nothing and exits 0. `--json`
-carries `{questions, limit, truncated}` with each ask joined to the item's
-current type, title and status.
-
-```sh
-ledger questions --type ticket
-```
-
 ## Reading verbs
 
 **`query [--item ID] [--type TYPE] [--status STATUS] [--since DATE] [--until DATE] [--limit N]`**
@@ -199,12 +188,23 @@ Events across all items, newest first, at most 50 unless `--limit` says
 otherwise (1 to 1000). `--since` and `--until` filter on each event's
 recorded time with the same date forms and the same refusals as `query`.
 `--kind` may be repeated (any of the given kinds). Filters combine with AND.
-An empty result prints nothing and exits 0. `--json` carries
+Exit 1 when nothing matches. `--json` carries
 `{events, limit, truncated}`; each event is
 `{id, kind, item_id, actor, harness, model, session, recorded_at, payload}`.
 
 ```sh
 ledger events --kind item.note --limit 20
+```
+
+**`questions [--item ID] [--type TYPE] [--since DATE] [--until DATE] [--limit N]`**
+Open asks across all items, oldest first. `--type` is the item's type.
+`--since` / `--until` filter on the ask's recorded time with the same date
+forms as `query`. Exit 1 when nothing matches. `--json`
+carries `{questions, limit, truncated}` with each ask joined to the item's
+current type, title and status.
+
+```sh
+ledger questions --type ticket
 ```
 
 **`ready [--limit N]`** Open items with no open blocker, including claimed

@@ -10,7 +10,7 @@ from pathlib import Path
 from ledger.cli import main
 from ledger.search import MAX_LIMIT
 from ledger.store import open_ledger
-from ledger.verbs import EXIT_OK, EXIT_USAGE
+from ledger.verbs import EXIT_NOT_FOUND, EXIT_OK, EXIT_USAGE
 
 QUESTION_KEYS = {
     "item_id",
@@ -216,7 +216,7 @@ def test_joined_type_title_status_are_current(tmp_path, monkeypatch):
     assert set(body["data"]) == DATA_KEYS
 
 
-def test_text_form_and_empty_exit(tmp_path, monkeypatch):
+def test_text_form(tmp_path, monkeypatch):
     db = tmp_path / "ledger.db"
     seed(db)
     code, out, err = invoke(monkeypatch, ["--db", str(db), "questions"])
@@ -228,8 +228,16 @@ def test_text_form_and_empty_exit(tmp_path, monkeypatch):
     assert re.fullmatch(r"\d+[dhm]", first[0])
     assert first[1] == "it-ticket"
     assert first[2] == "first? more"
+
+
+def test_empty_result_exits_1_with_empty_code(tmp_path, monkeypatch):
+    db = tmp_path / "ledger.db"
+    seed(db)
     code, out, err = invoke(
         monkeypatch, ["--db", str(db), "questions", "--item", "no-such"]
     )
-    assert code == EXIT_OK, err
+    assert code == EXIT_NOT_FOUND, err
     assert out == ""
+    code, body, err = run_json(monkeypatch, db, "questions", "--item", "no-such")
+    assert code == EXIT_NOT_FOUND, err
+    assert body["error"]["code"] == "empty"
