@@ -183,6 +183,30 @@ Current items, at most 50 unless `--limit` says otherwise. `--since` and
 same date forms and the same refusals as `search`. Exit 1 when nothing
 matches.
 
+**`events [--since DATE] [--until DATE] [--kind KIND] [--item ID] [--actor ACTOR] [--limit N]`**
+Events across all items, newest first, at most 50 unless `--limit` says
+otherwise (1 to 1000). `--since` and `--until` filter on each event's
+recorded time with the same date forms and the same refusals as `query`.
+`--kind` may be repeated (any of the given kinds). Filters combine with AND.
+Exit 1 when nothing matches. `--json` carries
+`{events, limit, truncated}`; each event is
+`{id, kind, item_id, actor, harness, model, session, recorded_at, payload}`.
+
+```sh
+ledger events --kind item.note --limit 20
+```
+
+**`questions [--item ID] [--type TYPE] [--since DATE] [--until DATE] [--limit N]`**
+Open asks across all items, oldest first. `--type` is the item's type.
+`--since` / `--until` filter on the ask's recorded time with the same date
+forms as `query`. Exit 1 when nothing matches. `--json`
+carries `{questions, limit, truncated}` with each ask joined to the item's
+current type, title and status.
+
+```sh
+ledger questions --type ticket
+```
+
 **`ready [--limit N]`** Open items with no open blocker, including claimed
 items whose lease expired.
 
@@ -242,7 +266,16 @@ before it answers. `stale` is kept for a real mismatch: a different format,
 ranker, database or roots, an added, edited or deleted source file, or an
 event log that no longer matches what was indexed. Exits
 1 when the database does not exist and 3 when it is unusable; the index and
-claim reports never change the exit code.
+claim reports never change the exit code. `--json` also carries a `summary`
+object from one snapshot: `items_by_type`, `items_by_status`,
+`events_total`, `last_event_at` (null when the log is empty),
+`open_questions`, `leases` (claimed items, including expired ones, which `expired_claims` lists), and `export` as `{watermark_event_id, behind}`
+when `LEDGER_EXPORT_DIR` is set. `behind` counts events with id greater than
+the watermark. There is no `last_export_at` (the watermark sidecar records
+only an event id) and no `verify` field (verify runs are not recorded). A
+failure reading the summary or the watermark becomes
+`{"status": "unknown", "reason": "..."}` for that part and never changes the
+exit code. Without `LEDGER_EXPORT_DIR`, `export` is omitted.
 
 **`verify [--system NAME]`** Walk the hash chain and re-validate every
 payload. With `--system`, also require the database's claim to be `NAME`.
