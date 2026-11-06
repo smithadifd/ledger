@@ -174,11 +174,14 @@ choosing the ledger store on its own. Nothing is deleted: a card moves to
    $ echo "$LEDGER_DB"
    ```
 
-   Set `TICKET_LEDGER_CLI` to the path `command -v` printed. When the
-   installed ticket skill picks the ledger store by default, it does so when a
-   compatible CLI is on `PATH`, and `TICKET_LEDGER_CLI=none` opts out. If the
-   skill does not do this yet, set the variable yourself. If `LEDGER_DB` is
-   empty, ask the person which database to use. Do not guess a path.
+   Set `TICKET_LEDGER_CLI` to the path `command -v` printed. Today, leaving
+   `TICKET_LEDGER_CLI` unset or empty keeps the markdown store, and any
+   non-empty value names a CLI that must pass the capability probe. A later
+   ticket-skill release is planned to pick the ledger store by default when a
+   compatible CLI is on `PATH`, with `TICKET_LEDGER_CLI=none` as the opt-out.
+   Check the installed skill's `SKILL.md` to see which behavior it has. If
+   `LEDGER_DB` is empty, ask the person which database to use. Do not guess a
+   path.
 
 2. Find the cards. `<ticket-skill-dir>` is the installed skill folder, for
    example `~/.claude/skills/ticket`. `find-cards` prints one repository path
@@ -196,7 +199,10 @@ choosing the ledger store on its own. Nothing is deleted: a card moves to
    $ python3 <ticket-skill-dir>/ticket.py import-cards <repo>...
    ```
 
-   Each card prints one line: `imported <key>`, `already imported <key>`, or
+   A real import prints one line per card: `imported <key>`,
+   `already imported <key>`, or `skipped <key>: <reason>`. The dry run writes
+   and moves nothing, and prints `would import <key>` for a card not yet in the
+   ledger, `already imported <key>` for one already there, or
    `skipped <key>: <reason>`. Exit 0 means every card was imported or already
    imported. Exit 1 means at least one card was skipped. A skipped card stays
    where it is, and a person reads the reason. Exit 2 means a usage error, or
