@@ -13,7 +13,7 @@ import sqlite3
 from pathlib import Path
 
 from ledger import lease, search
-from ledger.export import read_watermark
+from ledger.export import read_watermark, resolve_export_dir
 from ledger.paths import resolve_db_path
 from ledger.store import _recorded_versions, _refuse_unknown_versions, load_migrations
 from ledger.verbs import EXIT_NOT_FOUND, EXIT_REFUSED, CliError, Context, Result, Verb
@@ -104,15 +104,16 @@ def _counts(conn: sqlite3.Connection, sql: str) -> dict[str, int]:
     return out
 
 
-def _export_part(conn: sqlite3.Connection, export_dir: Path) -> dict:
+def _export_part(conn: sqlite3.Connection, export_dir: str | Path) -> dict:
     try:
-        watermark = read_watermark(export_dir)
+        resolved = resolve_export_dir(export_dir)
+        watermark = read_watermark(resolved)
+        behind = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE id > ?", (watermark,)
+        ).fetchone()[0]
+        return {"watermark_event_id": watermark, "behind": int(behind)}
     except Exception as exc:
         return {"status": "unknown", "reason": f"{type(exc).__name__}: {exc}"}
-    behind = conn.execute(
-        "SELECT COUNT(*) FROM events WHERE id > ?", (watermark,)
-    ).fetchone()[0]
-    return {"watermark_event_id": watermark, "behind": int(behind)}
 
 
 def _summary_snapshot(resolved: Path) -> dict:
@@ -139,7 +140,7 @@ def _summary_snapshot(resolved: Path) -> dict:
         }
         raw = os.environ.get("LEDGER_EXPORT_DIR")
         if raw:
-            data["export"] = _export_part(conn, Path(raw))
+            data["export"] = _export_part(conn, raw)
         return data
     finally:
         if conn.in_transaction:

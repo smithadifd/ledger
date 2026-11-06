@@ -269,7 +269,7 @@ event log that no longer matches what was indexed. Exits
 claim reports never change the exit code. `--json` also carries a `summary`
 object from one snapshot: `items_by_type`, `items_by_status`,
 `events_total`, `last_event_at` (null when the log is empty),
-`open_questions`, `leases`, and `export` as `{watermark_event_id, behind}`
+`open_questions`, `leases` (claimed items, including expired ones, which `expired_claims` lists), and `export` as `{watermark_event_id, behind}`
 when `LEDGER_EXPORT_DIR` is set. `behind` counts events with id greater than
 the watermark. There is no `last_export_at` (the watermark sidecar records
 only an event id) and no `verify` field (verify runs are not recorded). A

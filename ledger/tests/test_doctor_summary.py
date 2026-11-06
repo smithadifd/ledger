@@ -242,6 +242,56 @@ def test_watermark_failure_marks_export_unknown(tmp_path, monkeypatch):
     assert body["data"]["summary"]["events_total"] >= 1
 
 
+def test_export_dir_tilde_resolves_like_export(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db", monkeypatch)
+    home = tmp_path / "home"
+    export_dir = home / "export"
+    export_dir.mkdir(parents=True)
+    write_watermark(export_dir, 2)
+    monkeypatch.setenv("HOME", str(home))
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        behind = conn.execute(
+            "SELECT COUNT(*) FROM events WHERE id > 2"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    code, body, err = run_json(
+        monkeypatch,
+        db,
+        "doctor",
+        env={"LEDGER_EXPORT_DIR": "~/export"},
+    )
+    assert code == EXIT_OK, err
+    export = body["data"]["summary"]["export"]
+    assert export == {"watermark_event_id": 2, "behind": behind}
+    assert behind >= 1
+
+
+def test_oversized_watermark_marks_only_export_unknown(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db", monkeypatch)
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    write_watermark(export_dir, 2**100)
+    code, body, err = run_json(
+        monkeypatch,
+        db,
+        "doctor",
+        env={"LEDGER_EXPORT_DIR": str(export_dir)},
+    )
+    assert code == EXIT_OK, err
+    summary = body["data"]["summary"]
+    export = summary["export"]
+    assert export["status"] == "unknown"
+    assert "reason" in export
+    assert "items_by_type" in summary
+    assert "items_by_status" in summary
+    assert summary["events_total"] >= 1
+    assert "last_event_at" in summary
+    assert "open_questions" in summary
+    assert "leases" in summary
+
+
 def test_existing_doctor_text_lines_are_unchanged(tmp_path, monkeypatch):
     db = str(tmp_path / "ledger.db")
     code, _out, err = invoke(
