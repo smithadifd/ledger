@@ -260,6 +260,23 @@ def test_plain_link_then_duplicate_of_same_key_conflicts(monkeypatch, db: str) -
     assert _status(db, "it-a") != "closed"
 
 
+def test_plain_link_to_same_target_then_duplicate_of_same_key_conflicts(
+    monkeypatch, db: str
+) -> None:
+    # Same item and same target as the duplicate-of; only the rel differs.
+    code, _out, err = _run(
+        monkeypatch, db, "link", "it-a", "--rel", "blocks", "--target", "it-b",
+        "--idempotency-key", "k-1",
+    )
+    assert code == 0, err
+    before = _count(db)
+    code, out, _err = _run(monkeypatch, db, *_dup("--idempotency-key", "k-1"))
+    assert code == EXIT_REFUSED
+    assert out["error"]["code"] == "conflict"
+    assert _count(db) == before
+    assert _status(db, "it-a") != "closed"
+
+
 def test_duplicate_of_then_plain_link_same_key_conflicts(monkeypatch, db: str) -> None:
     code, _out, err = _run(monkeypatch, db, *_dup("--idempotency-key", "k-1"))
     assert code == 0, err
