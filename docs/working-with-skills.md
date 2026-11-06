@@ -154,6 +154,71 @@ $ ledger verify
 ok events=8
 ```
 
+### Moving existing markdown cards into the ledger
+
+A repository that used the ticket skill before the ledger store keeps its
+resume cards as markdown files in `.ticket/`. An agent on another machine
+moves them into the database with the steps below, run in order, after
+`TICKET_LEDGER_CLI` is set or after the installed ticket skill starts
+choosing the ledger store on its own. Nothing is deleted: a card moves to
+`.ticket/imported/<key>.md`.
+
+1. Check the ledger store. `TICKET_LEDGER_CLI` names the ledger CLI, and
+   `LEDGER_DB` names the database. Find the CLI, check that it passes the
+   skill's capability probe (exit 0, and the output names `--expect-revision`),
+   and confirm the database path:
+
+   ```sh
+   $ command -v ledger
+   $ ledger append-many --help | grep -c -- '--expect-revision'
+   $ echo "$LEDGER_DB"
+   ```
+
+   Set `TICKET_LEDGER_CLI` to the path `command -v` printed. When the
+   installed ticket skill picks the ledger store by default, it does so when a
+   compatible CLI is on `PATH`, and `TICKET_LEDGER_CLI=none` opts out. If the
+   skill does not do this yet, set the variable yourself. If `LEDGER_DB` is
+   empty, ask the person which database to use. Do not guess a path.
+
+2. Find the cards. `<ticket-skill-dir>` is the installed skill folder, for
+   example `~/.claude/skills/ticket`. `find-cards` prints one repository path
+   per line whose `.ticket/` holds unimported cards. With no root it searches
+   the current directory:
+
+   ```sh
+   $ python3 <ticket-skill-dir>/ticket.py find-cards <root>...
+   ```
+
+3. Dry run, then import. Pass the repository paths from step 2:
+
+   ```sh
+   $ python3 <ticket-skill-dir>/ticket.py import-cards --dry-run <repo>...
+   $ python3 <ticket-skill-dir>/ticket.py import-cards <repo>...
+   ```
+
+   Each card prints one line: `imported <key>`, `already imported <key>`, or
+   `skipped <key>: <reason>`. Exit 0 means every card was imported or already
+   imported. Exit 1 means at least one card was skipped. A skipped card stays
+   where it is, and a person reads the reason. Exit 2 means a usage error, or
+   that no compatible ledger CLI is selected: go back to step 1. Re-running is
+   safe, because a card already imported writes nothing. `.ticket/imported/`
+   must be git-ignored, like `.ticket/` itself.
+
+4. Verify each imported key:
+
+   ```sh
+   $ ledger --json export-item <key>
+   $ ledger --json query --item <key>
+   ```
+
+   `export-item` shows the item's events, and `query` shows its status. A
+   closed card imports as closed history. An open pass resumes with
+   `/ticket <key>` and its pass id.
+
+If a card is left behind, `/ticket` says so. When it opens a ticket on the
+ledger store and finds unimported cards in that repository, it prints the
+exact `import-cards` command once.
+
 ## Writing your own integration
 
 The same shape serves any tool:
