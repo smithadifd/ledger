@@ -22,6 +22,7 @@ from ledger.verbs import doctor
 from ledger.verbs import elect
 from ledger.verbs import entities
 from ledger.verbs import entity
+from ledger.verbs import events
 from ledger.verbs import export
 from ledger.verbs import export_item
 from ledger.verbs import grants
@@ -33,6 +34,7 @@ from ledger.verbs import new
 from ledger.verbs import note
 from ledger.verbs import pick
 from ledger.verbs import query
+from ledger.verbs import questions
 from ledger.verbs import ready
 from ledger.verbs import restore
 from ledger.verbs import resume
@@ -53,6 +55,7 @@ MODULES = (
     elect,
     entities,
     entity,
+    events,
     export,
     export_item,
     grants,
@@ -64,6 +67,7 @@ MODULES = (
     note,
     pick,
     query,
+    questions,
     ready,
     restore,
     resume,
