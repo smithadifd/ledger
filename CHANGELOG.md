@@ -1,10 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.1.12 — 2026-11-07
 
 - **A `child-of` link must name an item that exists.** The store now refuses a `child-of` event whose target is not an item, for `append`, `append-many` and `restore` as well as `link` (exit 3, code `anchor_missing`; a refused `append-many` batch writes nothing). Before, such a link was accepted and `parent_id` held the missing id for good. An anchor created earlier in the same batch or restore counts. An export that already holds a `child-of` link to a missing anchor, or a link that comes before its anchor's creation, now fails `restore` with `anchor_missing`.
 - **`link --rel child-of` with an `--idempotency-key` is refused (code `key_on_noop`) when the child already has that anchor.** The call writes no event, so the key named nothing, and after the child later moved the same retry failed as `second_anchor`. Without a key the call still writes nothing and reports `unchanged`. A keyed call that wrote an event replays as before.
 - **The Children section of an anchor's card keeps each child on one line.** A newline, carriage return, tab or other control character in a child's title or holder is shown as a visible escape (for example `\n`), so a title can no longer start a heading inside the card. `card --json` still carries the raw strings.
+
+Upgrade with `@v0.1.12`.
 
 ## 0.1.11 — 2026-11-07
 
