@@ -12,7 +12,7 @@ from pathlib import Path
 from ledger.cli import main
 from ledger.schema import LINK_RELS
 from ledger.store import open_ledger
-from ledger.verbs import EXIT_USAGE
+from ledger.verbs import EXIT_REFUSED, EXIT_USAGE
 
 
 def invoke(monkeypatch, argv):
@@ -123,7 +123,7 @@ def test_a_second_anchor_refuses_without_move_and_moves_with_it(tmp_path, monkey
 
     code, _out, err = _child_of(monkeypatch, db, "it-kid", "it-two")
 
-    assert code == EXIT_USAGE
+    assert code == EXIT_REFUSED
     assert "it-one" in err and "--move" in err
     assert _event_count(db) == before
     assert _item(db, "it-kid")["parent_id"] == "it-one"
@@ -176,13 +176,13 @@ def test_self_link_and_cycles_refuse_and_write_nothing(tmp_path, monkeypatch):
     before = _event_count(db)
 
     code, _out, err = _child_of(monkeypatch, db, "it-a", "it-a")
-    assert code == EXIT_USAGE and "own anchor" in err
+    assert code == EXIT_REFUSED and "own anchor" in err
     assert _event_count(db) == before
 
     assert _child_of(monkeypatch, db, "it-a", "it-b")[0] == 0
     before = _event_count(db)
     code, _out, err = _child_of(monkeypatch, db, "it-b", "it-a")
-    assert code == EXIT_USAGE and "cycle" in err
+    assert code == EXIT_REFUSED and "cycle" in err
     assert _event_count(db) == before
     assert _item(db, "it-b")["parent_id"] is None
 
@@ -190,11 +190,11 @@ def test_self_link_and_cycles_refuse_and_write_nothing(tmp_path, monkeypatch):
     assert _child_of(monkeypatch, db, "it-b", "it-c")[0] == 0
     before = _event_count(db)
     code, _out, err = _child_of(monkeypatch, db, "it-c", "it-a")
-    assert code == EXIT_USAGE and "cycle" in err
+    assert code == EXIT_REFUSED and "cycle" in err
     assert _event_count(db) == before
     # The same cycle through --move is refused too.
     code, _out, err = _child_of(monkeypatch, db, "it-c", "it-a", "--move")
-    assert code == EXIT_USAGE and "cycle" in err
+    assert code == EXIT_REFUSED and "cycle" in err
     assert _event_count(db) == before
 
 

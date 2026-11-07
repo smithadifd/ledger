@@ -8,7 +8,7 @@ the relation (the kept item's as ``duplicated-by``). There is no merge verb.
 
 ``--rel child-of`` makes ``item`` a child of the anchor named by the target.
 An item has at most one current anchor (its latest ``child-of`` link) and the
-anchors form a forest. A second anchor is refused (exit 2) unless ``--move``
+anchors form a forest. A second anchor is refused (exit 3) unless ``--move``
 is given; a move appends a new link that names the anchor it left, and no
 earlier event changes. A link to the current anchor writes nothing. A link
 that would make the item its own ancestor is refused. The checks and the
@@ -22,7 +22,6 @@ from ledger.schema import LINK_RELS
 from ledger.verbs import (
     EXIT_NOT_FOUND,
     EXIT_REFUSED,
-    EXIT_USAGE,
     CliError,
     Context,
     Result,
@@ -223,7 +222,7 @@ def _child_of(args, ctx: Context) -> Result:
         raise CliError(
             f"an item cannot be its own anchor: {child}",
             code="self_link",
-            exit_code=EXIT_USAGE,
+            exit_code=EXIT_REFUSED,
         )
     lg = open_db(ctx, write=True)
     try:
@@ -255,7 +254,7 @@ def _child_of(args, ctx: Context) -> Result:
                     f"{child} is already a child of {have.payload['target']}; "
                     "pass --move to change its anchor",
                     code="second_anchor",
-                    exit_code=EXIT_USAGE,
+                    exit_code=EXIT_REFUSED,
                 )
             node, seen = anchor, set()
             while node in current and node not in seen:
@@ -266,7 +265,7 @@ def _child_of(args, ctx: Context) -> Result:
                         f"{anchor} is already below {child}; "
                         f"linking {child} under it would make a cycle",
                         code="cycle",
-                        exit_code=EXIT_USAGE,
+                        exit_code=EXIT_REFUSED,
                     )
             payload = {"rel": CHILD_OF, "target": anchor}
             if have is not None:

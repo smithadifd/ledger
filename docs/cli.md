@@ -104,7 +104,7 @@ bare word.
 of `TARGET`; both cards show the relation. There is no merge verb.
 `child-of` makes the item a child of the anchor `TARGET`. An item has one
 anchor at a time: a second `child-of` to a different anchor is refused
-(exit 2, naming the current anchor) unless `--move` is passed, which records
+(exit 3, naming the current anchor) unless `--move` is passed, which records
 a new link that names the anchor it left. The same link again writes
 nothing. A link that would make the item its own ancestor is refused and
 writes nothing. `--move` is accepted only with `--rel child-of`. The
