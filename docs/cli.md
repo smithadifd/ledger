@@ -106,15 +106,17 @@ of `TARGET`; both cards show the relation. There is no merge verb.
 anchor at a time: a second `child-of` to a different anchor is refused
 (exit 3, naming the current anchor) unless `--move` is passed, which records
 a new link that names the anchor it left. The same link again writes
-nothing. A link that would make the item its own ancestor is refused and
+nothing, but with `--idempotency-key` it is refused (code `key_on_noop`),
+because a key must name a stored event for a retry to replay. A target that
+is not an item is refused. A link that would make the item its own ancestor is refused and
 writes nothing. `--move` is accepted only with `--rel child-of`. The
 same rules hold for a `child-of` link written by `append` or `append-many`
 or replayed by `restore`: a link to a different anchor must name the current
 one in `moved_from`, and a self-link or a cycle is refused (exit 3, codes
-`self_link`, `second_anchor`, `cycle`; a refused `append-many` batch writes
+`self_link`, `second_anchor`, `anchor_missing`, `cycle`; a refused `append-many` batch writes
 none of its events). A key already used by another event is refused as
 `conflict`, as on every link. The anchor's card gets a Children section
-headed `closed/total`, and `resume` prints the same count for an anchor.
+headed `closed/total` with one line per child (control characters in a title show as escapes), and `resume` prints the same count for an anchor.
 When a long card cuts the section, its marker names `ledger query
 --parent=ANCHOR --all`, which lists every child the anchor has when you run it.
 `--idempotency-key K` makes a retry safe (see Retrying with a key below).

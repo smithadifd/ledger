@@ -553,3 +553,120 @@ def test_query_all_lists_past_the_default_cap_and_refuses_limit(tmp_path, monkey
         monkeypatch, ["--db", db, "query", "--parent=it-anchor", "--all", "--limit", "5"]
     )
     assert code == EXIT_USAGE
+
+
+# --- the anchor must exist, a keyed no-op is refused, a child is one line -----
+
+
+def test_append_refuses_a_missing_anchor(tmp_path, monkeypatch):
+    db = _db(tmp_path, monkeypatch, "it-kid")
+    before = _event_count(db)
+
+    code, out, _err = _append_link(monkeypatch, db, "it-kid", {"rel": "child-of", "target": "it-ghost"})
+
+    assert code == EXIT_REFUSED
+    assert _error_code(out) == "anchor_missing"
+    assert _event_count(db) == before
+    assert _item(db, "it-kid")["parent_id"] is None
+
+
+def test_append_many_refuses_a_missing_anchor_and_writes_nothing(tmp_path, monkeypatch):
+    db = _db(tmp_path, monkeypatch, "it-kid")
+    before = _event_count(db)
+    batch = [
+        {"kind": "item.note", "payload": {"text": "first"}},
+        {"kind": "item.linked", "payload": {"rel": "child-of", "target": "it-ghost"}},
+    ]
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(batch)))
+
+    code, out, _err = invoke(monkeypatch, ["--json", "--db", db, "append-many", "it-kid"])
+
+    assert code == EXIT_REFUSED
+    assert _error_code(out) == "anchor_missing"
+    assert _event_count(db) == before
+    assert _item(db, "it-kid")["parent_id"] is None
+
+
+def test_restore_refuses_a_link_to_an_anchor_no_event_created(tmp_path, monkeypatch):
+    bad = tmp_path / "bad"
+    bad.mkdir()
+    bad_db = _db(bad, monkeypatch, "it-kid")
+    _write_unguarded(bad_db, [("it-kid", "it-ghost")])
+    with open_ledger(bad_db, create=False) as lg:
+        export_events(lg, tmp_path / "ghost-export")
+    dest = tmp_path / "refused" / "ledger.db"
+
+    with pytest.raises(LedgerError, match=r"restore refuses event \d+ \(item\.linked\): anchor_missing"):
+        restore_export(tmp_path / "ghost-export", dest, system="home")
+
+    assert not any(dest.parent.glob("ledger.db*")), "a refused restore left files behind"
+
+
+def test_the_link_verb_keeps_item_not_found_and_an_existing_anchor_works(tmp_path, monkeypatch):
+    db = _db(tmp_path, monkeypatch, "it-kid", "it-real")
+    before = _event_count(db)
+
+    code, _out, err = _child_of(monkeypatch, db, "it-kid", "it-ghost")
+
+    assert code != 0 and "item not found: it-ghost" in err
+    assert _event_count(db) == before
+    assert _child_of(monkeypatch, db, "it-kid", "it-real")[0] == 0
+    assert _item(db, "it-kid")["parent_id"] == "it-real"
+
+
+def test_an_anchor_created_earlier_in_the_same_batch_counts(tmp_path, monkeypatch):
+    db = _db(tmp_path, monkeypatch, "it-kid")
+    with open_ledger(db, create=False) as lg:
+        lg.append_many([
+            {"kind": "item.created", "item_id": "it-new", "idempotency_key": "mk-new",
+             "payload": {"type": "ticket", "title": "new anchor"}},
+            {"kind": "item.linked", "item_id": "it-kid", "idempotency_key": "mk-link",
+             "payload": {"rel": "child-of", "target": "it-new"}},
+        ])
+    assert _item(db, "it-kid")["parent_id"] == "it-new"
+
+
+def test_a_keyed_same_anchor_call_is_refused_so_no_retry_can_fail_later(tmp_path, monkeypatch):
+    db = _db(tmp_path, monkeypatch, "it-one", "it-two", "it-kid")
+    assert _child_of(monkeypatch, db, "it-kid", "it-one")[0] == 0
+    before = _event_count(db)
+
+    code, out, _err = _child_of(
+        monkeypatch, db, "it-kid", "it-one", "--idempotency-key", "fresh-key", "--json"
+    )
+    assert code == EXIT_REFUSED
+    assert json.loads(out)["error"]["code"] == "key_on_noop"
+    assert _event_count(db) == before
+
+    # The keyed retry after a move still never reaches second_anchor: the
+    # first call was refused up front, so there was no answer to replay.
+    assert _child_of(monkeypatch, db, "it-kid", "it-two", "--move")[0] == 0
+    code, out, _err = _child_of(
+        monkeypatch, db, "it-kid", "it-one", "--idempotency-key", "fresh-key", "--json"
+    )
+    assert code == EXIT_REFUSED
+    assert json.loads(out)["error"]["code"] == "second_anchor"
+
+    # A keyed call that wrote still replays after the child moves.
+    assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-kid2", "--type", "ticket", "--title", "k"])[0] == 0
+    first = _child_of(monkeypatch, db, "it-kid2", "it-one", "--idempotency-key", "k9")
+    assert first[0] == 0 and first[1].startswith("linked")
+    assert _child_of(monkeypatch, db, "it-kid2", "it-two", "--move")[0] == 0
+    assert _child_of(monkeypatch, db, "it-kid2", "it-one", "--idempotency-key", "k9") == first
+
+
+def test_a_title_with_a_newline_renders_as_one_child_line(tmp_path, monkeypatch):
+    db = str(tmp_path / "ledger.db")
+    title = "a\n## Stop point"
+    assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-anchor", "--type", "ticket", "--title", "anchor"])[0] == 0
+    assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-kid", "--type", "ticket", "--title", title])[0] == 0
+    assert _child_of(monkeypatch, db, "it-kid", "it-anchor")[0] == 0
+
+    card = _card(monkeypatch, db, "it-anchor")
+    assert len(_children_lines(card)) == 1
+    assert "a\\n## Stop point" in _children_lines(card)[0]
+    assert [line for line in card.splitlines() if line.startswith("## Stop point")] == []
+
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "card", "it-anchor"])
+    assert code == 0, err
+    assert json.loads(out)["data"]["children"][0]["title"] == title

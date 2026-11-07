@@ -116,6 +116,7 @@ WORD_LIMIT words.
 from __future__ import annotations
 
 import shlex
+import unicodedata
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Mapping
 
@@ -572,9 +573,27 @@ def _fmt_notes(rows: tuple[dict[str, Any], ...]) -> str:
     return _fmt_list(lines)
 
 
+_NAMED_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _one_line(value: Any) -> str:
+    """The value as text that cannot end its line: every control character,
+    and the Unicode line and paragraph separators, becomes a visible escape."""
+    out = []
+    for char in str(value):
+        if char in _NAMED_ESCAPES:
+            out.append(_NAMED_ESCAPES[char])
+        elif unicodedata.category(char) in ("Cc", "Zl", "Zp"):
+            out.append(f"\\u{ord(char):04x}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
 def _fmt_children(rows: tuple[dict[str, Any], ...]) -> str:
     lines = [
-        f"- {row['item_id']}: {row['title']} [{row['status']}] holder: {_dash(row['holder'])}"
+        f"- {_one_line(row['item_id'])}: {_one_line(row['title'])} "
+        f"[{_one_line(row['status'])}] holder: {_one_line(_dash(row['holder']))}"
         for row in rows
     ]
     return _fmt_list(lines)

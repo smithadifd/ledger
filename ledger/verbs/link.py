@@ -10,7 +10,9 @@ the relation (the kept item's as ``duplicated-by``). There is no merge verb.
 An item has at most one current anchor (its latest ``child-of`` link) and the
 anchors form a forest. A second anchor is refused (exit 3) unless ``--move``
 is given; a move appends a new link that names the anchor it left, and no
-earlier event changes. A link to the current anchor writes nothing. A link
+earlier event changes. A link to the current anchor writes nothing; with an
+idempotency key it is refused (``key_on_noop``), because a key must name a
+stored event for a retry to replay. A target that is not an item is refused. A link
 that would make the item its own ancestor is refused. The store enforces
 the one-anchor and no-cycle rules on every write of a ``child-of`` link
 (``append`` and ``append-many`` too), so this verb only finds the anchor a
@@ -211,7 +213,8 @@ def _duplicate(args, ctx: Context) -> Result:
 def _child_of(args, ctx: Context) -> Result:
     child, anchor = args.item, args.target
     move = bool(getattr(args, "move", False))
-    key = getattr(args, "idempotency_key", None) or new_key()
+    given_key = getattr(args, "idempotency_key", None)
+    key = given_key or new_key()
     if child == anchor:
         raise CliError(
             f"an item cannot be its own anchor: {child}",
@@ -255,6 +258,17 @@ def _child_of(args, ctx: Context) -> Result:
                 )
             have = current_anchors(lg._conn).get(child)
             if have == anchor:
+                if given_key:
+                    # A no-op writes no event, so a caller's key would name
+                    # nothing: after a later move the same retry would fail
+                    # as a second anchor instead of replaying. Refuse it now.
+                    raise CliError(
+                        f"{child} is already a child of {anchor}, so there is "
+                        f"nothing to write and idempotency key {given_key!r} "
+                        "would name no event; repeat the call without a key",
+                        code="key_on_noop",
+                        exit_code=EXIT_REFUSED,
+                    )
                 newest = [
                     event
                     for event in lg.events(item_id=child, kind="item.linked")
