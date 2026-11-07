@@ -185,8 +185,8 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
         },
     },
     # One immutable version of a ticket's content. ``ledger spec set``
-    # appends version N+1 only when content_hash differs from the current
-    # spec's; the latest item.spec event is the item's current spec.
+    # appends version N+1 only when content_hash or source differs from the
+    # current spec's; the latest item.spec event is the item's current spec.
     # content_hash is sha256 over the canonical JSON of SPEC_CONTENT_FIELDS
     # (an absent field hashes as null). source and source_rev say where the
     # content came from and are not hashed. The store reserves the kind for
