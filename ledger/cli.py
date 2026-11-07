@@ -21,6 +21,7 @@ from ledger.paths import SharedDatabaseError
 from ledger.schema import ValidationError
 from ledger.store import (
     ChainBroken,
+    ForestRefusal,
     IdempotencyConflict,
     LedgerError,
     StaleRevision,
@@ -221,6 +222,8 @@ def main(
         return _fail(json_mode, "synced_path", str(exc), EXIT_REFUSED)
     except SharedDatabaseError as exc:
         return _fail(json_mode, "shared_database", str(exc), EXIT_REFUSED)
+    except ForestRefusal as exc:
+        return _fail(json_mode, exc.code, str(exc), EXIT_REFUSED)
     except ValidationError as exc:
         return _fail(json_mode, "validation", str(exc), EXIT_REFUSED)
     except IdempotencyConflict as exc:

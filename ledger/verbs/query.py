@@ -23,6 +23,11 @@ def add_arguments(parser) -> None:
     parser.add_argument("--type")
     parser.add_argument("--status")
     parser.add_argument(
+        "--parent",
+        metavar="ITEM",
+        help="only the children of ITEM (items whose current child-of anchor is ITEM)",
+    )
+    parser.add_argument(
         "--since",
         metavar="DATE",
         help="YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|+HH:MM], inclusive, UTC unless it has an "
@@ -62,6 +67,8 @@ def run(args, ctx: Context) -> Result:
             if args.type and item["type"] != args.type:
                 continue
             if args.status and item["status"] != args.status:
+                continue
+            if args.parent is not None and row.get("parent_id") != args.parent:
                 continue
             if not in_window(newest.get(item["item_id"], (None,))[0], since, until):
                 continue

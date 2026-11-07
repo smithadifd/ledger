@@ -18,7 +18,7 @@ ITEM_TYPES = ("topic", "ticket", "initiative", "decision", "gate", GUIDANCE_ITEM
 ITEM_STATUSES = ("open", "claimed", "blocked", "closed")
 # duplicate-of lives on the duplicate and names the item kept; `ledger link`
 # closes the duplicate in the same transaction. child-of lives on the child
-# and names its one anchor (verbs/link.py keeps the graph a forest).
+# and names its one anchor (the store's append path keeps the graph a forest).
 LINK_RELS = (
     "pr", "branch", "session", "item", "url", "blocks", "duplicate-of", "child-of",
 )

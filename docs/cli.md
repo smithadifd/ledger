@@ -108,8 +108,15 @@ anchor at a time: a second `child-of` to a different anchor is refused
 a new link that names the anchor it left. The same link again writes
 nothing. A link that would make the item its own ancestor is refused and
 writes nothing. `--move` is accepted only with `--rel child-of`. The
-anchor's card gets a Children section headed `closed/total`, and
-`resume` prints the same count for an anchor.
+same rules hold for a `child-of` link written by `append` or `append-many`
+or replayed by `restore`: a link to a different anchor must name the current
+one in `moved_from`, and a self-link or a cycle is refused (exit 3, codes
+`self_link`, `second_anchor`, `cycle`; a refused `append-many` batch writes
+none of its events). A key already used by another event is refused as
+`conflict`, as on every link. The anchor's card gets a Children section
+headed `closed/total`, and `resume` prints the same count for an anchor.
+When a long card cuts the section, its marker names `ledger query
+--parent=ANCHOR --limit=N`, which lists every child.
 `--idempotency-key K` makes a retry safe (see Retrying with a key below).
 
 **`spec set|show|diff ITEM ...`** An item's spec is its versioned content:
@@ -186,8 +193,9 @@ List decision records with their current standing.
 
 ## Reading verbs
 
-**`query [--item ID] [--type TYPE] [--status STATUS] [--since DATE] [--until DATE] [--limit N]`**
-Current items, at most 50 unless `--limit` says otherwise. `--since` and
+**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--since DATE] [--until DATE] [--limit N]`**
+Current items, at most 50 unless `--limit` says otherwise. `--parent ID`
+keeps the children of `ID` (items whose current `child-of` anchor is `ID`). `--since` and
 `--until` keep the items whose newest event falls in the window, with the
 same date forms and the same refusals as `search`. Exit 1 when nothing
 matches.

@@ -11,14 +11,17 @@ An item has at most one current anchor (its latest ``child-of`` link) and the
 anchors form a forest. A second anchor is refused (exit 3) unless ``--move``
 is given; a move appends a new link that names the anchor it left, and no
 earlier event changes. A link to the current anchor writes nothing. A link
-that would make the item its own ancestor is refused. The checks and the
-append share one write transaction.
+that would make the item its own ancestor is refused. The store enforces
+the one-anchor and no-cycle rules on every write of a ``child-of`` link
+(``append`` and ``append-many`` too), so this verb only finds the anchor a
+move leaves. The checks and the append share one write transaction.
 """
 from __future__ import annotations
 
 import argparse
 
 from ledger.schema import LINK_RELS
+from ledger.store import IdempotencyConflict, current_anchors
 from ledger.verbs import (
     EXIT_NOT_FOUND,
     EXIT_REFUSED,
@@ -205,15 +208,6 @@ def _duplicate(args, ctx: Context) -> Result:
     )
 
 
-def _child_of_events(lg) -> dict[str, object]:
-    """Each item's newest ``child-of`` link event: its current anchor."""
-    newest: dict[str, object] = {}
-    for event in lg.events(kind="item.linked"):
-        if event.payload.get("rel") == CHILD_OF:
-            newest[event.item_id] = event
-    return newest
-
-
 def _child_of(args, ctx: Context) -> Result:
     child, anchor = args.item, args.target
     move = bool(getattr(args, "move", False))
@@ -237,39 +231,41 @@ def _child_of(args, ctx: Context) -> Result:
                 and stored.payload.get("rel") == CHILD_OF
                 and stored.payload.get("target") == anchor
             ):
-                # A retry of this very call: return what it wrote.
-                return _child_of_result(child, anchor, stored, "linked")
+                # A retry of this very call: the store compares the whole
+                # event (attribution too) and returns what the first call
+                # wrote, or refuses it as a conflict.
+                event = lg.append(
+                    kind="item.linked",
+                    payload=dict(stored.payload),
+                    item_id=child,
+                    idempotency_key=key,
+                    **actor_kwargs(ctx),
+                )
+                return _child_of_result(child, anchor, event, "linked")
+            if stored is not None:
+                # The key names another event: refuse before any no-op path.
+                raise IdempotencyConflict(
+                    f"idempotency_key {key!r} already recorded as a different event"
+                )
             if lg.item(anchor) is None:
                 raise CliError(
                     f"item not found: {anchor}",
                     code="not_found",
                     exit_code=EXIT_NOT_FOUND,
                 )
-            current = _child_of_events(lg)
-            have = current.get(child)
-            if have is not None and have.payload["target"] == anchor:
-                return _child_of_result(child, anchor, have, "unchanged")
-            if have is not None and not move:
-                raise CliError(
-                    f"{child} is already a child of {have.payload['target']}; "
-                    "pass --move to change its anchor",
-                    code="second_anchor",
-                    exit_code=EXIT_REFUSED,
-                )
-            node, seen = anchor, set()
-            while node in current and node not in seen:
-                seen.add(node)
-                node = current[node].payload["target"]
-                if node == child:
-                    raise CliError(
-                        f"{anchor} is already below {child}; "
-                        f"linking {child} under it would make a cycle",
-                        code="cycle",
-                        exit_code=EXIT_REFUSED,
-                    )
+            have = current_anchors(lg._conn).get(child)
+            if have == anchor:
+                newest = [
+                    event
+                    for event in lg.events(item_id=child, kind="item.linked")
+                    if event.payload.get("rel") == CHILD_OF
+                ]
+                return _child_of_result(child, anchor, newest[-1], "unchanged")
             payload = {"rel": CHILD_OF, "target": anchor}
-            if have is not None:
-                payload["moved_from"] = have.payload["target"]
+            if have is not None and move:
+                payload["moved_from"] = have
+            # Without --move a second anchor carries no moved_from, and the
+            # store refuses it (second_anchor), as it refuses a cycle.
             event = lg.append(
                 kind="item.linked",
                 payload=payload,

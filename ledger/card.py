@@ -53,7 +53,9 @@ An anchor's card has a Children section after Links: one line per child
 (id, title, status, holder), a child that blocks another first, then in
 creation order, under a header carrying closed/total over all children. An
 item with no children has no section. The rollup stays whole when long
-sections are capped.
+sections are capped. A capped Children section ends "(+K cut; ledger query
+--parent=<item> --limit=<total>)": the children are other items' events, so
+the anchor's own export does not list them, and that query prints them all.
 
 The resume sections come from decision.recorded (with its latest standing
 and result), item.tried, item.progress, review.recorded and the latest
@@ -442,6 +444,14 @@ def _cut_count(count: int, item_id: str) -> str:
     return f"(+{count} cut; {recover_command(item_id)})"
 
 
+def children_command(item_id: str, total: int) -> str:
+    """The command that prints every child of ``item_id``."""
+    # The --flag=value form keeps an id with a leading hyphen one argument.
+    return shlex.join(
+        ["ledger", "query", f"--parent={item_id}", f"--limit={max(total, 1)}"]
+    )
+
+
 def _cut_words(count: int, item_id: str) -> str:
     """Marker for words trimmed from the title or next step."""
     return f"(+{count} words cut; {recover_command(item_id)})"
@@ -536,10 +546,16 @@ def _children_block(card: Card) -> list[str]:
     """The Children section, or nothing for an item with no children."""
     if card.children_total <= 0:
         return []
+    body = _fmt_children(card.children)
+    count = _omitted_count(card, "children")
+    if count > 0:
+        # The children are other items' events: name the query that lists them.
+        marker = f"(+{count} cut; {children_command(card.item_id, card.children_total)})"
+        body = marker if body == "(none)" else f"{body}\n{marker}"
     return [
         "",
         f"## Children ({card.children_closed}/{card.children_total})",
-        _with_marker(_fmt_children(card.children), card, "children"),
+        body,
     ]
 
 
@@ -1376,6 +1392,7 @@ __all__ = [
     "Card",
     "PointerSource",
     "bound_card",
+    "children_command",
     "children_of",
     "claim_spec_version",
     "derive_next_step",

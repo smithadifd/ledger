@@ -23,6 +23,7 @@ from .store import (
     LedgerError,
     ValidationError,
     canonical_dumps,
+    check_child_of_event,
     check_expected_system,
     check_system_claim,
     open_ledger,
@@ -52,10 +53,12 @@ def replay_events(lg: Ledger, events: list[Event]) -> None:
 
 
 def _replay_events(lg: Ledger, events: list[Event]) -> None:
-    """INSERT rows in id order, each first passing the decision and claim guards.
+    """INSERT rows in id order, each first passing the decision, claim and
+    child-of guards.
 
     A valid hash chain proves the export was not edited after it was written,
-    not that its decisions or its system claim were ever allowed. The guards
+    not that its decisions, its system claim or its anchors were ever
+    allowed. The guards
     see only the rows replayed before them, as the original append did; one
     refusal rolls back the whole replay.
     """
@@ -73,6 +76,12 @@ def _replay_events(lg: Ledger, events: list[Event]) -> None:
             try:
                 check_system_claim(conn, event.kind, event.payload,
                                    f"{lg.path}, restored event {event.id}")
+            except ValidationError as exc:
+                raise LedgerError(
+                    f"restore refuses event {event.id} ({event.kind}): {exc.reason}"
+                ) from exc
+            try:
+                check_child_of_event(conn, event.kind, event.payload, event.item_id)
             except ValidationError as exc:
                 raise LedgerError(
                     f"restore refuses event {event.id} ({event.kind}): {exc.reason}"
