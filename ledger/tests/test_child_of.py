@@ -521,6 +521,35 @@ def test_a_capped_children_section_names_a_command_that_prints_every_child(
     assert 0 < len(shown) < len(kids)
     command = shlex.split(marker[marker.index("; ") + 2 : -1])
     assert command[:2] == ["ledger", "query"]
+    assert not any(part.startswith("--limit") for part in command), command
+    # A child linked after the card was drawn is still listed.
+    late = "it-kid-late"
+    code, _out, err = invoke(
+        monkeypatch,
+        ["--db", db, "new", "--id", late, "--type", "ticket", "--title", "late child"],
+    )
+    assert code == 0, err
+    assert _child_of(monkeypatch, db, late, "it-anchor")[0] == 0
     code, out, err = invoke(monkeypatch, ["--db", db, *command[1:]])
     assert code == 0, err
-    assert sorted(line.split("\t")[0] for line in out.splitlines()) == kids
+    assert sorted(line.split("\t")[0] for line in out.splitlines()) == sorted(
+        [*kids, late]
+    )
+
+
+def test_query_all_lists_past_the_default_cap_and_refuses_limit(tmp_path, monkeypatch):
+    kids = [f"it-many{n:02d}" for n in range(52)]
+    db = _db(tmp_path, monkeypatch, "it-anchor")
+    for kid in kids:
+        code, _out, err = invoke(
+            monkeypatch, ["--db", db, "new", "--id", kid, "--type", "ticket", "--title", kid]
+        )
+        assert code == 0, err
+        assert _child_of(monkeypatch, db, kid, "it-anchor")[0] == 0
+    code, out, err = invoke(monkeypatch, ["--db", db, "query", "--parent=it-anchor", "--all"])
+    assert code == 0, err
+    assert len(out.splitlines()) == 52
+    code, _out, _err = invoke(
+        monkeypatch, ["--db", db, "query", "--parent=it-anchor", "--all", "--limit", "5"]
+    )
+    assert code == EXIT_USAGE

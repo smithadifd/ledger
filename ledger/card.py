@@ -54,8 +54,9 @@ An anchor's card has a Children section after Links: one line per child
 creation order, under a header carrying closed/total over all children. An
 item with no children has no section. The rollup stays whole when long
 sections are capped. A capped Children section ends "(+K cut; ledger query
---parent=<item> --limit=<total>)": the children are other items' events, so
-the anchor's own export does not list them, and that query prints them all.
+--parent=<item> --all)": the children are other items' events, so the
+anchor's own export does not list them, and that query prints every child the
+anchor has when it runs. The command carries no count taken from the card.
 
 The resume sections come from decision.recorded (with its latest standing
 and result), item.tried, item.progress, review.recorded and the latest
@@ -444,12 +445,10 @@ def _cut_count(count: int, item_id: str) -> str:
     return f"(+{count} cut; {recover_command(item_id)})"
 
 
-def children_command(item_id: str, total: int) -> str:
-    """The command that prints every child of ``item_id``."""
+def children_command(item_id: str) -> str:
+    """The command that prints every child ``item_id`` has when it runs."""
     # The --flag=value form keeps an id with a leading hyphen one argument.
-    return shlex.join(
-        ["ledger", "query", f"--parent={item_id}", f"--limit={max(total, 1)}"]
-    )
+    return shlex.join(["ledger", "query", f"--parent={item_id}", "--all"])
 
 
 def _cut_words(count: int, item_id: str) -> str:
@@ -550,7 +549,7 @@ def _children_block(card: Card) -> list[str]:
     count = _omitted_count(card, "children")
     if count > 0:
         # The children are other items' events: name the query that lists them.
-        marker = f"(+{count} cut; {children_command(card.item_id, card.children_total)})"
+        marker = f"(+{count} cut; {children_command(card.item_id)})"
         body = marker if body == "(none)" else f"{body}\n{marker}"
     return [
         "",

@@ -116,7 +116,7 @@ none of its events). A key already used by another event is refused as
 `conflict`, as on every link. The anchor's card gets a Children section
 headed `closed/total`, and `resume` prints the same count for an anchor.
 When a long card cuts the section, its marker names `ledger query
---parent=ANCHOR --limit=N`, which lists every child.
+--parent=ANCHOR --all`, which lists every child the anchor has when you run it.
 `--idempotency-key K` makes a retry safe (see Retrying with a key below).
 
 **`spec set|show|diff ITEM ...`** An item's spec is its versioned content:
@@ -193,8 +193,9 @@ List decision records with their current standing.
 
 ## Reading verbs
 
-**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--since DATE] [--until DATE] [--limit N]`**
-Current items, at most 50 unless `--limit` says otherwise. `--parent ID`
+**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--since DATE] [--until DATE] [--limit N | --all]`**
+Current items, at most 50 unless `--limit` says otherwise; `--all` removes the cap
+(with `--limit` it is a usage error, and `limit` in the JSON is then `null`). `--parent ID`
 keeps the children of `ID` (items whose current `child-of` anchor is `ID`). `--since` and
 `--until` keep the items whose newest event falls in the window, with the
 same date forms and the same refusals as `search`. Exit 1 when nothing

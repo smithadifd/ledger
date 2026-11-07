@@ -39,10 +39,17 @@ def add_arguments(parser) -> None:
         type=int,
         help=f"max rows (default {DEFAULT_LIMIT})",
     )
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="no row cap: every matching item (not with --limit)",
+    )
 
 
 def run(args, ctx: Context) -> Result:
-    limit = resolve_limit(args.limit)
+    if args.all and args.limit is not None:
+        raise UsageError("--all and --limit cannot be used together")
+    limit = None if args.all else resolve_limit(args.limit)
     since = when_option(args.since, "--since", end_of_day=False)
     until = when_option(args.until, "--until", end_of_day=True)
     if since is not None and until is not None and since > until:
@@ -75,8 +82,8 @@ def run(args, ctx: Context) -> Result:
             matched.append(item)
     finally:
         lg.close()
-    capped = matched[:limit]
-    truncated = len(matched) > limit
+    capped = matched if limit is None else matched[:limit]
+    truncated = limit is not None and len(matched) > limit
     if not capped:
         raise CliError("no matching rows", code="empty", exit_code=EXIT_NOT_FOUND)
     return Result(
