@@ -373,7 +373,7 @@ def test_entity_events_verify_and_carry_the_writer_identity(db, monkeypatch) -> 
 def test_a_ledger_at_0008_migrates_and_keeps_every_older_view(tmp_path) -> None:
     path = tmp_path / "old.db"
     migrations = store.load_migrations()
-    assert migrations[-1].name == "0009_entities.sql"
+    assert "0009_entities.sql" in [m.name for m in migrations]
     conn = store.connect(path)
     try:
         store.migrate(conn, [m for m in migrations if m.version <= 8])
@@ -389,6 +389,8 @@ def test_a_ledger_at_0008_migrates_and_keeps_every_older_view(tmp_path) -> None:
         columns = [row[1] for row in lg._conn.execute("PRAGMA table_info(v_entities)")]
     assert set(after) - set(before) == {"v_entities"}
     for name, sql in before.items():
+        if name == "v_items":
+            continue  # 0010 adds its columns
         assert after[name] == sql, f"0009 changed {name}"
     assert columns == ["type", "entity_id", "title", "state", "registered_event_id",
                        "revision", "registered_at", "updated_at"]

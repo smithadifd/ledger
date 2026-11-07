@@ -52,6 +52,13 @@ only decay out of an item's card and its per-item export (`export-item`) once
 the item is closed, so a closed item's card shows what was decided, not the
 bookkeeping on the way.
 
+An *anchor* is an item that groups others; the items under it are its
+*children*. A child records one `child-of` link naming its anchor, and a
+child has one current anchor at a time (moving it appends a new link and
+leaves the old one in the log). Anchors form a forest: no item is below
+itself. The anchor's card lists its children with a `closed/total` count, and
+`v_items` carries `parent_id` and `children_open`.
+
 The views (`ledger/migrations/`) include `v_items` (current state per item),
 `v_ready` (open items with no open blocker, including claims whose lease has
 expired), `v_blocked`, `v_open_decisions`, `v_decision_records`, `v_leases`

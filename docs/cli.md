@@ -98,9 +98,18 @@ refuses the claim when N items are already claimed.
 **`link ITEM TARGET [--rel REL]`** Link the item. The target is given once,
 after the item or as `--target TARGET`, and may be a local file path. `REL`
 defaults to `url` and is one of `pr`, `branch`, `session`, `item`, `url`,
-`blocks`, `duplicate-of`; it goes after `--rel`, never as a bare word.
+`blocks`, `duplicate-of`, `child-of`; it goes after `--rel`, never as a
+bare word.
 `duplicate-of` also closes the item, in the same transaction, as a duplicate
 of `TARGET`; both cards show the relation. There is no merge verb.
+`child-of` makes the item a child of the anchor `TARGET`. An item has one
+anchor at a time: a second `child-of` to a different anchor is refused
+(exit 2, naming the current anchor) unless `--move` is passed, which records
+a new link that names the anchor it left. The same link again writes
+nothing. A link that would make the item its own ancestor is refused and
+writes nothing. `--move` is accepted only with `--rel child-of`. The
+anchor's card gets a Children section headed `closed/total`, and
+`resume` prints the same count for an anchor.
 `--idempotency-key K` makes a retry safe (see Retrying with a key below).
 
 **`spec set|show|diff ITEM ...`** An item's spec is its versioned content:

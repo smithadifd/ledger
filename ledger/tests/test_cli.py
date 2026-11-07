@@ -260,7 +260,7 @@ def test_doctor_json_and_text(tmp_path: Path, monkeypatch) -> None:
     assert code == 0, err
     body = json.loads(out)
     assert body["ok"] is True
-    assert body["data"]["schema_version"] == 9
+    assert body["data"]["schema_version"] == 10
     assert Path(body["data"]["path"]) == Path(db).resolve()
 
 
@@ -481,7 +481,7 @@ def test_entrypoint_module(tmp_path: Path) -> None:
         check=False,
     )
     assert doctor.returncode == 0, doctor.stderr
-    assert json.loads(doctor.stdout)["data"]["schema_version"] == 9
+    assert json.loads(doctor.stdout)["data"]["schema_version"] == 10
 
 
 def _assert_unusable(monkeypatch, argv) -> None:
