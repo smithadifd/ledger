@@ -199,7 +199,10 @@ Current items, at most 50 unless `--limit` says otherwise; `--all` removes the c
 keeps the children of `ID` (items whose current `child-of` anchor is `ID`). `--since` and
 `--until` keep the items whose newest event falls in the window, with the
 same date forms and the same refusals as `search`. Exit 1 when nothing
-matches.
+matches. Each row in `items` carries the item's fields plus `revision`, `parent_id`
+(the item's current `child-of` anchor as a string id, or `null`) and `children_open` (how
+many of its children are not closed, an integer of 0 or more). The text output lists
+id, type, status and title only.
 
 **`events [--since DATE] [--until DATE] [--kind KIND] [--item ID] [--actor ACTOR] [--limit N]`**
 Events across all items, newest first, at most 50 unless `--limit` says
