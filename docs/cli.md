@@ -130,7 +130,9 @@ it over the same content writes a new version with the same content and the new
 source, and moving it back is another change. `--source-rev` is not compared. `show [--version N]`
 prints a version; `diff ITEM [FROM [TO]]` prints the change field by field.
 A claim stamps the spec version it was made against, and the card shows
-`spec moved: vN → vM` when the spec changed under a claim.
+`spec moved: vN → vM` when the spec's content changed under a claim. A version
+written only to move the source leaves the content hash as it was and prints
+nothing.
 
 ## Entity verbs
 

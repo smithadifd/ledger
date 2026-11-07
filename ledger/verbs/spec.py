@@ -1,11 +1,12 @@
 """Set, show or diff an item's spec: its content as immutable versions.
 
 A spec is one ``item.spec`` event per version. ``spec set`` appends version
-N+1 only when the content hash differs from the current spec's; the same
-content again writes nothing and reports ``unchanged``. The content hash
-covers exactly the content fields (``SPEC_CONTENT_FIELDS``: title, body_md,
-acceptance, size, merge_class), so setting the same content from a newer
-commit (another ``--source-rev``) is a no-op. The version is computed inside
+N+1 only when the content hash or the source differs from the current
+spec's; the same content with the same source again writes nothing and
+reports ``unchanged``. The content hash covers exactly the content fields
+(``SPEC_CONTENT_FIELDS``: title, body_md, acceptance, size, merge_class), so
+setting the same content from a newer commit (another ``--source-rev``) is a
+no-op. The version is computed inside
 the write transaction. The latest ``item.spec`` event is the current spec;
 ``v_items.spec_version`` names its version.
 

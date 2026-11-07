@@ -39,8 +39,10 @@ Format (stable — a later reader should parse this layout, not invent one):
 
 The spec line names the item's current spec version (its latest item.spec
 event, also named in source_event_ids). The moved line appears only while
-the item is claimed and its claim stamped spec_version N older than the
-current M. A claim rewritten by the same holder without a stamp (the loop's
+the item is claimed, its claim stamped spec_version N older than the
+current M, and the content hash of the current spec differs from the hash of
+version N (a version written only to move the source says nothing; when
+version N's event cannot be found the version numbers decide). A claim rewritten by the same holder without a stamp (the loop's
 hand-off and re-stamp writes) keeps the version its run of claims stamped.
 ``ledger spec show`` prints the spec itself; the card names it and stays
 bounded.
@@ -304,6 +306,9 @@ class Card:
     # The current spec version, and the version the active claim stamped.
     spec_version: int | None = None
     spec_claim_version: int | None = None
+    # The content hashes of the current spec and of the claimed version.
+    spec_hash: str | None = None
+    spec_claim_hash: str | None = None
     # The item's children (see children_of) and the rollup over all of them.
     children: tuple[dict[str, Any], ...] = ()
     children_closed: int = 0
@@ -342,15 +347,32 @@ class Card:
             "pointers": [dict(row) for row in self.pointers],
             "spec_version": self.spec_version,
             "spec_claim_version": self.spec_claim_version,
-            "spec_moved": spec_moved_line(self.spec_claim_version, self.spec_version),
+            "spec_moved": spec_moved_line(
+                self.spec_claim_version,
+                self.spec_version,
+                self.spec_claim_hash,
+                self.spec_hash,
+            ),
             "truncated": list(self.truncated),
             "footer": footer_line(self.item_id),
         }
 
 
-def spec_moved_line(claimed: int | None, current: int | None) -> str | None:
-    """``spec moved: vN → vM`` when the claim's version N is older than M."""
+def spec_moved_line(
+    claimed: int | None,
+    current: int | None,
+    claimed_hash: str | None = None,
+    current_hash: str | None = None,
+) -> str | None:
+    """``spec moved: vN → vM`` when the claim's version N is older than M.
+
+    When both content hashes are known and equal the content the claim was
+    built against is unchanged (a source-only version), so there is no line.
+    A missing hash falls back to the version numbers alone.
+    """
     if claimed is None or current is None or current <= claimed:
+        return None
+    if claimed_hash is not None and current_hash is not None and claimed_hash == current_hash:
         return None
     return f"spec moved: v{claimed} → v{current}"
 
@@ -394,6 +416,17 @@ def claim_spec_version(events: list[Any], item: Mapping[str, Any]) -> int | None
     return None
 
 
+def spec_content_hash(events: Iterable[Any], version: int | None) -> str | None:
+    """The content hash of spec ``version`` among ``events``, or None if absent."""
+    if version is None:
+        return None
+    for event in events:
+        if event.kind == SPEC_KIND and event.payload.get("version") == version:
+            digest = event.payload.get("content_hash")
+            return digest if isinstance(digest, str) else None
+    return None
+
+
 def item_spec_moved(lg: Ledger, item_id: str) -> str | None:
     """The ``spec moved`` line for one item, or None (see ``spec_moved_line``)."""
     item = lg.item(item_id)
@@ -402,7 +435,13 @@ def item_spec_moved(lg: Ledger, item_id: str) -> str | None:
     events = lg.events(item_id=item_id)
     spec = latest_spec_event(events)
     current = None if spec is None else spec.payload.get("version")
-    return spec_moved_line(claim_spec_version(events, item), current)
+    claimed = claim_spec_version(events, item)
+    return spec_moved_line(
+        claimed,
+        current,
+        spec_content_hash(events, claimed),
+        None if spec is None else spec.payload.get("content_hash"),
+    )
 
 
 def _dash(value: str | None) -> str:
@@ -679,7 +718,9 @@ def format_card(card: Card) -> str:
         f"claim: {_with_inline_marker(_dash(card.claim), card, 'claim')}",
         f"spec {_dash(None if card.spec_version is None else f'v{card.spec_version}')}",
     ]
-    moved = spec_moved_line(card.spec_claim_version, card.spec_version)
+    moved = spec_moved_line(
+        card.spec_claim_version, card.spec_version, card.spec_claim_hash, card.spec_hash
+    )
     if moved:
         parts.append(moved)
     parts += [
@@ -1337,6 +1378,7 @@ def project_item(
     if state_id is not None:
         base.add(int(state_id))
     spec = latest_spec_event(own_events)
+    spec_claim = claim_spec_version(own_events, item)
     if spec is not None:
         base.add(spec.id)
     card = Card(
@@ -1360,7 +1402,9 @@ def project_item(
         children_total=len(children),
         **_resume_sections(lg, item_id, item_events, pointers),
         spec_version=None if spec is None else spec.payload.get("version"),
-        spec_claim_version=claim_spec_version(own_events, item),
+        spec_claim_version=spec_claim,
+        spec_hash=None if spec is None else spec.payload.get("content_hash"),
+        spec_claim_hash=spec_content_hash(own_events, spec_claim),
     )
     # The creation, state and current spec events are always named; past SOURCE_ID_LIMIT
     # the header keeps them, the newest open ask and the latest election,
@@ -1397,6 +1441,7 @@ __all__ = [
     "derive_next_step",
     "format_card",
     "item_spec_moved",
+    "spec_content_hash",
     "latest_spec_event",
     "project_card",
     "project_item",

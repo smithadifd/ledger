@@ -435,6 +435,69 @@ def test_pick_prints_the_moved_line(db, monkeypatch) -> None:
     assert out.splitlines()[-1] == "spec moved: v1 → v2"
 
 
+PICK = ("pick", ITEM, "--question", "go?", "--option", "yes", "--option", "no",
+        "--chosen", "yes", "--scope", "this item")
+
+
+def pick_out(monkeypatch, db: str, n: int) -> str:
+    code, out, err = cli(monkeypatch, db, *PICK[:3], f"go {n}?", *PICK[4:])
+    assert code == 0, err
+    return out
+
+
+def moved_json(monkeypatch, db: str):
+    code, card, err = cli_json(monkeypatch, db, "card", ITEM)
+    assert code == 0, err
+    return card["data"]["spec_moved"]
+
+
+def test_source_only_move_does_not_print_the_moved_line(db, monkeypatch) -> None:
+    assert set_body(monkeypatch, db, BODY_ONE, "--source", "a.md")[0] == 0
+    assert cli(monkeypatch, db, "claim", ITEM)[0] == 0
+    assert set_body(monkeypatch, db, BODY_ONE, "--source", "b.md")[0] == 0
+    assert [e.payload["version"] for e in spec_events(db)] == [1, 2]
+    text = card_text(monkeypatch, db)
+    assert "spec v2" in text.splitlines()
+    assert "spec moved" not in text
+    assert moved_json(monkeypatch, db) is None
+    assert "spec moved" not in pick_out(monkeypatch, db, 1)
+
+
+def test_content_change_prints_the_moved_line_with_a_source_version_between(
+    db, monkeypatch
+) -> None:
+    assert set_body(monkeypatch, db, BODY_ONE, "--source", "a.md")[0] == 0
+    assert cli(monkeypatch, db, "claim", ITEM)[0] == 0
+    assert set_body(monkeypatch, db, BODY_ONE, "--source", "b.md")[0] == 0
+    assert moved_json(monkeypatch, db) is None
+    assert set_body(monkeypatch, db, BODY_TWO, "--source", "b.md")[0] == 0
+    assert moved_json(monkeypatch, db) == "spec moved: v1 → v3"
+    assert "spec moved: v1 → v3" in card_text(monkeypatch, db).splitlines()
+    assert pick_out(monkeypatch, db, 1).splitlines()[-1] == "spec moved: v1 → v3"
+
+
+def test_a_change_back_to_the_claimed_content_prints_no_moved_line(db, monkeypatch) -> None:
+    # Equal content hash means the content the claim was built against is back.
+    assert set_body(monkeypatch, db, BODY_ONE)[0] == 0
+    assert cli(monkeypatch, db, "claim", ITEM)[0] == 0
+    assert set_body(monkeypatch, db, BODY_TWO)[0] == 0
+    assert moved_json(monkeypatch, db) == "spec moved: v1 → v2"
+    assert set_body(monkeypatch, db, BODY_ONE)[0] == 0
+    assert [e.payload["version"] for e in spec_events(db)] == [1, 2, 3]
+    assert moved_json(monkeypatch, db) is None
+    assert "spec moved" not in card_text(monkeypatch, db)
+
+
+def test_a_missing_claimed_spec_event_falls_back_to_the_version_numbers() -> None:
+    from ledger.card import spec_content_hash, spec_moved_line
+
+    assert spec_content_hash([], 1) is None
+    assert spec_moved_line(1, 2, None, "h") == "spec moved: v1 → v2"
+    assert spec_moved_line(1, 2, "h", None) == "spec moved: v1 → v2"
+    assert spec_moved_line(1, 2, "h", "h") is None
+    assert spec_moved_line(1, 2, "h", "g") == "spec moved: v1 → v2"
+
+
 def test_loop_take_stamps_the_spec_version_and_a_hand_off_keeps_it(db, monkeypatch) -> None:
     assert set_body(monkeypatch, db, BODY_ONE)[0] == 0
     with open_ledger(db) as lg:
