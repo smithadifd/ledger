@@ -457,7 +457,7 @@ class ForestRefusal(ValidationError):
     """A ``child-of`` link that would break the forest of anchors.
 
     ``code`` (also ``reason``) names the rule: ``self_link``,
-    ``second_anchor`` or ``cycle``.
+    ``second_anchor``, ``anchor_missing`` or ``cycle``.
     """
 
     def __init__(self, code: str, message: str):
@@ -488,14 +488,21 @@ def check_child_of_event(conn: sqlite3.Connection, kind: str,
     A child has at most one current anchor and no item is its own ancestor.
     A ``child-of`` link to an anchor other than the child's current one must
     name that anchor in ``moved_from``. A link to the item itself, or to an
-    item already below it, is refused. The ancestor walk keeps a visited set,
-    so it ends even on a store that already holds a cycle.
+    item already below it, is refused. So is a link to an anchor that is not
+    an item (``anchor_missing``): the check reads the items the transaction
+    holds so far, so an anchor created earlier in the same batch or replay
+    counts. The ancestor walk keeps a visited set, so it ends even on a
+    store that already holds a cycle.
     """
     if kind != "item.linked" or payload.get("rel") != CHILD_OF_REL:
         return
     anchor = payload.get("target")
     if anchor == item_id:
         raise ForestRefusal("self_link", f"an item cannot be its own anchor: {item_id}")
+    if not isinstance(anchor, str) or conn.execute(
+        "SELECT 1 FROM v_items WHERE item_id = ?", (anchor,)
+    ).fetchone() is None:
+        raise ForestRefusal("anchor_missing", f"item not found: {anchor}")
     current = current_anchors(conn)
     have = current.get(item_id) if item_id is not None else None
     if have is not None and have != anchor and payload.get("moved_from") != have:
