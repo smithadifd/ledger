@@ -123,7 +123,11 @@ When a long card cuts the section, its marker names `ledger query
 `--title`, `--body` or `--body-file`, `--acceptance`, `--size` (`S`, `M`,
 `L`) and `--merge-class` (`MC-0` to `MC-4`, a risk class the ledger stores
 but does not interpret). `set` appends version N+1 only when the content hash
-changes; the same content again reports `unchanged`. `show [--version N]`
+changes or `--source` differs from the current version's source; the same
+content with the same source (or with no `--source`) again reports
+`unchanged`. `--source` records where the item's current spec lives, so moving
+it over the same content writes a new version with the same content and the new
+source, and moving it back is another change. `--source-rev` is not compared. `show [--version N]`
 prints a version; `diff ITEM [FROM [TO]]` prints the change field by field.
 A claim stamps the spec version it was made against, and the card shows
 `spec moved: vN → vM` when the spec changed under a claim.

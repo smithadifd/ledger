@@ -82,12 +82,15 @@ def set_spec(
     model: str | None = None,
     session: str | None = None,
 ) -> tuple[Event, bool]:
-    """Append the item's next spec version when its content changed.
+    """Append the item's next spec version when its content or source changed.
 
     Returns ``(event, created)``: the new event and True, or the current
-    spec's event and False when the content hash is unchanged (nothing is
-    written). The current spec, the hash compare and the version are all read
-    inside the write transaction.
+    spec's event and False when the content hash is unchanged and ``source``
+    is absent or equal to the current spec's (nothing is written). A different
+    ``source`` over the same content writes the next version with that
+    content and the new source. A call with no ``source`` compares content
+    only and writes no source, as before. The current spec, the compares and
+    the version are all read inside the write transaction.
     """
     digest = content_hash(content)
     with lg.transaction():
@@ -96,7 +99,11 @@ def set_spec(
                 f"item not found: {item_id}", code="not_found", exit_code=EXIT_NOT_FOUND
             )
         current = current_spec(lg, item_id)
-        if current is not None and current.payload.get("content_hash") == digest:
+        if (
+            current is not None
+            and current.payload.get("content_hash") == digest
+            and (source is None or current.payload.get("source") == source)
+        ):
             return current, False
         version = 1 if current is None else int(current.payload["version"]) + 1
         payload: dict[str, Any] = {"version": version, "content_hash": digest}

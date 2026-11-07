@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`ledger spec set` records a source-only change.** The same content with a different `--source` now writes the next spec version, carrying the same content and the new source, and the item's current spec source becomes the new one. The same content with the same source still writes nothing and reports `unchanged`, and so does a call with no `--source`. Moving the source back to an earlier value is another change. `--source-rev` still does not version the spec. Before, only a content change wrote a version, so a caller that moved the source alone could not record it.
+
 ## 0.1.10 — 2026-11-07
 
 - **`ledger query --json` rows carry `parent_id` and `children_open`,** the same two values `v_items` has: the item's current anchor (a string id, or `null`) and how many of its children are not closed (an integer, 0 or more). Only `query` gains them; the text output and every other command's JSON are unchanged.

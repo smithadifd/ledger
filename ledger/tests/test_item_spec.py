@@ -85,12 +85,77 @@ def test_same_content_from_a_newer_commit_is_a_no_op(db, monkeypatch) -> None:
     )
     assert code == 0, err
     code, second, err = set_body(
-        monkeypatch, db, BODY_ONE, "--source", "roadmaps/y.md", "--source-rev", "def5678"
+        monkeypatch, db, BODY_ONE, "--source", "roadmaps/x.md", "--source-rev", "def5678"
     )
     assert code == 0, err
     assert second["data"]["unchanged"] is True, "a new source_rev alone must not version the spec"
     [event] = spec_events(db)
     assert event.payload["source_rev"] == "abc1234"
+
+
+def _versions(db: str) -> list[tuple[int, str | None, str]]:
+    return [
+        (e.payload["version"], e.payload.get("source"), e.payload["content_hash"])
+        for e in spec_events(db)
+    ]
+
+
+def test_a_source_only_change_writes_a_new_version(db, monkeypatch) -> None:
+    code, v1, err = set_body(monkeypatch, db, BODY_ONE, "--source", "A")
+    assert code == 0, err
+    assert v1["data"]["version"] == 1
+    code, v2, err = set_body(monkeypatch, db, BODY_ONE, "--source", "B")
+    assert code == 0, err
+    assert v2["data"]["unchanged"] is False and v2["data"]["version"] == 2, v2
+    assert v2["data"]["event"]["payload"]["source"] == "B"
+    with open_ledger(db, create=False) as lg:
+        assert spec_verb.current_spec(lg, ITEM).payload["source"] == "B"
+    rows = _versions(db)
+    assert [(v, s) for v, s, _h in rows] == [(1, "A"), (2, "B")]
+    assert rows[0][2] == rows[1][2], "a source move keeps the content hash"
+    # The same call again is idempotent: nothing written, v2 returned.
+    code, again, err = set_body(monkeypatch, db, BODY_ONE, "--source", "B")
+    assert code == 0, err
+    assert again["data"]["unchanged"] is True and again["data"]["version"] == 2
+    assert again["data"]["event"]["id"] == v2["data"]["event"]["id"]
+    assert len(spec_events(db)) == 2
+    # A move back to an earlier source is a change.
+    code, v3, err = set_body(monkeypatch, db, BODY_ONE, "--source", "A")
+    assert code == 0, err
+    assert v3["data"]["unchanged"] is False and v3["data"]["version"] == 3
+    assert [(v, s) for v, s, _h in _versions(db)] == [(1, "A"), (2, "B"), (3, "A")]
+
+
+def test_a_content_change_still_bumps_the_version_with_a_source(db, monkeypatch) -> None:
+    set_body(monkeypatch, db, BODY_ONE, "--source", "A")
+    code, v2, err = set_body(monkeypatch, db, BODY_TWO, "--source", "A")
+    assert code == 0, err
+    assert v2["data"]["unchanged"] is False and v2["data"]["version"] == 2
+    code, v3, err = set_body(monkeypatch, db, BODY_ONE, "--source", "B")
+    assert code == 0, err
+    assert v3["data"]["version"] == 3
+    assert [(v, s) for v, s, _h in _versions(db)] == [(1, "A"), (2, "A"), (3, "B")]
+
+
+def test_an_absent_source_compares_content_only(db, monkeypatch) -> None:
+    set_body(monkeypatch, db, BODY_ONE, "--source", "A")
+    code, again, err = set_body(monkeypatch, db, BODY_ONE)
+    assert code == 0, err
+    assert again["data"]["unchanged"] is True and again["data"]["version"] == 1
+    assert len(spec_events(db)) == 1
+
+
+def test_a_retry_of_a_source_move_writes_once(db) -> None:
+    content = {"title": "T", "body_md": "one"}
+    with open_ledger(db, create=False) as lg:
+        set_spec(lg, ITEM, content, source="A", harness="pytest")
+        first, created = set_spec(lg, ITEM, content, source="B", harness="pytest")
+        assert created is True and first.idempotency_key == f"spec:{ITEM}:v2"
+        retry, created = set_spec(lg, ITEM, content, source="B", harness="pytest")
+        assert created is False and retry.id == first.id
+        assert [e.idempotency_key for e in spec_verb.spec_events(lg, ITEM)] == [
+            f"spec:{ITEM}:v1", f"spec:{ITEM}:v2"
+        ]
 
 
 def test_content_hash_is_sha256_of_canonical_content_fields() -> None:
