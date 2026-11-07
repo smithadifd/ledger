@@ -98,9 +98,25 @@ refuses the claim when N items are already claimed.
 **`link ITEM TARGET [--rel REL]`** Link the item. The target is given once,
 after the item or as `--target TARGET`, and may be a local file path. `REL`
 defaults to `url` and is one of `pr`, `branch`, `session`, `item`, `url`,
-`blocks`, `duplicate-of`; it goes after `--rel`, never as a bare word.
+`blocks`, `duplicate-of`, `child-of`; it goes after `--rel`, never as a
+bare word.
 `duplicate-of` also closes the item, in the same transaction, as a duplicate
 of `TARGET`; both cards show the relation. There is no merge verb.
+`child-of` makes the item a child of the anchor `TARGET`. An item has one
+anchor at a time: a second `child-of` to a different anchor is refused
+(exit 3, naming the current anchor) unless `--move` is passed, which records
+a new link that names the anchor it left. The same link again writes
+nothing. A link that would make the item its own ancestor is refused and
+writes nothing. `--move` is accepted only with `--rel child-of`. The
+same rules hold for a `child-of` link written by `append` or `append-many`
+or replayed by `restore`: a link to a different anchor must name the current
+one in `moved_from`, and a self-link or a cycle is refused (exit 3, codes
+`self_link`, `second_anchor`, `cycle`; a refused `append-many` batch writes
+none of its events). A key already used by another event is refused as
+`conflict`, as on every link. The anchor's card gets a Children section
+headed `closed/total`, and `resume` prints the same count for an anchor.
+When a long card cuts the section, its marker names `ledger query
+--parent=ANCHOR --all`, which lists every child the anchor has when you run it.
 `--idempotency-key K` makes a retry safe (see Retrying with a key below).
 
 **`spec set|show|diff ITEM ...`** An item's spec is its versioned content:
@@ -177,8 +193,10 @@ List decision records with their current standing.
 
 ## Reading verbs
 
-**`query [--item ID] [--type TYPE] [--status STATUS] [--since DATE] [--until DATE] [--limit N]`**
-Current items, at most 50 unless `--limit` says otherwise. `--since` and
+**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--since DATE] [--until DATE] [--limit N | --all]`**
+Current items, at most 50 unless `--limit` says otherwise; `--all` removes the cap
+(with `--limit` it is a usage error, and `limit` in the JSON is then `null`). `--parent ID`
+keeps the children of `ID` (items whose current `child-of` anchor is `ID`). `--since` and
 `--until` keep the items whose newest event falls in the window, with the
 same date forms and the same refusals as `search`. Exit 1 when nothing
 matches.

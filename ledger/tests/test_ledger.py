@@ -568,6 +568,7 @@ def test_schema_version_recorded_and_migrate_is_idempotent(tmp_path: Path) -> No
         (7, "0007_actor_operator.sql"),
         (8, "0008_item_spec_version.sql"),
         (9, "0009_entities.sql"),
+        (10, "0010_child_of.sql"),
     ]
 
 

@@ -5,12 +5,23 @@ it: the link and the close land in one transaction or not at all. It refuses
 an item that is already closed, a target that is not an item or is the item
 itself, and a target that is itself closed as a duplicate. Both cards show
 the relation (the kept item's as ``duplicated-by``). There is no merge verb.
+
+``--rel child-of`` makes ``item`` a child of the anchor named by the target.
+An item has at most one current anchor (its latest ``child-of`` link) and the
+anchors form a forest. A second anchor is refused (exit 3) unless ``--move``
+is given; a move appends a new link that names the anchor it left, and no
+earlier event changes. A link to the current anchor writes nothing. A link
+that would make the item its own ancestor is refused. The store enforces
+the one-anchor and no-cycle rules on every write of a ``child-of`` link
+(``append`` and ``append-many`` too), so this verb only finds the anchor a
+move leaves. The checks and the append share one write transaction.
 """
 from __future__ import annotations
 
 import argparse
 
 from ledger.schema import LINK_RELS
+from ledger.store import IdempotencyConflict, current_anchors
 from ledger.verbs import (
     EXIT_NOT_FOUND,
     EXIT_REFUSED,
@@ -27,6 +38,7 @@ from ledger.verbs import (
 )
 
 DUPLICATE_OF = "duplicate-of"
+CHILD_OF = "child-of"
 DEFAULT_REL = "url"
 
 EPILOG = """\
@@ -65,6 +77,12 @@ def add_arguments(parser) -> None:
         f"{DUPLICATE_OF} also closes the item as a duplicate of the target",
     )
     parser.add_argument("--target", help="the target, as a flag")
+    parser.add_argument(
+        "--move",
+        action="store_true",
+        help=f"with --rel {CHILD_OF}: replace the item's current anchor with "
+        "the target (without it a second anchor is refused)",
+    )
     parser.add_argument(
         "--idempotency-key",
         metavar="KEY",
@@ -190,10 +208,91 @@ def _duplicate(args, ctx: Context) -> Result:
     )
 
 
+def _child_of(args, ctx: Context) -> Result:
+    child, anchor = args.item, args.target
+    move = bool(getattr(args, "move", False))
+    key = getattr(args, "idempotency_key", None) or new_key()
+    if child == anchor:
+        raise CliError(
+            f"an item cannot be its own anchor: {child}",
+            code="self_link",
+            exit_code=EXIT_REFUSED,
+        )
+    lg = open_db(ctx, write=True)
+    try:
+        require_item(lg, child)
+        # One write transaction: the checks read the state the append lands on.
+        with lg.transaction():
+            stored = lg.event_by_key(key)
+            if (
+                stored is not None
+                and stored.kind == "item.linked"
+                and stored.item_id == child
+                and stored.payload.get("rel") == CHILD_OF
+                and stored.payload.get("target") == anchor
+            ):
+                # A retry of this very call: the store compares the whole
+                # event (attribution too) and returns what the first call
+                # wrote, or refuses it as a conflict.
+                event = lg.append(
+                    kind="item.linked",
+                    payload=dict(stored.payload),
+                    item_id=child,
+                    idempotency_key=key,
+                    **actor_kwargs(ctx),
+                )
+                return _child_of_result(child, anchor, event, "linked")
+            if stored is not None:
+                # The key names another event: refuse before any no-op path.
+                raise IdempotencyConflict(
+                    f"idempotency_key {key!r} already recorded as a different event"
+                )
+            if lg.item(anchor) is None:
+                raise CliError(
+                    f"item not found: {anchor}",
+                    code="not_found",
+                    exit_code=EXIT_NOT_FOUND,
+                )
+            have = current_anchors(lg._conn).get(child)
+            if have == anchor:
+                newest = [
+                    event
+                    for event in lg.events(item_id=child, kind="item.linked")
+                    if event.payload.get("rel") == CHILD_OF
+                ]
+                return _child_of_result(child, anchor, newest[-1], "unchanged")
+            payload = {"rel": CHILD_OF, "target": anchor}
+            if have is not None and move:
+                payload["moved_from"] = have
+            # Without --move a second anchor carries no moved_from, and the
+            # store refuses it (second_anchor), as it refuses a cycle.
+            event = lg.append(
+                kind="item.linked",
+                payload=payload,
+                item_id=child,
+                idempotency_key=key,
+                **actor_kwargs(ctx),
+            )
+    finally:
+        lg.close()
+    return _child_of_result(child, anchor, event, "linked")
+
+
+def _child_of_result(child: str, anchor: str, event, verb: str) -> Result:
+    return Result(
+        data={"item_id": child, "event": event_dict(event), "result": verb},
+        text=f"{verb}\t{child}\t{CHILD_OF}\t{anchor}\tevent={event.id}",
+    )
+
+
 def run(args, ctx: Context) -> Result:
     args.target = _target(args)
+    if getattr(args, "move", False) and args.rel != CHILD_OF:
+        raise UsageError(f"--move is accepted only with --rel {CHILD_OF}")
     if args.rel == DUPLICATE_OF:
         return _duplicate(args, ctx)
+    if args.rel == CHILD_OF:
+        return _child_of(args, ctx)
     lg = open_db(ctx, write=True)
     try:
         require_item(lg, args.item)

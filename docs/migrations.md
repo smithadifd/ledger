@@ -46,3 +46,4 @@ The schema is a numbered series of SQL files in `ledger/migrations/`, named
 | 7 | `0007_actor_operator.sql` | `v_events`, and an `operator` column on `v_leases`, split from the `<operator>/<agent>` actor |
 | 8 | `0008_item_spec_version.sql` | `v_items.spec_version`, the item's current spec version |
 | 9 | `0009_entities.sql` | `v_entities`: one row per registered entity (automation, project, machine or model) with its current state fields and newest revision |
+| 10 | `0010_child_of.sql` | `v_items.parent_id` (the item's current `child-of` anchor) and `v_items.children_open` (its children not yet closed) |

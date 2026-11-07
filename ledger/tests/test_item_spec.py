@@ -431,6 +431,8 @@ def test_a_ledger_at_0007_migrates_and_keeps_every_view_column(tmp_path) -> None
         }
     for view, columns in before.items():
         assert after[view][: len(columns)] == columns, view
-    assert after["v_items"] == before["v_items"] + ["spec_version"]
+    assert after["v_items"] == before["v_items"] + [
+        "spec_version", "parent_id", "children_open",
+    ]
     assert after["v_leases"] == before["v_leases"]
     assert after["v_open_decisions"] == before["v_open_decisions"]

@@ -22,6 +22,7 @@ Format (stable — a later reader should parse this layout, not invent one):
     ## Open questions
     ## Next step
     ## Links
+    ## Children    (only when the item has children; the header shows closed/total)
     ## Blockers
     ## Notes
     ## Decision records        (these eight only when they have content)
@@ -47,6 +48,15 @@ bounded.
 Links lists the item's own links, then a "duplicated-by: <item>" row for
 each item linked to this one as its duplicate (the duplicate's own card lists
 "duplicate-of: <this item>").
+
+An anchor's card has a Children section after Links: one line per child
+(id, title, status, holder), a child that blocks another first, then in
+creation order, under a header carrying closed/total over all children. An
+item with no children has no section. The rollup stays whole when long
+sections are capped. A capped Children section ends "(+K cut; ledger query
+--parent=<item> --all)": the children are other items' events, so the
+anchor's own export does not list them, and that query prints every child the
+anchor has when it runs. The command carries no count taken from the card.
 
 The resume sections come from decision.recorded (with its latest standing
 and result), item.tried, item.progress, review.recorded and the latest
@@ -294,6 +304,10 @@ class Card:
     # The current spec version, and the version the active claim stamped.
     spec_version: int | None = None
     spec_claim_version: int | None = None
+    # The item's children (see children_of) and the rollup over all of them.
+    children: tuple[dict[str, Any], ...] = ()
+    children_closed: int = 0
+    children_total: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         """Structured form of the same content the text card shows."""
@@ -311,6 +325,11 @@ class Card:
             "open_questions": [dict(row) for row in self.open_questions],
             "next_step": self.next_step,
             "links": [dict(row) for row in self.links],
+            "children": [dict(row) for row in self.children],
+            "children_rollup": {
+                "closed": self.children_closed,
+                "total": self.children_total,
+            },
             "blockers": list(self.blockers),
             "notes": [dict(row) for row in self.notes],
             "decision_records": [dict(row) for row in self.decision_records],
@@ -426,6 +445,12 @@ def _cut_count(count: int, item_id: str) -> str:
     return f"(+{count} cut; {recover_command(item_id)})"
 
 
+def children_command(item_id: str) -> str:
+    """The command that prints every child ``item_id`` has when it runs."""
+    # The --flag=value form keeps an id with a leading hyphen one argument.
+    return shlex.join(["ledger", "query", f"--parent={item_id}", "--all"])
+
+
 def _cut_words(count: int, item_id: str) -> str:
     """Marker for words trimmed from the title or next step."""
     return f"(+{count} words cut; {recover_command(item_id)})"
@@ -506,6 +531,31 @@ def _fmt_links(rows: tuple[dict[str, Any], ...]) -> str:
 def _fmt_notes(rows: tuple[dict[str, Any], ...]) -> str:
     lines = [f"- event={row['event_id']}: {row['text']}" for row in rows]
     return _fmt_list(lines)
+
+
+def _fmt_children(rows: tuple[dict[str, Any], ...]) -> str:
+    lines = [
+        f"- {row['item_id']}: {row['title']} [{row['status']}] holder: {_dash(row['holder'])}"
+        for row in rows
+    ]
+    return _fmt_list(lines)
+
+
+def _children_block(card: Card) -> list[str]:
+    """The Children section, or nothing for an item with no children."""
+    if card.children_total <= 0:
+        return []
+    body = _fmt_children(card.children)
+    count = _omitted_count(card, "children")
+    if count > 0:
+        # The children are other items' events: name the query that lists them.
+        marker = f"(+{count} cut; {children_command(card.item_id)})"
+        body = marker if body == "(none)" else f"{body}\n{marker}"
+    return [
+        "",
+        f"## Children ({card.children_closed}/{card.children_total})",
+        body,
+    ]
 
 
 def _fmt_blockers(blockers: tuple[str, ...]) -> str:
@@ -647,6 +697,7 @@ def format_card(card: Card) -> str:
         "",
         "## Links",
         _with_marker(_fmt_links(card.links), card, "links"),
+        *_children_block(card),
         "",
         "## Blockers",
         _with_marker(_fmt_blockers(card.blockers), card, "blockers"),
@@ -841,6 +892,7 @@ def bound_card(card: Card) -> Card:
         "decision_records": True,
         "decisions": True,
         "blockers": False,
+        "children": False,
         "open_questions": True,
         "refs": False,
     }
@@ -936,7 +988,7 @@ def bound_card(card: Card) -> Card:
 
     # The stop point and the next seat's skills are never capped; references
     # go last, the last listed first, only when nothing else is left to cut.
-    for section in ("decision_records",) + CAP_ORDER + ("refs",):
+    for section in ("children", "decision_records") + CAP_ORDER + ("refs",):
         items = list(getattr(current, section))
         while word_count(format_card(current)) > WORD_LIMIT and items:
             if keep_newest[section]:
@@ -1131,6 +1183,45 @@ def _resume_sections(
     }
 
 
+def children_of(
+    rows: Iterable[Mapping[str, Any]], events: Iterable[Any], item_id: str
+) -> list[dict[str, Any]]:
+    """The items whose current anchor is ``item_id``, one row each.
+
+    A child that ``blocks`` another child comes before it; otherwise creation
+    order. A cycle among the blocks links falls back to creation order for
+    what is left.
+    """
+    kids = sorted(
+        (row for row in rows if row.get("parent_id") == item_id),
+        key=lambda row: int(row["created_event_id"]),
+    )
+    ids = {row["item_id"] for row in kids}
+    before: dict[str, set[str]] = {i: set() for i in ids}
+    for event in events:
+        if event.kind != "item.linked" or event.payload.get("rel") != "blocks":
+            continue
+        blocker, blocked = event.item_id, event.payload.get("target")
+        if blocker in ids and blocked in ids and blocker != blocked:
+            before[blocked].add(blocker)
+    ordered: list[dict[str, Any]] = []
+    placed: set[str] = set()
+    left = list(kids)
+    while left:
+        pick = next((row for row in left if before[row["item_id"]] <= placed), left[0])
+        left.remove(pick)
+        placed.add(pick["item_id"])
+        ordered.append(
+            {
+                "item_id": pick["item_id"],
+                "title": pick["title"],
+                "status": pick["status"],
+                "holder": pick["owner"] if pick["owner"] is not None else pick["claim"],
+            }
+        )
+    return ordered
+
+
 def project_item(
     lg: Ledger, item: Mapping[str, Any], *, pointers: PointerSource | None = None
 ) -> Card:
@@ -1213,7 +1304,9 @@ def project_item(
     # A "blocks" link lives on the blocker and names the item it blocks,
     # the same direction v_ready reads (migrations/0001_initial.sql): a
     # link {rel: "blocks", target: T} on item S blocks T.
-    closed = {row["item_id"] for row in lg.items() if row["status"] == "closed"}
+    rows = lg.items()
+    closed = {row["item_id"] for row in rows if row["status"] == "closed"}
+    children = children_of(rows, events, item_id)
     for event in events:
         if event.kind != "item.linked":
             continue
@@ -1262,6 +1355,9 @@ def project_item(
         links=links,
         blockers=blockers,
         notes=notes,
+        children=tuple(children),
+        children_closed=sum(1 for row in children if row["status"] == "closed"),
+        children_total=len(children),
         **_resume_sections(lg, item_id, item_events, pointers),
         spec_version=None if spec is None else spec.payload.get("version"),
         spec_claim_version=claim_spec_version(own_events, item),
@@ -1295,6 +1391,8 @@ __all__ = [
     "Card",
     "PointerSource",
     "bound_card",
+    "children_command",
+    "children_of",
     "claim_spec_version",
     "derive_next_step",
     "format_card",

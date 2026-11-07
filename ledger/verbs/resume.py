@@ -117,9 +117,24 @@ def _stop_row(event) -> dict[str, Any]:
     }
 
 
-def _entry(db: str, item: dict[str, Any], stop) -> dict[str, Any]:
-    resume_cmd, card_cmd = _commands(db, item["item_id"])
+def _rollup(rows: list[dict[str, Any]], item_id: str) -> dict[str, int] | None:
+    """closed/total over the item's children, or None for an item with none."""
+    kids = [row for row in rows if row.get("parent_id") == item_id]
+    if not kids:
+        return None
     return {
+        "closed": sum(1 for row in kids if row["status"] == "closed"),
+        "total": len(kids),
+    }
+
+
+def _entry(
+    db: str, item: dict[str, Any], stop, rollup: dict[str, int] | None = None
+) -> dict[str, Any]:
+    resume_cmd, card_cmd = _commands(db, item["item_id"])
+    extra = {} if rollup is None else {"children": rollup}
+    return {
+        **extra,
         "item_id": item["item_id"],
         "title": item["title"],
         "status": item["status"],
@@ -133,6 +148,10 @@ def _entry_text(entry: dict[str, Any]) -> str:
     lines = [
         f"{_escape(entry['item_id'])}\t{_escape(entry['status'])}\t{_escape(entry['title'])}"
     ]
+    if "children" in entry:
+        lines.append(
+            f"  children: {entry['children']['closed']}/{entry['children']['total']} closed"
+        )
     stop = entry["stop"]
     if stop is None:
         lines.append("  no stop recorded; read the card")
@@ -160,18 +179,33 @@ def run(args, ctx: Context) -> Result:
             conn = lg._conn
             conn.execute("BEGIN")
             try:
+                rows = lg.items()
                 if args.item_id:
                     stops = lg.events(item_id=args.item_id, kind="item.stopped")
                     item = require_item(lg, args.item_id)
-                    entries.append(_entry(db, item, stops[-1] if stops else None))
+                    entries.append(
+                        _entry(
+                            db,
+                            item,
+                            stops[-1] if stops else None,
+                            _rollup(rows, item["item_id"]),
+                        )
+                    )
                 else:
                     newest: dict[str, Any] = {}
                     for event in lg.events(kind="item.stopped"):
                         newest[event.item_id] = event
-                    for row in lg.items():
+                    for row in rows:
                         if row["status"] == "closed" or row["item_id"] not in newest:
                             continue
-                        entries.append(_entry(db, row, newest[row["item_id"]]))
+                        entries.append(
+                            _entry(
+                                db,
+                                row,
+                                newest[row["item_id"]],
+                                _rollup(rows, row["item_id"]),
+                            )
+                        )
             finally:
                 conn.execute("ROLLBACK")
         finally:

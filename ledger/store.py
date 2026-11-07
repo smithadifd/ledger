@@ -450,6 +450,71 @@ def check_claim_sequence(events: Sequence[Event], where: str) -> str | None:
     return owner
 
 
+CHILD_OF_REL = "child-of"
+
+
+class ForestRefusal(ValidationError):
+    """A ``child-of`` link that would break the forest of anchors.
+
+    ``code`` (also ``reason``) names the rule: ``self_link``,
+    ``second_anchor`` or ``cycle``.
+    """
+
+    def __init__(self, code: str, message: str):
+        super().__init__(code)
+        self.code = code
+        self.args = (message,)
+
+    def __str__(self) -> str:
+        return self.args[0]
+
+
+def current_anchors(conn: sqlite3.Connection) -> dict[str, str]:
+    """Each child's current anchor: the target of its newest ``child-of`` link."""
+    anchors: dict[str, str] = {}
+    for row in conn.execute(
+        "SELECT item_id, payload FROM events WHERE kind = 'item.linked' "
+        "AND json_extract(payload, '$.rel') = ? ORDER BY id",
+        (CHILD_OF_REL,),
+    ):
+        anchors[row["item_id"]] = json.loads(row["payload"])["target"]
+    return anchors
+
+
+def check_child_of_event(conn: sqlite3.Connection, kind: str,
+                         payload: Mapping[str, Any], item_id: str | None) -> None:
+    """The forest guard every write and every restored row passes.
+
+    A child has at most one current anchor and no item is its own ancestor.
+    A ``child-of`` link to an anchor other than the child's current one must
+    name that anchor in ``moved_from``. A link to the item itself, or to an
+    item already below it, is refused. The ancestor walk keeps a visited set,
+    so it ends even on a store that already holds a cycle.
+    """
+    if kind != "item.linked" or payload.get("rel") != CHILD_OF_REL:
+        return
+    anchor = payload.get("target")
+    if anchor == item_id:
+        raise ForestRefusal("self_link", f"an item cannot be its own anchor: {item_id}")
+    current = current_anchors(conn)
+    have = current.get(item_id) if item_id is not None else None
+    if have is not None and have != anchor and payload.get("moved_from") != have:
+        raise ForestRefusal(
+            "second_anchor",
+            f"{item_id} is already a child of {have}; pass --move to change its anchor",
+        )
+    node, seen = anchor, set()
+    while node in current and node not in seen:
+        seen.add(node)
+        node = current[node]
+        if node == item_id:
+            raise ForestRefusal(
+                "cycle",
+                f"{anchor} is already below {item_id}; "
+                f"linking {item_id} under it would make a cycle",
+            )
+
+
 def _event_from_row(row: sqlite3.Row) -> Event:
     payload = json.loads(row["payload"])
     if type(payload) is not dict:
@@ -813,6 +878,8 @@ class Ledger:
             check_decision_event(conn, kind, payload_obj, item)
             # One system claim per database, whichever path writes it.
             check_system_claim(conn, kind, payload_obj, str(self.path))
+            # One anchor per child and no cycles, whichever path writes the link.
+            check_child_of_event(conn, kind, payload_obj, item)
             if caller_precondition is not None:
                 caller_precondition(conn)
 

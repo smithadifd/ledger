@@ -221,7 +221,7 @@ def test_summary_read_failure_is_unknown_and_exit_0(tmp_path, monkeypatch):
     summary = body["data"]["summary"]
     assert summary["status"] == "unknown"
     assert "reason" in summary
-    assert body["data"]["schema_version"] == 9
+    assert body["data"]["schema_version"] == 10
 
 
 def test_watermark_failure_marks_export_unknown(tmp_path, monkeypatch):
@@ -304,6 +304,6 @@ def test_existing_doctor_text_lines_are_unchanged(tmp_path, monkeypatch):
     resolved = str(Path(db).resolve())
     assert out == (
         f"path: {resolved}\n"
-        f"schema_version: 9\n"
+        f"schema_version: 10\n"
         f"search: missing (ledger index rebuilds it)\n"
     )
