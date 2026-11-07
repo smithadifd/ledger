@@ -69,6 +69,8 @@ def run(args, ctx: Context) -> Result:
         for row in lg.items_with_revision():
             item = item_dict(row)
             item["revision"] = row["revision"]
+            item["parent_id"] = row["parent_id"]
+            item["children_open"] = row["children_open"]
             if args.item and item["item_id"] != args.item:
                 continue
             if args.type and item["type"] != args.type:
