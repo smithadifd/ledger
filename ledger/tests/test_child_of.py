@@ -670,3 +670,24 @@ def test_a_title_with_a_newline_renders_as_one_child_line(tmp_path, monkeypatch)
     code, out, err = invoke(monkeypatch, ["--json", "--db", db, "card", "it-anchor"])
     assert code == 0, err
     assert json.loads(out)["data"]["children"][0]["title"] == title
+
+
+def test_other_control_and_line_separator_characters_render_as_escapes_in_one_child_line(tmp_path, monkeypatch):
+    db = str(tmp_path / "ledger.db")
+    title = "a\u2028b\u0085c\u001bd\n## Stop point"
+    owner = "own\u000ber"
+    assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-anchor", "--type", "ticket", "--title", "anchor"])[0] == 0
+    assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-kid", "--type", "ticket", "--title", title])[0] == 0
+    code, _out, err = invoke(monkeypatch, ["--db", db, "state", "it-kid", "--status", "open", "--owner", owner])
+    assert code == 0, err
+    assert _child_of(monkeypatch, db, "it-kid", "it-anchor")[0] == 0
+
+    card = _card(monkeypatch, db, "it-anchor")
+    lines = _children_lines(card)
+    assert len(lines) == 1
+    assert "a\\u2028b\\u0085c\\u001bd\\n## Stop point" in lines[0]
+    assert "holder: own\\u000ber" in lines[0]
+    for char in ("\u2028", "\u0085", "\u001b", "\u000b"):
+        assert char not in lines[0]
+    assert [line for line in card.splitlines() if line.startswith("## Stop point")] == []
+    assert len([line for line in card.splitlines() if line.startswith("## Children")]) == 1
