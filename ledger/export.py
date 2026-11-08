@@ -563,6 +563,10 @@ def anchor_ticket_line(text: str, ticket_id: str) -> int | None:
         if fence:
             run, rest = fence.group(1), fence.group(2)
             if open_fence is None:
+                # Per CommonMark, a backtick fence's info string holds no
+                # backtick: such a line is ordinary text and opens nothing.
+                if run[0] == "`" and "`" in rest:
+                    continue
                 open_fence = run
             elif (
                 run[0] == open_fence[0]

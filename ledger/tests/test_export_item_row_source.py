@@ -444,3 +444,38 @@ def test_near_miss_anchor_note_is_not_an_also_at_note(tmp_path, repo, text):
 
 def test_anchor_form_is_still_not_a_valid_write_side_locator():
     assert not valid_source_locator("roadmaps/x.md#AB1")
+
+
+# --- a backtick opener whose info string holds a backtick opens no fence -------
+
+
+def test_invalid_backtick_opener_does_not_hide_a_following_heading(tmp_path, repo):
+    root, _sha = repo
+    # CommonMark: a backtick fence's info string cannot contain a backtick, so
+    # the first line is ordinary text and AB1 below it is a real heading.
+    (root / "roadmaps" / "y.md").write_text(
+        "# Roadmap\n\n```x`y\n\n" + AB1 + "## Later\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "invalid opener")
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-bt", "also at roadmaps/y.md#AB1")
+
+    assert _ticket(db, root, "an-bt") == AB1
+
+
+def test_valid_fence_openers_still_hide_a_heading_inside(tmp_path, repo):
+    root, _sha = repo
+    # A tilde opener may carry a backtick in its info string; a backtick opener
+    # with a plain info string is a fence. Both still hide a heading.
+    (root / "roadmaps" / "z.md").write_text(
+        "~~~x`y\n" + AB1 + "~~~\n\n```js\n" + AB2 + "```\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "valid openers")
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-tl", "also at roadmaps/z.md#AB1")
+    _anchor_item(db, "an-bk", "also at roadmaps/z.md#AB2")
+
+    assert _refusal(db, root, "an-tl").startswith(f"{NOT_FOUND}: ")
+    assert _refusal(db, root, "an-bk").startswith(f"{NOT_FOUND}: ")
