@@ -464,6 +464,24 @@ def test_invalid_backtick_opener_does_not_hide_a_following_heading(tmp_path, rep
     assert _ticket(db, root, "an-bt") == AB1
 
 
+def test_invalid_backtick_opener_between_tickets_does_not_pull_in_the_next(tmp_path, repo):
+    root, _sha = repo
+    # The section for AB1 ends at AB2's heading. The invalid opener between
+    # them is ordinary text, so it must not hide that heading from the bound.
+    (root / "roadmaps" / "w.md").write_text(
+        "# Roadmap\n\n" + AB1 + "```x`y\n\n" + AB2 + "## Later\n", encoding="utf-8"
+    )
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "invalid opener between tickets")
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-bw", "also at roadmaps/w.md#AB1")
+
+    section = _ticket(db, root, "an-bw")
+
+    assert section == AB1 + "```x`y\n\n"
+    assert "AB2" not in section
+
+
 def test_valid_fence_openers_still_hide_a_heading_inside(tmp_path, repo):
     root, _sha = repo
     # A tilde opener may carry a backtick in its info string; a backtick opener

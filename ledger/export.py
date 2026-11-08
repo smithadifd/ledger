@@ -357,6 +357,13 @@ _HEADING_AT_MOST_3 = re.compile(r"^#{1,3}\s+")
 # or more backticks or tildes, then the rest of the line (an info string on
 # an opener; a closer must have nothing but whitespace there).
 _FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _opens_fence(run: str, rest: str) -> bool:
+    """Whether a fence-shaped line opens a fence. Per CommonMark, a backtick
+    fence's info string holds no backtick: such a line is ordinary text and
+    opens nothing. A tilde opener may carry a backtick."""
+    return not (run[0] == "`" and "`" in rest)
 # A recorded commit is a git object name (7 to 64 lowercase hex digits; 64
 # covers SHA-256 repositories and the file digest a non-git source records),
 # optionally marked ``+dirty``, or the literal ``untracked``. Anything else
@@ -436,7 +443,8 @@ def ticket_section(text: str, line: int) -> str:
         if fence:
             run, rest = fence.group(1), fence.group(2)
             if open_fence is None:
-                open_fence = run
+                if _opens_fence(run, rest):
+                    open_fence = run
             elif (
                 run[0] == open_fence[0]
                 and len(run) >= len(open_fence)
@@ -563,11 +571,8 @@ def anchor_ticket_line(text: str, ticket_id: str) -> int | None:
         if fence:
             run, rest = fence.group(1), fence.group(2)
             if open_fence is None:
-                # Per CommonMark, a backtick fence's info string holds no
-                # backtick: such a line is ordinary text and opens nothing.
-                if run[0] == "`" and "`" in rest:
-                    continue
-                open_fence = run
+                if _opens_fence(run, rest):
+                    open_fence = run
             elif (
                 run[0] == open_fence[0]
                 and len(run) >= len(open_fence)
