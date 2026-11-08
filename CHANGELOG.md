@@ -1,8 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.1.13 — 2026-11-08
 
 - **`export-item --ticket` reads an item whose source is a row key.** An item created with `--source row:<ID>` now prints its ticket from the locator in its newest `also at <locator>` note, where before it was refused with `invalid source locator`. The note text is exactly `also at ` and a locator in one of two forms: `path:line@commit`, or `path#ID`, the form the roadmap importer and `row-item.sh ensure` write today. A `path#ID` locator names no line or commit, so the section is the one headed `### Ticket: ID` in `path` at the current `HEAD` of the repository (a bare `### ID` heading and a table row are not found). A note of any other shape is skipped, and the last valid one of either form wins. An item with no valid `also at` note is refused with `row_source_no_also_at` (exit 1); a `path#ID` whose heading is absent is refused with `row_source_anchor_not_found`, and one that appears more than once with `row_source_anchor_ambiguous`. Nothing is guessed. An item whose source is a locator is read as before, and `new --source` still accepts any text.
+
+Upgrade with `@v0.1.13`.
 
 ## 0.1.12 — 2026-11-07
 
