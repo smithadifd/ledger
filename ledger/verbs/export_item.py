@@ -2,7 +2,9 @@
 
 The backup export (``ledger export``) keeps every event so a restore can
 replay the hash chain. This is the per-item view a reader pulls from.
-``--ticket`` prints the recorded ``### Ticket:`` section once instead.
+``--ticket`` prints the recorded ``### Ticket:`` section once instead. An
+item whose source is a row key ``row:<ID>`` is read at the locator of its
+newest valid ``also at <locator>`` note.
 
 The view ends with one completeness line (``--json``: a ``completeness``
 object in ``data``) naming the events returned, the events on the item and

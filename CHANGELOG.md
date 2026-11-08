@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`export-item --ticket` reads an item whose source is a row key.** An item created with `--source row:<ID>` now prints its ticket from the locator in its newest `also at <locator>` note, where before it was refused with `invalid source locator`. The note text is exactly `also at ` and a `path:line@commit` locator; a note of any other shape (including a `path#ID` locator, which names no line or commit) is skipped, and the last valid one wins. An item with no valid `also at` note is refused with `row_source_no_also_at` (exit 1), and nothing is guessed. An item whose source is a locator is read as before, and `new --source` still accepts any text.
+
 ## 0.1.12 — 2026-11-07
 
 - **A `child-of` link must name an item that exists.** The store now refuses a `child-of` event whose target is not an item, for `append`, `append-many` and `restore` as well as `link` (exit 3, code `anchor_missing`; a refused `append-many` batch writes nothing). Before, such a link was accepted and `parent_id` held the missing id for good. An anchor created earlier in the same batch or restore counts. An export that already holds a `child-of` link to a missing anchor, or a link that comes before its anchor's creation, now fails `restore` with `anchor_missing`.

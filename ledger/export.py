@@ -498,8 +498,62 @@ def read_source_blob(source: str, *, cwd: Path | None = None) -> str:
     raise ValueError(f"source not found: {source}")
 
 
+# An item minted from a roadmap row has the row key ``row:<ID>`` as its created
+# source, not a locator. Its locator is the one its newest ``also at <locator>``
+# note names. The note text is exactly ``also at `` and then a locator
+# ``valid_source_locator`` accepts: no other case, no extra or trailing
+# whitespace, no line break or control character, no bullet or fence. A note
+# of any other shape, or of another kind, is not an also-at note and is
+# skipped, never repaired.
+ROW_SOURCE_PREFIX = "row:"
+ALSO_AT_PREFIX = "also at "
+
+
+def is_row_source(source: str) -> bool:
+    """True for a row key ``row:<ID>``: the prefix, then a non-empty id with
+    no whitespace or control character."""
+    key = source[len(ROW_SOURCE_PREFIX):]
+    return (
+        source.startswith(ROW_SOURCE_PREFIX)
+        and key != ""
+        and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in key)
+    )
+
+
+def also_at_note_locator(text: object) -> str | None:
+    """The locator in an ``also at <locator>`` note text, or None when the text
+    is not exactly that form with a valid locator."""
+    if not isinstance(text, str) or not text.startswith(ALSO_AT_PREFIX):
+        return None
+    locator = text[len(ALSO_AT_PREFIX):]
+    if locator != locator.strip():
+        return None
+    if any(ord(char) < 32 or ord(char) == 127 for char in locator):
+        return None
+    if not valid_source_locator(locator):
+        return None
+    return locator
+
+
+def newest_also_at_locator(events: Sequence[Event]) -> str | None:
+    """The locator of the last valid ``also at`` note in event order (oldest
+    first), or None when the item has none."""
+    for event in reversed(events):
+        if event.kind != "item.note":
+            continue
+        locator = also_at_note_locator(event.payload.get("text"))
+        if locator is not None:
+            return locator
+    return None
+
+
 def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> str:
-    """The recorded ``### Ticket:`` section for one imported item."""
+    """The recorded ``### Ticket:`` section for one imported item.
+
+    A source that is a locator is read as it is. A source that is a row key
+    ``row:<ID>`` reads the locator of the item's newest valid ``also at`` note;
+    an item with none is refused by name, and no section is guessed.
+    """
     events = lg.events(item_id=item_id)
     created = next((event for event in events if event.kind == "item.created"), None)
     if created is None:
@@ -507,8 +561,19 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
     source = created.payload.get("source") or ""
     if not source:
         raise ValueError(f"no source locator on {item_id}")
-    blob = read_source_blob(source, cwd=cwd)
-    _rel, line, _sha = split_source_locator(source)
+    locator = source
+    # A source that is a valid locator is always read as one, so a path that
+    # happens to be named ``row`` keeps its meaning.
+    if not valid_source_locator(source) and is_row_source(source):
+        found = newest_also_at_locator(events)
+        if found is None:
+            raise ValueError(
+                f"row_source_no_also_at: {item_id} has the row source {source} "
+                "and no valid 'also at <locator>' note"
+            )
+        locator = found
+    blob = read_source_blob(locator, cwd=cwd)
+    _rel, line, _sha = split_source_locator(locator)
     return ticket_section(blob, line)
 
 
