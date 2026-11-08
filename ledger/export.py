@@ -498,13 +498,99 @@ def read_source_blob(source: str, *, cwd: Path | None = None) -> str:
     raise ValueError(f"source not found: {source}")
 
 
+# The anchor locator ``<rel>#<ID>`` is what the roadmap importer and
+# ``row-item.sh ensure`` write in an ``also at`` note: a repo-relative path, a
+# ``#`` and a ticket id (a letter, then letters, digits, ``_`` or ``-``). It
+# names no line or commit, so it is read from the committed ``HEAD`` of the
+# repository the locator form uses, and the section is the one whose heading is
+# exactly ``### Ticket: <ID>`` (then end of line, ``: title`` or `` - title``
+# with a hyphen, en dash or em dash). A bare ``### <ID>`` heading or a table row
+# is not found here.
+_TICKET_ID = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+_ANCHOR_HEADING = re.compile(
+    r"^###\s+Ticket:\s+(?P<id>[A-Za-z][A-Za-z0-9_-]*)"
+    r"(?:(?::\s+|\s+[\u2014\u2013-]\s+)\S.*)?\s*$",
+    re.IGNORECASE,
+)
+
+
+def split_anchor_locator(locator: str) -> tuple[str, str]:
+    """Split a ``rel#ID`` anchor locator. Raises ValueError when malformed."""
+    rel, sep, ticket_id = locator.rpartition("#")
+    if not sep or not _valid_locator_path(rel) or _TICKET_ID.fullmatch(ticket_id) is None:
+        raise ValueError(f"invalid anchor locator: {locator}")
+    return rel, ticket_id
+
+
+def valid_anchor_locator(locator: str) -> bool:
+    try:
+        split_anchor_locator(locator)
+    except ValueError:
+        return False
+    return True
+
+
+def read_anchor_blob(locator: str, *, cwd: Path | None = None) -> str:
+    """Read the anchor locator's path at the committed ``HEAD`` of the
+    repository around ``cwd``."""
+    rel, _ticket_id = split_anchor_locator(locator)
+    repo = _git_root((cwd or Path.cwd()).resolve())
+    if repo is not None:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(repo), "show", "--end-of-options", f"HEAD:{rel}"],
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise ValueError(f"source not found: {locator}") from exc
+        if proc.returncode == 0:
+            return proc.stdout
+    raise ValueError(f"source not found: {locator}")
+
+
+def anchor_ticket_line(text: str, ticket_id: str) -> int | None:
+    """The 1-indexed line of the one ``### Ticket: <ticket_id>`` heading in
+    ``text``, outside any code fence; None when there is none. More than one
+    is a ValueError: the section is never guessed."""
+    found: list[int] = []
+    open_fence = None
+    for number, raw in enumerate(text.splitlines(), start=1):
+        heading = raw.rstrip("\r")
+        fence = _FENCE.match(heading)
+        if fence:
+            run, rest = fence.group(1), fence.group(2)
+            if open_fence is None:
+                open_fence = run
+            elif (
+                run[0] == open_fence[0]
+                and len(run) >= len(open_fence)
+                and not rest.strip()
+            ):
+                open_fence = None
+            continue
+        if open_fence is not None:
+            continue
+        match = _ANCHOR_HEADING.match(heading)
+        if match is not None and match.group("id") == ticket_id:
+            found.append(number)
+    if len(found) > 1:
+        raise ValueError(
+            f"row_source_anchor_ambiguous: {len(found)} '### Ticket: {ticket_id}' headings"
+        )
+    return found[0] if found else None
+
+
 # An item minted from a roadmap row has the row key ``row:<ID>`` as its created
 # source, not a locator. Its locator is the one its newest ``also at <locator>``
-# note names. The note text is exactly ``also at `` and then a locator
-# ``valid_source_locator`` accepts: no other case, no extra or trailing
-# whitespace, no line break or control character, no bullet or fence. A note
-# of any other shape, or of another kind, is not an also-at note and is
-# skipped, never repaired.
+# note names. The note text is exactly ``also at `` and then a locator in
+# either form: ``rel:line@commit`` (``valid_source_locator``) or the anchor
+# form ``rel#ID`` (``valid_anchor_locator``). No other case, no extra or
+# trailing whitespace, no line break or control character, no bullet or fence.
+# A note of any other shape, or of another kind, is not an also-at note and is
+# skipped, never repaired. The newest note of either form wins.
 ROW_SOURCE_PREFIX = "row:"
 ALSO_AT_PREFIX = "also at "
 
@@ -530,7 +616,7 @@ def also_at_note_locator(text: object) -> str | None:
         return None
     if any(ord(char) < 32 or ord(char) == 127 for char in locator):
         return None
-    if not valid_source_locator(locator):
+    if not (valid_source_locator(locator) or valid_anchor_locator(locator)):
         return None
     return locator
 
@@ -551,8 +637,11 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
     """The recorded ``### Ticket:`` section for one imported item.
 
     A source that is a locator is read as it is. A source that is a row key
-    ``row:<ID>`` reads the locator of the item's newest valid ``also at`` note;
-    an item with none is refused by name, and no section is guessed.
+    ``row:<ID>`` reads the locator of the item's newest valid ``also at`` note,
+    either ``rel:line@commit`` or the anchor form ``rel#ID`` (the committed
+    ``HEAD`` copy of ``rel``, the ``### Ticket: ID`` section); an item with
+    none, or an anchor that is absent or repeated, is refused by name, and no
+    section is guessed.
     """
     events = lg.events(item_id=item_id)
     created = next((event for event in events if event.kind == "item.created"), None)
@@ -572,6 +661,17 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
                 "and no valid 'also at <locator>' note"
             )
         locator = found
+        if not valid_source_locator(locator):
+            # The anchor form: no line, no commit; find the section by id.
+            _rel, ticket_id = split_anchor_locator(locator)
+            blob = read_anchor_blob(locator, cwd=cwd)
+            line = anchor_ticket_line(blob, ticket_id)
+            if line is None:
+                raise ValueError(
+                    f"row_source_anchor_not_found: no '### Ticket: {ticket_id}' "
+                    f"heading in {locator}"
+                )
+            return ticket_section(blob, line)
     blob = read_source_blob(locator, cwd=cwd)
     _rel, line, _sha = split_source_locator(locator)
     return ticket_section(blob, line)

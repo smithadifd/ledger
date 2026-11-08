@@ -28,6 +28,26 @@ SHA = "0123456789abcdef0123456789abcdef01234567"
 TICKET_A = "### Ticket: SL1 — A ticket\n- Prompt: one.\n\n"
 TICKET_B = "### Ticket: SL2 — B ticket\n- Prompt: two.\n\n"
 REFUSAL = "row_source_no_also_at"
+NOT_FOUND = "row_source_anchor_not_found"
+AMBIGUOUS = "row_source_anchor_ambiguous"
+
+AB1 = "### Ticket: AB1 \u2014 First thing\n- Prompt: one.\n\n"
+AB2 = "### Ticket: AB2: Second thing\n- Prompt: two.\n\n"
+AB7 = "### Ticket: AB7 - Hyphen title\n- Prompt: seven.\n\n"
+AB8 = "### Ticket: AB8\n- Prompt: eight.\n"
+# The roadmap an importer-shaped ``also at roadmaps/x.md#ID`` note points into.
+ROADMAP = (
+    "# Roadmap\n\n"
+    + AB1
+    + AB2
+    + "### AB3 \u2014 bare heading\n- Prompt: bare.\n\n"
+    + "| AB4 | a table row |\n\n"
+    + "```text\n### Ticket: AB5 \u2014 inside a fence\n```\n\n"
+    + "### Ticket: DUP1 \u2014 first copy\n- a\n\n"
+    + "### Ticket: DUP1 \u2014 second copy\n- b\n\n"
+    + AB7
+    + AB8
+)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -46,6 +66,8 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
     (root / "b.md").write_text(TICKET_B + "## Later\nnot it\n", encoding="utf-8")
     # A file literally named ``row``: ``row:1@<sha>`` is a locator, not a row key.
     (root / "row").write_text("### Ticket: ROW — file named row\n- Prompt: r.\n\n## X\n", encoding="utf-8")
+    (root / "roadmaps").mkdir()
+    (root / "roadmaps" / "x.md").write_text(ROADMAP, encoding="utf-8")
     _git(root, "init", "-q")
     _git(root, "add", "-A")
     _git(root, "commit", "-q", "-m", "init")
@@ -149,7 +171,7 @@ def test_invalid_newest_note_falls_back_to_the_previous_valid_one(tmp_path, repo
     db = tmp_path / "ledger.db"
     _item(
         db, "rw-fall", "row:SL1",
-        (f"also at b.md:1@{sha}", "also at roadmaps/x.md#SL1", "also at ../a.md:1@" + sha),
+        (f"also at b.md:1@{sha}", "also at roadmaps/x.md#1SL", "also at ../a.md:1@" + sha),
     )
 
     assert _ticket(db, root, "rw-fall") == TICKET_B
@@ -160,7 +182,7 @@ def test_only_invalid_notes_is_refused_by_name(tmp_path, repo):
     db = tmp_path / "ledger.db"
     _item(
         db, "rw-bad", "row:SL1",
-        ("also at roadmaps/x.md#SL1", f"also at a.md:0@{sha}", "also at a.md:1@--output=/x"),
+        ("also at roadmaps/x.md#", f"also at a.md:0@{sha}", "also at a.md:1@--output=/x"),
     )
 
     assert _refusal(db, root, "rw-bad").startswith(f"{REFUSAL}: ")
@@ -283,3 +305,142 @@ def test_other_sources_keep_the_invalid_locator_refusal(tmp_path, repo, source):
 def test_row_key_is_still_not_a_valid_write_side_locator():
     assert not valid_source_locator("row:SL1")
     assert valid_source_locator(f"a.md:1@{SHA}")
+
+
+# --- the anchor form ``rel#ID`` the importer and row-item.sh write -------------
+
+
+def _anchor_item(db: Path, item_id: str, *notes: str) -> None:
+    _item(db, item_id, "row:AB", notes)
+
+
+def test_importer_shaped_anchor_note_prints_that_tickets_section(tmp_path, repo):
+    root, _sha = repo
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-ok", "also at roadmaps/x.md#AB1")
+
+    assert _ticket(db, root, "an-ok") == AB1
+
+
+@pytest.mark.parametrize(
+    "ticket_id, expected",
+    [("AB2", AB2), ("AB7", AB7), ("AB8", AB8)],
+)
+def test_anchor_heading_forms_are_found(tmp_path, repo, ticket_id, expected):
+    root, _sha = repo
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-form", f"also at roadmaps/x.md#{ticket_id}")
+
+    assert _ticket(db, root, "an-form") == expected
+
+
+@pytest.mark.parametrize(
+    "ticket_id",
+    [
+        "AB9",    # absent
+        "AB",     # a prefix of AB1 is not AB1
+        "ab1",    # ids are case-sensitive
+        "AB3",    # a bare ``### AB3`` heading belongs to the importer's other form
+        "AB4",    # a table row
+        "AB5",    # a heading inside a code fence
+    ],
+)
+def test_anchor_id_not_found_is_refused_by_name(tmp_path, repo, ticket_id):
+    root, _sha = repo
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-miss", f"also at roadmaps/x.md#{ticket_id}")
+
+    message = _refusal(db, root, "an-miss")
+
+    assert message.startswith(f"{NOT_FOUND}: "), message
+
+
+def test_repeated_anchor_heading_is_refused_not_guessed(tmp_path, repo):
+    root, _sha = repo
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-dup", "also at roadmaps/x.md#DUP1")
+
+    message = _refusal(db, root, "an-dup")
+
+    assert message.startswith(f"{AMBIGUOUS}: "), message
+    assert "first copy" not in message and "second copy" not in message
+
+
+def test_anchor_reads_head_not_the_working_tree(tmp_path, repo):
+    root, _sha = repo
+    path = root / "roadmaps" / "x.md"
+    path.write_text(ROADMAP + "### Ticket: NEW1 \u2014 not committed\n- n\n", encoding="utf-8")
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-head", "also at roadmaps/x.md#NEW1")
+
+    assert _refusal(db, root, "an-head").startswith(f"{NOT_FOUND}: ")
+
+
+def test_anchor_in_a_file_missing_at_head_is_refused(tmp_path, repo):
+    root, _sha = repo
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-nofile", "also at roadmaps/gone.md#AB1")
+
+    assert "source not found" in _refusal(db, root, "an-nofile")
+
+
+def test_anchor_outside_a_repository_is_refused(tmp_path, repo):
+    _root, _sha = repo
+    elsewhere = tmp_path / "norepo"
+    elsewhere.mkdir()
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-norepo", "also at roadmaps/x.md#AB1")
+
+    assert "source not found" in _refusal(db, elsewhere, "an-norepo")
+
+
+def test_newest_note_wins_across_both_forms(tmp_path, repo):
+    root, sha = repo
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-new-loc", "also at roadmaps/x.md#AB1", f"also at b.md:1@{sha}")
+    _anchor_item(db, "an-new-anc", f"also at b.md:1@{sha}", "also at roadmaps/x.md#AB1")
+
+    assert _ticket(db, root, "an-new-loc") == TICKET_B
+    assert _ticket(db, root, "an-new-anc") == AB1
+
+
+def test_a_note_in_neither_form_is_skipped_for_an_earlier_anchor(tmp_path, repo):
+    root, sha = repo
+    db = tmp_path / "ledger.db"
+    _anchor_item(
+        db, "an-skip", "also at roadmaps/x.md#AB2", "also at roadmaps/x.md@AB1", "also at AB1"
+    )
+
+    assert _ticket(db, root, "an-skip") == AB2
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "also at roadmaps/x.md#",            # missing id
+        "also at #AB1",                      # missing path
+        "also at ../x.md#AB1",               # path leaves the repository
+        "also at /roadmaps/x.md#AB1",        # absolute path
+        "also at roadmaps/x.md#1AB",         # id must start with a letter
+        "also at roadmaps/x.md#AB 1",        # whitespace in the id
+        "also at roadmaps/x.md# AB1",
+        "also at roadmaps/x.md#AB1 ",        # trailing space
+        "also at  roadmaps/x.md#AB1",        # extra space
+        "also at roadmaps/x.md#AB1\n",       # trailing newline
+        "also at roadmaps/x.md#AB1#AB2x ",   # trailing junk
+        "Also at roadmaps/x.md#AB1",         # other case
+        "- also at roadmaps/x.md#AB1",       # bullet
+        "roadmaps/x.md#AB1",                 # no prefix
+        "also at roadmaps/x\x01.md#AB1",     # control character
+    ],
+)
+def test_near_miss_anchor_note_is_not_an_also_at_note(tmp_path, repo, text):
+    root, _sha = repo
+    db = tmp_path / "ledger.db"
+    _anchor_item(db, "an-near", text)
+
+    assert _refusal(db, root, "an-near").startswith(f"{REFUSAL}: ")
+
+
+def test_anchor_form_is_still_not_a_valid_write_side_locator():
+    assert not valid_source_locator("roadmaps/x.md#AB1")

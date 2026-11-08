@@ -276,9 +276,13 @@ line: `completeness: N events returned, M events on the item, K decayed`
 the `### Ticket:` section its source locator points at, read with `git show`
 from the current repository. An item whose source is a row key `row:<ID>`
 is read at the locator of its newest valid `also at <locator>` note (the text
-is exactly `also at ` and a `path:line@commit` locator; a note of any other
-shape is skipped). With no such note the command refuses with
-`row_source_no_also_at` (exit 1) and reads nothing.
+is exactly `also at ` and a locator, either `path:line@commit` or `path#ID`;
+a note of any other shape is skipped). A `path#ID` locator names no line or
+commit: the section is the one headed `### Ticket: ID` in `path` at the
+current `HEAD` of the repository. With no such note the command refuses with
+`row_source_no_also_at`; a `path#ID` whose heading is absent (a bare `### ID`
+heading and a table row do not count) refuses with `row_source_anchor_not_found`,
+and one repeated, `row_source_anchor_ambiguous` (exit 1), reading nothing.
 
 **`search WORD... [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
 Full-text search, ranked by BM25; the words may be quoted or separate.
