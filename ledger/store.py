@@ -35,8 +35,11 @@ from .decisions import check_event as check_decision_event
 from .decisions import decision_records
 from .paths import SharedDatabaseError, SyncPathError, SyncPathWarning, resolve_db_path
 from .schema import (
+    CAPTURE_CHANNEL_PREFIX,
+    CAPTURE_CHANNELS,
     ENTITY_REGISTERED_KIND,
     ENTITY_STATE_KIND,
+    PICKER_CHANNEL,
     SPEC_KIND,
     SYSTEM_CLAIM_KIND,
     ValidationError,
@@ -759,6 +762,21 @@ class Ledger:
             raise ValidationError(f"reserved-kind:{kwargs.get('kind')}")
         return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
 
+    def _append_capture_event(self, capability: object, **kwargs: Any) -> Event:
+        """Append a hook capture only for the capture writer (verbs/capture.py).
+
+        Only this path writes a channel that starts with ``hook:``; it writes
+        ``utterance.captured`` on ``hook:prompt`` or ``hook:picker`` and nothing
+        else, with every other check a public append makes.
+        """
+        from .verbs.capture import _CAPTURE_WRITER_CAPABILITY
+
+        if capability is not _CAPTURE_WRITER_CAPABILITY:
+            raise ValidationError("capture-writer-capability-required")
+        return self._append(
+            internal=False, capture=True, ignore_retry_attribution=False, **kwargs
+        )
+
     def append_many(self, events: Sequence[Mapping[str, Any]]) -> list[Event]:
         """Append several events in ONE transaction: all of them or none.
 
@@ -832,6 +850,7 @@ class Ledger:
         expect_revision: int | str | None = None,
         ignore_retry_attribution: bool,
         internal: bool,
+        capture: bool = False,
     ) -> Event:
         if type(kind) is not str or not kind:
             raise ValidationError("unknown-kind:")
@@ -856,6 +875,22 @@ class Ledger:
         session = _opt_str(session, "session")
         channel = _opt_str(channel, "channel")
         provenance_class = _opt_str(provenance_class, "provenance_class")
+        # The hook: channel prefix belongs to the capture writer alone, so an
+        # answer on it is the harness's record, never a seat's. Every other
+        # writer (append, append-many, pick, the library, the internal
+        # writers) is refused on any channel under the prefix.
+        if capture:
+            if kind != "utterance.captured" or channel not in CAPTURE_CHANNELS:
+                raise ValidationError(f"capture-channel-required:{channel}")
+        elif channel is not None and channel.startswith(CAPTURE_CHANNEL_PREFIX):
+            raise ValidationError("reserved-capture-channel")
+        # A picker object rides only a picker capture.
+        if (
+            kind == "utterance.captured"
+            and "picker" in payload_obj
+            and channel != PICKER_CHANNEL
+        ):
+            raise ValidationError("picker-needs-picker-channel")
         if recorded_at is None:
             recorded_at = _now()
         elif type(recorded_at) is not str or not _RECORDED_AT.match(recorded_at):

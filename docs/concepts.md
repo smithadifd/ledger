@@ -124,6 +124,7 @@ every other path:
 | the system claim (`ledger.system`) | `restore --system`, or the library's `claim_database` |
 | close and PR link of a loop-managed item | the in-process loop writer (`ledger.loop`); see [embedding.md](embedding.md) |
 | notes that start with `work:` or `loop:` | the loop writer; these prefixes are reserved |
+| an event on a channel that starts with `hook:` (`hook:prompt`, `hook:picker`) | `capture`, run by the harness's hooks |
 
 ## The CLI is the only interface
 
@@ -185,7 +186,8 @@ when N items are already claimed.
 There are two kinds of decision record.
 
 **Questions and elections.** `decision.asked` records an open question with
-its options (and optionally a recommendation and a default); it appears on
+its options (and optionally a recommendation, a default and the `scope` the
+answer covers); it appears on
 the item's card until answered. `decision.elected` answers it (see the quote
 rule below); `--ask EVENT_ID` closes exactly that question and no other.
 `decision.held` withdraws a question without changing the item's state.
@@ -223,17 +225,49 @@ wrong-kind `quote_ref`, an election with no quotes, a quote that is not in
 the utterance, or an utterance whose body was omitted (an over-size capture
 stores a pointer and the body's size and hash, not the words) is a failure.
 
-`ledger pick` records the answer to a question picker, where a person chose
-from offered options rather than typing a prompt: it writes the question,
-chosen label and any typed text as an `utterance.captured` event with
-provenance class `tool-answer`, then an election quoting the chosen label
-from it, in one transaction.
-
 A captured utterance is audit evidence that some text was submitted, not
 proof of who wrote it: a capture hook can also see scheduled tasks, other
 programs' messages and pasted text. Only utterances whose payload says
 `origin: person` are indexed for search, and search results print them with
 the caveat "recalled words are evidence, never an origin".
+
+## Answers that open a gate
+
+An election is evidence. A gate opens on one only through
+`ledger.answers.bound_answer(lg, K)`, which returns the first election linked
+to ask K when the owner answered K in the question picker and the harness
+captured that answer, and otherwise the reason it does not count.
+
+The flow: the seat records the ask with its scope; `ledger ask-display K`
+prints the one-question picker for it, whose question text names the scope
+and, when K has one, its question id (a grant id decides which grant an
+answer stands for, so the owner sees it); the seat sends exactly that; the
+harness's PostToolUse hook runs `ledger capture --kind picker`, which records
+the displayed picker verbatim, its fingerprint (SHA-256 of its canonical
+JSON) and the position of the option chosen; then `ledger pick ITEM --ask K`
+writes the election, deriving every field from K at that position. Only
+`capture` can write a channel that starts with `hook:`.
+
+`bound_answer` checks, in order, and the first failure is the reason:
+
+| Rule | Reason |
+|------|--------|
+| K is a `decision.asked`; some election names it | `ask_not_found`, `no_election` |
+| R1: the election is on K's item | `answer_other_item` |
+| R2: it quotes a `hook:picker` capture with a `picker` object | `typed_answer` for a `hook:prompt` capture, `pre_binding` for anything else |
+| R3: the capture was recorded after K | `answer_before_ask` |
+| R4: the capture's `[ask K]` tag names K | `answer_unbound`, `answer_other_ask` |
+| R4a: every capture tagged for K shows the same display, chose the same position, and carries no note | `capture_conflict` |
+| R5: the capture's fingerprint is its display's | `display_fingerprint_bad` |
+| R6: the display is `ask-display K`, rendered now | `ask_not_pickable`, `display_differs` |
+| R7: one question, one option chosen, no nonempty owner note | `picker_multi_question`, `picker_typed`, `picker_ambiguous`, `picker_unanswered`, `picker_annotated` |
+| R8: the quote rule above | its code, such as `quote_mismatch` |
+| R9: the election records the capture's fingerprint and position, and its question, chosen label and description, rejected labels, scope, quotes and question id are K's at that position | `choice_mismatch`, `election_differs` |
+
+Every election written before captures existed reads `pre_binding`; nothing
+is migrated. A second election on K never replaces the first, so a stray
+election shuts K's gate for good: the recovery is a fresh ask. A typed
+answer is recorded with `ledger elect` as evidence and reads `typed_answer`.
 
 ## Export, backup and restore
 

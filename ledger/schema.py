@@ -8,6 +8,7 @@ closed. The events themselves are never removed from the store.
 """
 from __future__ import annotations
 
+import math
 import re
 from typing import Any, Mapping
 
@@ -40,11 +41,40 @@ SPEC_MERGE_CLASSES = ("MC-0", "MC-1", "MC-2", "MC-3", "MC-4")
 # its content_hash (verbs/spec.py). version, source, source_rev and the hash
 # itself are not content.
 SPEC_CONTENT_FIELDS = ("title", "body_md", "acceptance", "size", "merge_class")
+# Channels only `ledger capture` (verbs/capture.py) writes: the harness's
+# record of a submitted prompt and of a question-picker answer. The store
+# refuses every other writer on any channel that starts with the prefix.
+CAPTURE_CHANNEL_PREFIX = "hook:"
+PROMPT_CHANNEL = "hook:prompt"
+PICKER_CHANNEL = "hook:picker"
+CAPTURE_CHANNELS = (PROMPT_CHANNEL, PICKER_CHANNEL)
 _SOURCE = {"type": "string", "min_len": 1}
 # A reference to a file, PR or event: one line, short. Content is never
 # copied into the ledger, only pointed at.
 _REF = {"type": "string", "min_len": 1, "max_len": 300, "single_line": True}
 _TEXT = {"type": "string", "min_len": 1}
+_SHA256_HEX = {"type": "string", "pattern": r"[0-9a-f]{64}"}
+# What the harness displayed in one AskUserQuestion call and what came
+# back (verbs/capture.py builds it; ledger.answers reads it). display,
+# answers and annotation are the harness's own data, kept verbatim.
+_PICKER = {
+    "type": "object",
+    "required": {
+        "display": {"type": "array", "min_len": 1, "items": {"type": "json_object"}},
+        "display_sha256": _SHA256_HEX,
+        "question_count": {"type": "integer", "min": 1},
+        "answers": {"type": "json_object"},
+        "typed": {"type": "boolean"},
+        "ambiguous": {"type": "boolean"},
+        "tool_use_id": {"type": "string", "min_len": 1},
+    },
+    "optional": {
+        "chosen_label": {"type": "string"},
+        "chosen_position": {"type": "integer", "min": 1},
+        "annotation": {"type": "json_object"},
+        "asked_event_id": {"type": "integer", "min": 1},
+    },
+}
 # One fixed form (UTC, milliseconds) so lease stamps order as text.
 _LEASE_STAMP = {
     "type": "string",
@@ -236,6 +266,9 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
             "title_raw": {"type": "string", "min_len": 1},
             # The source entry's raw markdown: every line under its heading.
             "body": {"type": "string", "min_len": 1},
+            # What the answer covers. The picker shows it in the question
+            # (ledger ask-display), and an election takes it from the ask.
+            "scope": {"type": "string", "min_len": 1},
         },
     },
     ("decision.elected", 1): {
@@ -256,6 +289,11 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
             "source": _SOURCE,
             "question_id": {"type": "string", "min_len": 1},
             "asked_event_id": {"type": "integer", "min": 1},
+            # The picker answer an election records (ledger pick): the
+            # fingerprint of the display the owner saw and the 1-based
+            # position of the option chosen.
+            "display_sha256": _SHA256_HEX,
+            "chosen_position": {"type": "integer", "min": 1},
         },
     },
     # Withdraws (held) or restores (released) one ask without an election and
@@ -288,6 +326,8 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
             "omitted_bytes": {"type": "integer", "min": 1},
             "omitted_sha256": {"type": "string", "pattern": r"[0-9a-f]{64}"},
             "source": _SOURCE,
+            # Only on channel hook:picker, which only ledger capture writes.
+            "picker": _PICKER,
         },
         "together": (("omitted_bytes", "omitted_sha256"),),
     },
@@ -590,6 +630,23 @@ def schema_for(kind: str, payload_version: int) -> dict[str, Any]:
     return schema
 
 
+def _is_json(value: Any) -> bool:
+    """True for a JSON value: null, a string, a boolean, an integer, a finite
+    number, or an array or string-keyed object of JSON values."""
+    try:
+        if value is None or type(value) in (str, bool, int):
+            return True
+        if type(value) is float:
+            return math.isfinite(value)
+        if type(value) is list:
+            return all(_is_json(item) for item in value)
+        if type(value) is dict:
+            return all(type(key) is str and _is_json(item) for key, item in value.items())
+    except RecursionError:
+        return False
+    return False
+
+
 def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
     if "enum" in spec:
         if not isinstance(value, str) or value not in spec["enum"]:
@@ -645,6 +702,15 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
         if min_keys and len(value) < min_keys:
             _fail(f"bad-type:{path}")
         _check_object(value, spec.get("required", {}), spec.get("optional", {}), path)
+        return
+    if field_type == "boolean":
+        if type(value) is not bool:
+            _fail(f"bad-type:{path}")
+        return
+    if field_type == "json_object":
+        # Any JSON object, kept verbatim: data whose keys the ledger does not own.
+        if type(value) is not dict or not _is_json(value):
+            _fail(f"bad-type:{path}")
         return
     _fail(f"bad-type:{path}")
 

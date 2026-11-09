@@ -1,10 +1,11 @@
 """``ledger grants``: trust grants read from their election records.
 
-Every fixture is a temporary ledger. Utterances are appended through the
-library so their ``recorded_at`` can sit on a fixed UTC date; elections go
-through ``ledger elect`` (answering an ask that carries the grant id as its
-``question_id``) or, where a test needs an election the elect verb would
-refuse, through a raw ``ledger append``.
+Every fixture is a temporary ledger. A standing grant is the owner's picker
+answer: an ask carrying the grant id as its ``question_id``, the harness's
+capture of the answer (written through the capture writer's store path so
+its ``recorded_at`` can sit on a fixed UTC date) and ``ledger pick``. Other
+elections go through ``ledger elect`` or, where a test needs an election the
+elect verb would refuse, through a raw ``ledger append``.
 """
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from pathlib import Path
 import pytest
 
 import ledger.verbs.elect as elect_module
+from ledger.answers import render_ask_display
 from ledger.store import open_ledger
 from ledger.verbs import EXIT_REFUSED, EXIT_USAGE, discover_verbs
 from ledger.verbs import grants as grants_module
@@ -26,6 +28,7 @@ from ledger.verbs.grants import (
     WITHDRAWN,
     read_grants,
 )
+from ledger.verbs.capture import _CAPTURE_WRITER_CAPABILITY, picker_capture
 
 from test_elect import invoke
 
@@ -78,6 +81,7 @@ def ask(monkeypatch, db: str, grant_id: str = GRANT) -> int:
         "question": f"Stand {grant_id}?",
         "options": [{"label": "granted"}, {"label": "withdrawn"}],
         "question_id": grant_id,
+        "scope": SCOPE,
     }
     code, out, err = invoke(
         monkeypatch,
@@ -110,6 +114,44 @@ def elect(
     code, out, err = invoke(monkeypatch, argv)
     assert code == 0, err
     return json.loads(out)["data"]["event"]
+
+
+def picker_grant(
+    monkeypatch,
+    db: str,
+    *,
+    chosen: str = "granted",
+    grant_id: str = GRANT,
+    recorded_at: str = SPOKEN_AT,
+) -> tuple[int, dict]:
+    """The owner picks ``chosen`` on a fresh ask for ``grant_id``; returns the
+    capture id and the election ``ledger pick`` wrote."""
+    asked = ask(monkeypatch, db, grant_id)
+    with open_ledger(db) as lg:
+        questions = render_ask_display(asked, lg.events(after_id=asked - 1, limit=1)[0].payload)
+        hook = {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": f"toolu-{asked}",
+            "tool_input": {"questions": questions},
+            "tool_response": {"answers": {questions[0]["question"]: chosen}},
+        }
+        capture_id = lg._append_capture_event(
+            _CAPTURE_WRITER_CAPABILITY,
+            kind="utterance.captured",
+            payload=picker_capture(hook),
+            idempotency_key=f"capture:picker:toolu-{asked}",
+            actor="owner/capture",
+            harness="pytest",
+            channel="hook:picker",
+            provenance_class="tool-answer",
+            recorded_at=recorded_at,
+        ).id
+    code, out, err = invoke(
+        monkeypatch, ["--json", "--db", db, "pick", ITEM, "--ask", str(asked)]
+    )
+    assert code == 0, err
+    return capture_id, json.loads(out)["data"]["election"]
 
 
 def raw_elected(monkeypatch, db: str, payload: dict) -> tuple[int, str, str]:
@@ -175,8 +217,7 @@ def test_grants_is_a_discovered_read_verb(ledger_db, monkeypatch) -> None:
 
 
 def test_a_recorded_grant_appears_with_its_date_and_scope(ledger_db, monkeypatch) -> None:
-    spoken = utterance(ledger_db)
-    elected = elect(monkeypatch, ledger_db, spoken)
+    spoken, elected = picker_grant(monkeypatch, ledger_db)
     # The election is recorded on another UTC date than the owner's words.
     assert elected["recorded_at"][:10] != SPOKEN_DATE
     code, out, err = grants(monkeypatch, ledger_db)
@@ -262,8 +303,7 @@ def test_raw_append_of_an_election_without_a_quote_ref_is_refused(ledger_db, mon
 
 
 def test_check_passes_then_refuses_once_withdrawn(ledger_db, monkeypatch) -> None:
-    spoken = utterance(ledger_db)
-    granted = elect(monkeypatch, ledger_db, spoken)
+    _spoken, granted = picker_grant(monkeypatch, ledger_db)
     code, envelope = check(monkeypatch, ledger_db)
     assert code == 0, envelope
     assert envelope["data"]["status"] == STANDING
@@ -271,9 +311,7 @@ def test_check_passes_then_refuses_once_withdrawn(ledger_db, monkeypatch) -> Non
     code, out, _err = grants(monkeypatch, ledger_db, "--check", GRANT)
     assert code == 0 and out.startswith(f"STANDING\t{GRANT}\tevent={granted['id']}\t")
 
-    later = utterance(ledger_db, "I withdraw the fixture grant.", key="u-2")
-    withdrawn = elect(monkeypatch, ledger_db, later, chosen="withdrawn",
-                      quotes=("I withdraw the fixture grant",))
+    _later, withdrawn = picker_grant(monkeypatch, ledger_db, chosen="withdrawn")
     code, envelope = check(monkeypatch, ledger_db)
     assert code == EXIT_REFUSED
     assert envelope["error"]["code"] == "grant_withdrawn"
@@ -288,8 +326,8 @@ def test_check_passes_then_refuses_once_withdrawn(ledger_db, monkeypatch) -> Non
 def test_a_withdrawal_takes_effect_without_verifying(ledger_db, monkeypatch) -> None:
     # Withdrawing only removes authority: an unverifiable withdrawal still
     # withdraws (the reader fails closed).
-    spoken = utterance(ledger_db)
-    elect(monkeypatch, ledger_db, spoken)
+    spoken, _granted = picker_grant(monkeypatch, ledger_db)
+    assert check(monkeypatch, ledger_db)[0] == 0
     code, _out, err = raw_elected(monkeypatch, ledger_db, raw_payload(
         spoken, chosen="withdrawn", quotes=("words nobody said",)))
     assert code == 0, err
@@ -310,14 +348,17 @@ def test_check_of_an_unknown_grant_is_refused(ledger_db, monkeypatch) -> None:
 
 def test_a_grant_quoting_a_generated_utterance_is_unverified(ledger_db, monkeypatch) -> None:
     # ledger elect checks the quote but not who wrote the utterance; the
-    # reader requires a person's reply.
+    # reader requires the harness's picker capture of the owner's answer.
     generated = utterance(ledger_db, provenance="generated", key="u-gen")
-    elect(monkeypatch, ledger_db, generated)
+    elected = elect(monkeypatch, ledger_db, generated)
     assert rows(monkeypatch, ledger_db)[GRANT]["status"] == UNVERIFIED
     code, envelope = check(monkeypatch, ledger_db)
     assert code == EXIT_REFUSED
     assert envelope["error"]["code"] == "grant_unverified"
-    assert "not_a_reply" in envelope["error"]["message"]
+    assert "(pre_binding)" in envelope["error"]["message"]
+    # The quote-only audit check still names what it finds.
+    with open_ledger(ledger_db, create=False) as lg:
+        assert grants_module.unverified_reason(lg, elected["payload"]) == "not_a_reply"
 
 
 def test_a_grant_whose_quote_is_not_in_the_utterance_is_unverified(ledger_db, monkeypatch) -> None:
@@ -330,7 +371,8 @@ def test_a_grant_whose_quote_is_not_in_the_utterance_is_unverified(ledger_db, mo
     code, envelope = check(monkeypatch, ledger_db)
     assert code == EXIT_REFUSED
     assert envelope["error"]["code"] == "grant_unverified"
-    assert "quote_mismatch" in envelope["error"]["message"]
+    # A raw election answers no ask.
+    assert "(grant_unasked)" in envelope["error"]["message"]
 
 
 @pytest.mark.parametrize("payload_change", [
@@ -366,10 +408,10 @@ def test_the_reader_reuses_the_elect_quote_rule() -> None:
 
 
 def test_a_regrant_after_a_withdrawal_stands_again(ledger_db, monkeypatch) -> None:
-    spoken = utterance(ledger_db)
-    elect(monkeypatch, ledger_db, spoken)
-    elect(monkeypatch, ledger_db, spoken, chosen="withdrawn", quotes=("Yes",))
-    regranted = elect(monkeypatch, ledger_db, spoken)
+    picker_grant(monkeypatch, ledger_db)
+    picker_grant(monkeypatch, ledger_db, chosen="withdrawn")
+    assert check(monkeypatch, ledger_db)[1]["error"]["code"] == "grant_withdrawn"
+    _spoken, regranted = picker_grant(monkeypatch, ledger_db)
     code, envelope = check(monkeypatch, ledger_db)
     assert code == 0, envelope
     assert envelope["data"]["status"] == STANDING
@@ -378,8 +420,8 @@ def test_a_regrant_after_a_withdrawal_stands_again(ledger_db, monkeypatch) -> No
 
 def test_an_unverified_regrant_never_stands_on_an_older_verified_grant(
         ledger_db, monkeypatch) -> None:
-    spoken = utterance(ledger_db)
-    elect(monkeypatch, ledger_db, spoken)
+    spoken, _granted = picker_grant(monkeypatch, ledger_db)
+    assert check(monkeypatch, ledger_db)[0] == 0
     code, _out, err = raw_elected(monkeypatch, ledger_db, raw_payload(
         spoken, quotes=("words nobody said",)))
     assert code == 0, err
@@ -426,8 +468,7 @@ class _WriterAfterTheRevisionRead:
 
 def test_an_election_landing_mid_read_never_shows_past_the_named_revision(
         ledger_db, monkeypatch) -> None:
-    spoken = utterance(ledger_db)
-    granted = elect(monkeypatch, ledger_db, spoken)
+    spoken, granted = picker_grant(monkeypatch, ledger_db)
     before = event_count(ledger_db)
     raced: list[int] = []
 
