@@ -14,7 +14,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 
 import pytest
@@ -219,24 +218,96 @@ def test_spaced_database_is_posix_quoted_and_runnable(tmp_path, monkeypatch) -> 
         assert "same database" in resumed.stdout, (shell, resumed.stdout)
 
 
-def test_space_heavy_database_keeps_card_within_word_limit(monkeypatch) -> None:
-    temp_root = "/private/tmp" if Path("/private/tmp").is_dir() else "/tmp"
-    with tempfile.TemporaryDirectory(dir=temp_root) as root:
-        parent = Path(root)
-        for _ in range(5):
-            parent /= "p " * 40
-        parent.mkdir(parents=True)
-        db = str(parent / "ledger.db")
-        seed(monkeypatch, db, "it-a")
-        code, out, err = invoke(monkeypatch, ["--db", db, "card", "it-a"])
+def test_space_heavy_database_keeps_card_within_word_limit(tmp_path, monkeypatch) -> None:
+    # Fill the path with spaced words up to just under SQLite's 512-byte path
+    # limit (components stay under the 255-byte name limit).
+    parent = tmp_path
+    budget = 490 - len(str(tmp_path)) - len("/ledger.db")
+    while budget >= 4:
+        component = "p " * (min(200, budget - 1) // 2)
+        parent /= component
+        budget -= len(component) + 1
+    parent.mkdir(parents=True)
+    db = str(parent / "ledger.db")
+    seed(monkeypatch, db, "it-a")
+    code, out, err = invoke(monkeypatch, ["--db", db, "card", "it-a"])
     assert code == 0, err
     resume_lines = [line for line in out.splitlines() if line.startswith("Resume with: ")]
     assert len(resume_lines) == 1, out
+    # The bound is exercised: a plain whitespace split would be over the limit.
+    assert len(out.split()) > WORD_LIMIT, len(out.split())
     command = resume_lines[0].removeprefix("Resume with: ")
     prefix = command.rsplit(" resume --item=", 1)[0]
     assert word_count(out, command_prefix=prefix) <= WORD_LIMIT
     tokens = shlex.split(command)
     assert tokens[tokens.index("--db") + 1] == db
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        ("--d", "{db}", "resume"),
+        ("resume", "--d", "{db}"),
+        ("--d={db}", "resume"),
+        ("--js", "resume"),
+    ],
+)
+def test_abbreviated_long_option_is_a_usage_error(tmp_path, monkeypatch, form) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    # A different database in the environment must not be addressed by a
+    # command whose abbreviated flag was silently accepted.
+    monkeypatch.setenv("LEDGER_DB", str(tmp_path / "other.db"))
+    argv = [part.format(db=db) for part in form]
+    code, out, err = invoke(monkeypatch, argv)
+    assert code == 2, (out, err)
+    assert out == ""
+    assert err.strip(), err
+
+
+def test_full_db_option_before_and_after_the_verb_prints_db(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    monkeypatch.delenv("LEDGER_DB", raising=False)
+    for argv in (["--db", db, "resume"], ["resume", "--db", db], [f"--db={db}", "resume"]):
+        code, out, err = invoke(monkeypatch, argv, env={"LEDGER_PROG": "custom-ledger"})
+        assert code == 0, err
+        assert _printed(out, "resume") == [f"custom-ledger --db {shlex.quote(db)} resume --item=it-a"]
+
+
+def test_db_token_after_double_dash_is_an_operand_not_the_flag(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "new", "--id=--db", "--type", "ticket", "--title", "operand"]
+    )
+    assert code == 0, err
+    monkeypatch.setenv("LEDGER_DB", db)
+    code, out, err = invoke(
+        monkeypatch, ["card", "--", "--db"], env={"LEDGER_PROG": "custom-ledger"}
+    )
+    assert code == 0, err
+    assert "Resume with: custom-ledger resume --item=--db" in out
+    assert "custom-ledger export-item -- --db" in out
+    assert " --db " + shlex.quote(db) not in out
+
+
+def test_json_resume_counts_open_items_without_a_stop(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    seed(monkeypatch, db, "it-b")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
+    assert code == 0, err
+    data = json.loads(out)["data"]
+    assert data["items"] == []
+    assert data["open_without_stop"] == 2
+    _stop(monkeypatch, db, "it-a", "stop a")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
+    assert code == 0, err
+    data = json.loads(out)["data"]
+    assert [entry["item_id"] for entry in data["items"]] == ["it-a"]
+    assert data["open_without_stop"] == 1
 
 
 def test_inferred_program_basename_is_shell_quoted(tmp_path, monkeypatch) -> None:

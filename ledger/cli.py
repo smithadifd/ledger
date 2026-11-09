@@ -81,13 +81,12 @@ def _program_name() -> str:
         return "ledger"
 
 
-def _db_was_explicit(argv: list[str]) -> bool:
-    return any(arg == "--db" or arg.startswith("--db=") for arg in argv)
-
-
 def build_parser(table: dict[str, Verb]) -> LedgerParser:
+    # allow_abbrev=False on the parser and on every subparser: a long option
+    # matches only by its full name, so "--d" can never stand for "--db".
     parser = LedgerParser(
         prog="ledger",
+        allow_abbrev=False,
         description=(
             "Append-only item ledger. Generic writes require LEDGER_HARNESS; "
             "loop-reserved events use the internal library writer. Actor fields come from "
@@ -109,7 +108,7 @@ def build_parser(table: dict[str, Verb]) -> LedgerParser:
     parser.add_argument("--db", help="database path (overrides LEDGER_DB)")
     sub = parser.add_subparsers(dest="verb", required=True)
     for name, verb in sorted(table.items()):
-        subparser = sub.add_parser(name, help=verb.help)
+        subparser = sub.add_parser(name, help=verb.help, allow_abbrev=False)
         subparser.add_argument(
             "--json",
             action="store_true",
@@ -213,7 +212,8 @@ def _run(
         roadmap_parser=roadmap_parser,
         search_fallback_root=search_fallback_root,
         program=_program_name(),
-        db_explicit=_db_was_explicit(argv),
+        # Decided from the parse: the database was passed on the command line.
+        db_explicit=bool(args.db),
     )
     if verb.writes and not ctx.harness:
         raise CliError(

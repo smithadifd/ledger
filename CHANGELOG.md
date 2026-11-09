@@ -7,6 +7,8 @@ First-write and first-resume output now names the action a new user needs.
 - A write without `LEDGER_HARNESS` suggests `LEDGER_HARNESS=claude-code`, and `item.stopped` phase errors list the allowed phases from the schema.
 - `ledger resume` reports how many open items lack a stop instead of saying there are no open items. Runnable commands from `resume` and `card` preserve `LEDGER_PROG`, `python3 -m ledger`, or the executable basename, and include `--db` only when it was passed.
 - Top-level `--version` prints `ledger <version>` without requiring a database.
+- `ledger --json resume` carries `open_without_stop`, the count of open items with no stop recorded.
+- Abbreviated long options (for example `--d` for `--db`) are no longer accepted; spell the option in full. A usage error (exit 2) results.
 
 An answer opens a gate only when the harness captured it for its ask.
 
