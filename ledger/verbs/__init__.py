@@ -15,6 +15,8 @@ refused.
 from __future__ import annotations
 
 import re
+import shlex
+import unicodedata
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -91,9 +93,56 @@ class Context:
     # person (LEDGER_OPERATOR) and the seat (LEDGER_AGENT).
     operator: str | None = None
     agent: str | None = None
+    # Command prefix shown in runnable output, and whether this invocation
+    # supplied --db rather than LEDGER_DB.
+    program: str = "ledger"
+    db_explicit: bool = False
 
 
 ACTOR_SEPARATOR = "/"
+
+
+_NAMED_SHELL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _is_control(char: str) -> bool:
+    return unicodedata.category(char) in ("Cc", "Zl", "Zp")
+
+
+def _shell_escape(value: str) -> str:
+    out = []
+    for char in value:
+        if char == "\\":
+            out.append("\\\\")
+        elif char == "'":
+            out.append("\\'")
+        elif char in _NAMED_SHELL_ESCAPES:
+            out.append(_NAMED_SHELL_ESCAPES[char])
+        elif _is_control(char):
+            codepoint = ord(char)
+            if codepoint < 0x100:
+                out.append(f"\\x{codepoint:02x}")
+            elif codepoint < 0x10000:
+                out.append(f"\\u{codepoint:04x}")
+            else:
+                out.append(f"\\U{codepoint:08x}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def quote_command_arg(value: str) -> str:
+    """Quote one shell argument, escaping controls to keep output on one line."""
+    if not any(_is_control(char) for char in value):
+        return shlex.quote(value)
+    return "$'" + _shell_escape(value) + "'"
+
+
+def invocation_prefix(program: str, db: str, db_explicit: bool) -> str:
+    """Build the command prefix repeated in runnable CLI output."""
+    if not db_explicit:
+        return program
+    return f"{program} --db {quote_command_arg(db)}"
 
 
 def compose_actor(operator: str | None, agent: str | None) -> str | None:

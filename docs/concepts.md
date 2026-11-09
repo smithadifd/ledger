@@ -152,24 +152,47 @@ one host.
 
 The ledger opens its database only when the path names a regular file directly:
 not a symbolic link, FIFO, device or folder, and not a file with a second hard
-link. After SQLite opens the file, the ledger checks that the file SQLite holds
-is the one the path names, and refuses before running any statement if it is
-not. SQLite's `-wal`, `-shm` and `-journal` files beside the database get the
-same checks before the first statement, and their open copies are checked again
-before the first write.
+link. After SQLite opens the file, the ledger asks SQLite which descriptor the
+new connection holds, and refuses before running any statement unless that
+descriptor is the file the path names now and the file the path named when the
+ledger checked it before connecting (`db_swapped` otherwise). SQLite's `-wal`,
+`-shm` and `-journal` files beside the database get the same name checks before
+the first statement. After the first read, and again after a switch to WAL, the
+connection's own `-wal`, `-shm` and open journal descriptors must be the
+regular, singly linked files at those names (`db_sibling_unsafe` otherwise).
 
-A process that holds a ledger connection open and opens the same database again
-may be refused with `db_fd_unknown` until the first connection closes. SQLite
-may reuse an existing descriptor, and the guard cannot prove which file that
-descriptor belongs to.
+The check reads only this connection's descriptors; it never reads or counts the
+other files the process has open. A process may hold several ledger connections
+on any threads, open a database it already has open (SQLite may reuse the
+descriptor it holds), and open other files meanwhile. To find the descriptors
+the ledger calls SQLite's C library through `ctypes`, and reads the descriptor
+fields inside SQLite's own file structures, which are not public API. Each read
+is checked first against a pointer that ties the structure to this connection,
+and a failed check refuses with `db_fd_unattributable`. When the Python build hides SQLite's C functions, or the
+ledger cannot install its connection capture, every open is refused with
+`db_fd_unattributable`; the ledger never falls back to an unchecked open.
 
 One first-creation window remains: SQLite opens or creates those side files by
 name, so a process that can write the database's folder can put a hard link
 there between the check and SQLite's open. The ledger then refuses before
 writing any ledger data, but SQLite may already have written into the linked
-file. A read-only open of a database path swapped to a FIFO in that window
-waits until something opens the FIFO for writing. Keep the database in a folder
-only you can write.
+file. The same holds for a `-wal` or `-shm` file swapped in during the first
+read when no other connection in the process has the database open: SQLite
+writes to it before the check runs, and the ledger refuses afterwards. A
+read-only open of a database path swapped to a FIFO in that window waits until
+something opens the FIFO for writing. Keep the database in a folder only you
+can write.
+
+The check binds the name to a file; it cannot tell which file someone meant to
+be there. A replacement database put at the path before the ledger checks it,
+and left there until the check ends, is accepted: whoever can do that can as
+well leave it in place. A database path that did not exist when the ledger
+checked it (a new ledger, or one another process is creating) is accepted as
+the file there after connecting. On a filesystem that reuses a freed inode
+number at once (ext4 does), a database deleted during the check and replaced by
+a new file can carry the identity the first check saw, since nothing holds the
+first file open; it is then accepted, which is the same case as a replacement
+left at the path.
 
 ## Claims and leases
 

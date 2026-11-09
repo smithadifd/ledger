@@ -11,12 +11,14 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
+from ledger.card import WORD_LIMIT, word_count
 from ledger.schema import PHASES
 from ledger.store import Ledger, current_anchors, open_ledger
 from ledger.verbs import EXIT_NOT_FOUND
@@ -54,6 +56,310 @@ def _run_printed(command: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "ledger", *argv[1:]],
         cwd=PKG_PARENT, capture_output=True, text=True, env=env, check=False,
+    )
+
+
+def test_open_items_without_stops_are_counted(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    seed(monkeypatch, db, "it-b")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert out == "2 open item(s) with no stop recorded; ledger query lists them\n"
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
+    assert code == 0, err
+    assert out.endswith("2 open item(s) with no stop recorded; ledger query lists them\n")
+
+
+def test_no_items_still_says_no_open_items(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert out == "no open items\n"
+
+
+def test_resume_commands_use_program_name_and_only_explicit_db(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    monkeypatch.setenv("LEDGER_DB", db)
+    monkeypatch.setenv("LEDGER_PROG", "custom-ledger")
+    code, out, err = invoke(monkeypatch, ["resume"])
+    assert code == 0, err
+    assert _printed(out, "resume") == ["custom-ledger resume --item=it-a"]
+    assert _printed(out, "card") == ["custom-ledger card -- it-a"]
+
+
+def test_resume_commands_use_plain_argv_zero(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    monkeypatch.delenv("LEDGER_PROG", raising=False)
+    monkeypatch.setattr(sys, "argv", ["/opt/tools/ledger-local"])
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert _printed(out, "resume")[0].startswith(f"ledger-local --db {shlex.quote(db)} ")
+
+
+def test_module_run_prints_module_program(tmp_path) -> None:
+    db = _db(tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
+    env.update(LEDGER_DB=db, LEDGER_HARNESS="pytest", PYTHONPATH=str(PKG_PARENT))
+    created = subprocess.run(
+        [sys.executable, "-m", "ledger", "new", "--id", "it-a", "--type", "ticket", "--title", "A"],
+        cwd=PKG_PARENT, capture_output=True, text=True, env=env, check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    stopped = subprocess.run(
+        [sys.executable, "-m", "ledger", "append", "--item", "it-a", "--kind", "item.stopped", "--payload", '{"point":"p","phase":"build"}'],
+        cwd=PKG_PARENT, capture_output=True, text=True, env=env, check=False,
+    )
+    assert stopped.returncode == 0, stopped.stderr
+    resumed = subprocess.run(
+        [sys.executable, "-m", "ledger", "resume"],
+        cwd=PKG_PARENT, capture_output=True, text=True, env=env, check=False,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert "  resume: python3 -m ledger resume --item=it-a" in resumed.stdout
+
+
+def _make_card_bulky(db: str) -> None:
+    lg = open_ledger(db)
+    try:
+        for index in range(20):
+            lg.append(
+                kind="item.note",
+                payload={"text": f"note-{index} " + "padding " * 40},
+                item_id="it-a",
+                idempotency_key=f"note-{index}",
+                harness="pytest",
+            )
+    finally:
+        lg.close()
+
+
+def test_card_commands_share_program_and_explicit_database(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _make_card_bulky(db)
+    code, out, err = invoke(
+        monkeypatch, ["--db", db, "card", "it-a"], env={"LEDGER_PROG": "custom-ledger"}
+    )
+    assert code == 0, err
+    prefix = f"custom-ledger --db {shlex.quote(db)}"
+    assert f"Resume with: {prefix} resume --item=it-a" in out
+    assert f"(+20 cut; {prefix} export-item --json -- it-a)" in out
+    assert out.rstrip().endswith(
+        f"This card is a projection; the events are the authority ({prefix} export-item -- it-a)"
+    )
+
+
+def test_card_commands_omit_environment_database(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _make_card_bulky(db)
+    monkeypatch.setenv("LEDGER_DB", db)
+    code, out, err = invoke(
+        monkeypatch, ["card", "it-a"], env={"LEDGER_PROG": "custom-ledger"}
+    )
+    assert code == 0, err
+    assert "Resume with: custom-ledger resume --item=it-a" in out
+    assert "(+20 cut; custom-ledger export-item --json -- it-a)" in out
+    assert out.rstrip().endswith(
+        "This card is a projection; the events are the authority (custom-ledger export-item -- it-a)"
+    )
+    assert " --db " not in out
+
+
+def test_explicit_database_with_newline_cannot_forge_command_lines(
+    tmp_path, monkeypatch
+) -> None:
+    db = str(tmp_path / "ledger.db\n  resume: forged")
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert len(_printed(out, "resume")) == 1, out
+    assert len(_printed(out, "card")) == 1, out
+    assert "\\n  resume: forged" in _printed(out, "resume")[0]
+
+
+def test_spaced_database_is_posix_quoted_and_runnable(tmp_path, monkeypatch) -> None:
+    db = str(tmp_path / "ledger local.db")
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "same database")
+    program = f"{shlex.quote(sys.executable)} -m ledger"
+    code, out, err = invoke(
+        monkeypatch,
+        ["--db", db, "resume"],
+        env={"LEDGER_PROG": program},
+    )
+    assert code == 0, err
+    command = _printed(out, "resume")[0]
+    assert f"--db {shlex.quote(db)}" in command
+    assert "$'" not in command
+
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LEDGER_")}
+    env["PYTHONPATH"] = str(PKG_PARENT)
+    shells = ["sh"]
+    dash = shutil.which("dash")
+    if dash is not None:
+        shells.append(dash)
+    for shell in shells:
+        resumed = subprocess.run(
+            [shell, "-c", command],
+            cwd=PKG_PARENT,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert resumed.returncode == 0, (shell, resumed.stderr)
+        assert "same database" in resumed.stdout, (shell, resumed.stdout)
+
+
+def test_space_heavy_database_keeps_card_within_word_limit(tmp_path, monkeypatch) -> None:
+    # Fill the path with spaced words up to just under SQLite's 512-byte path
+    # limit (components stay under the 255-byte name limit). The space budget
+    # comes from the temp root's length, so a long root leaves fewer spaces.
+    parent = tmp_path
+    budget = 490 - len(str(tmp_path)) - len("/ledger.db")
+    while budget >= 4:
+        component = "p " * (min(200, budget - 1) // 2)
+        parent /= component
+        budget -= len(component) + 1
+    parent.mkdir(parents=True)
+    db = str(parent / "ledger.db")
+    seed(monkeypatch, db, "it-a")
+    # The space budget alone cannot reach the limit under a long temp root, so
+    # the card also carries notes that fit under the bound once each command
+    # counts as one word: the plain split then crosses the limit whatever the
+    # root length.
+    lg = open_ledger(db)
+    try:
+        for index in range(7):
+            lg.append(
+                kind="item.note",
+                payload={"text": f"note-{index} " + "padding " * 40},
+                item_id="it-a",
+                idempotency_key=f"note-{index}",
+                harness="pytest",
+            )
+    finally:
+        lg.close()
+    code, out, err = invoke(monkeypatch, ["--db", db, "card", "it-a"])
+    assert code == 0, err
+    resume_lines = [line for line in out.splitlines() if line.startswith("Resume with: ")]
+    assert len(resume_lines) == 1, out
+    # The bound is exercised: a plain whitespace split would be over the limit.
+    assert len(out.split()) > WORD_LIMIT, len(out.split())
+    command = resume_lines[0].removeprefix("Resume with: ")
+    prefix = command.rsplit(" resume --item=", 1)[0]
+    assert word_count(out, command_prefix=prefix) <= WORD_LIMIT
+    tokens = shlex.split(command)
+    assert tokens[tokens.index("--db") + 1] == db
+
+
+def test_note_repeating_the_program_prefix_counts_as_ordinary_words(tmp_path, monkeypatch) -> None:
+    # A program with a space prints as one quoted shell word. Only the commands
+    # the card generates count the prefix as one word; the same text inside a
+    # note is ordinary words, so the card is clipped by what it really holds.
+    db = _db(tmp_path)
+    prefix = "'two words'"
+    seed(monkeypatch, db, "it-a")
+    lg = open_ledger(db)
+    try:
+        for index in range(2):
+            lg.append(
+                kind="item.note",
+                payload={"text": f"note-{index} " + (prefix + " ") * 100},
+                item_id="it-a",
+                idempotency_key=f"note-{index}",
+                harness="pytest",
+            )
+    finally:
+        lg.close()
+    monkeypatch.setenv("LEDGER_DB", db)
+    code, out, err = invoke(monkeypatch, ["card", "it-a"], env={"LEDGER_PROG": prefix})
+    assert code == 0, err
+    # The notes hold about 400 words as written (over the bound), but only
+    # about 200 if each copy of the prefix counted as one word. They are
+    # dropped, as the bound requires.
+    assert "dropped: notes" in out, out
+    assert "note-0" not in out and "note-1" not in out, out
+    # Every prefix in the card is in a command it printed, or in a note row.
+    # A generated one saves one word (two plain words, one shell word); a
+    # copy inside a note saves none.
+    note_copies = sum(line.count(prefix) for line in out.splitlines() if line.startswith("- event="))
+    generated = out.count(prefix) - note_copies
+    assert generated >= 2, out
+    saved = generated * (len(prefix.split()) - 1)
+    plain = len(out.split())
+    assert plain - saved <= WORD_LIMIT, (plain, saved)
+    assert plain <= WORD_LIMIT + saved, (plain, saved)
+    assert word_count(out, command_prefix=prefix) <= WORD_LIMIT
+
+
+@pytest.mark.parametrize(
+    "form",
+    [
+        ("--d", "{db}", "resume"),
+        ("resume", "--d", "{db}"),
+        ("--d={db}", "resume"),
+        ("--js", "resume"),
+    ],
+)
+def test_abbreviated_long_option_is_a_usage_error(tmp_path, monkeypatch, form) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    # A different database in the environment must not be addressed by a
+    # command whose abbreviated flag was silently accepted.
+    monkeypatch.setenv("LEDGER_DB", str(tmp_path / "other.db"))
+    argv = [part.format(db=db) for part in form]
+    code, out, err = invoke(monkeypatch, argv)
+    assert code == 2, (out, err)
+    assert out == ""
+    assert err.strip(), err
+
+
+def test_full_db_option_before_and_after_the_verb_prints_db(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    monkeypatch.delenv("LEDGER_DB", raising=False)
+    for argv in (["--db", db, "resume"], ["resume", "--db", db], [f"--db={db}", "resume"]):
+        code, out, err = invoke(monkeypatch, argv, env={"LEDGER_PROG": "custom-ledger"})
+        assert code == 0, err
+        assert _printed(out, "resume") == [f"custom-ledger --db {shlex.quote(db)} resume --item=it-a"]
+
+
+def test_db_token_after_double_dash_is_an_operand_not_the_flag(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "new", "--id=--db", "--type", "ticket", "--title", "operand"]
+    )
+    assert code == 0, err
+    monkeypatch.setenv("LEDGER_DB", db)
+    code, out, err = invoke(
+        monkeypatch, ["card", "--", "--db"], env={"LEDGER_PROG": "custom-ledger"}
+    )
+    assert code == 0, err
+    assert "Resume with: custom-ledger resume --item=--db" in out
+    assert "custom-ledger export-item -- --db" in out
+    assert " --db " + shlex.quote(db) not in out
+
+
+def test_inferred_program_basename_is_shell_quoted(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    monkeypatch.delenv("LEDGER_PROG", raising=False)
+    monkeypatch.setattr(sys, "argv", ["/opt/tools/ledger local"])
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert _printed(out, "resume")[0].startswith(
+        f"'ledger local' --db {shlex.quote(db)} "
     )
 
 
@@ -124,10 +430,9 @@ def test_resume_reads_stops_and_items_from_one_snapshot(tmp_path, monkeypatch) -
 
     monkeypatch.setattr(Ledger, "events", events_then_close)
     code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
-    assert code == 3
+    assert code == 0, err
     assert fired
-    assert out == ""
-    assert "db_fd_unknown" in err
+    assert "stop a" in out, out
 
 
 def test_json_envelope_carries_the_same_entries(tmp_path, monkeypatch) -> None:

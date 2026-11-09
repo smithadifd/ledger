@@ -1,17 +1,23 @@
-"""Bind SQLite opens to safe database files and side files."""
+"""Bind SQLite opens to safe database files and side files.
+
+The check asks SQLite which descriptors the new connection holds (see
+``_sqlite_handle``) and compares each one's identity with the file at its
+name. It never reads or counts the process's descriptor table, so what other
+threads open, and SQLite's reuse of a descriptor it already holds, do not
+change the verdict.
+"""
 from __future__ import annotations
 
-import errno
 import os
 import sqlite3
 import stat
 from pathlib import Path
 from typing import Callable
 
+from . import _sqlite_handle
+
 Identity = tuple[int, int]
-Snapshot = dict[int, Identity]
 _SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
-_FD_ROOTS = (Path("/proc/self/fd"), Path("/dev/fd"))
 _TEST_SEAM: Callable[[str, Path], None] | None = None
 
 
@@ -46,6 +52,13 @@ def _lstat(path: Path, *, absent_ok: bool) -> os.stat_result | None:
         _unsafe("db_stat_failed", str(exc), path, exc)
 
 
+def _fstat(fd: int, path: Path) -> os.stat_result:
+    try:
+        return os.fstat(fd)
+    except OSError as exc:
+        _unsafe("db_stat_failed", f"fstat({fd}): {exc}", path, exc)
+
+
 def _check_main(path: Path, *, absent_ok: bool) -> os.stat_result | None:
     found = _lstat(path, absent_ok=absent_ok)
     if found is None:
@@ -77,12 +90,17 @@ def _check_sibling(path: Path) -> os.stat_result | None:
     _unsafe("db_sibling_unsafe", detail, path)
 
 
-def precheck_files(path: Path) -> bool:
-    """Check names without opening them; return whether the main file exists."""
+def _precheck(path: Path) -> os.stat_result | None:
+    """Check names without opening them; return the main file's ``lstat``, if any."""
     main = _check_main(path, absent_ok=True)
     for suffix in _SIDE_SUFFIXES:
         _check_sibling(Path(f"{path}{suffix}"))
-    return main is not None
+    return main
+
+
+def precheck_files(path: Path) -> bool:
+    """Check names without opening them; return whether the main file exists."""
+    return _precheck(path) is not None
 
 
 def precheck_siblings(path: Path) -> None:
@@ -90,37 +108,34 @@ def precheck_siblings(path: Path) -> None:
         _check_sibling(Path(f"{path}{suffix}"))
 
 
-def snapshot(path: Path) -> Snapshot:
-    """Return the live process descriptor table, keyed by descriptor number."""
-    root = next((candidate for candidate in _FD_ROOTS if candidate.is_dir()), None)
-    if root is None:
-        _unsafe("db_fd_listing_unavailable", "no descriptor table is available", path)
-    try:
-        names = os.listdir(root)
-    except OSError as exc:
-        _unsafe("db_fd_listing_unavailable", str(exc), path, exc)
-    result: Snapshot = {}
-    for name in names:
-        if not name.isdecimal():
-            continue
-        fd = int(name)
-        try:
-            found = os.fstat(fd)
-        except OSError as exc:
-            if exc.errno == errno.EBADF:
-                continue
-            _unsafe("db_stat_failed", f"fstat({fd}): {exc}", path, exc)
-        result[fd] = _identity(found)
-    return result
-
-
-def _changed(before: Snapshot, after: Snapshot) -> Snapshot:
-    return {fd: identity for fd, identity in after.items() if before.get(fd) != identity}
-
-
 def _seam(stage: str, path: Path) -> None:
     if _TEST_SEAM is not None:
         _TEST_SEAM(stage, path)
+
+
+def _bind(path: Path, conn: sqlite3.Connection, captured: list[int]) -> int:
+    """Return the one handle opened on this thread, once it is proven to be ``conn``'s."""
+    if len(captured) != 1:
+        _unsafe(
+            "db_fd_unknown", f"connect opened {len(captured)} connections, expected 1", path
+        )
+    handle = captured[0]
+    category = _sqlite_handle.LIMIT_VARIABLE_NUMBER
+    original = conn.getlimit(category)
+    probe = original - 1 if original > 1 else original + 1
+    conn.setlimit(category, probe)
+    try:
+        applied = conn.getlimit(category)
+        seen = _sqlite_handle.limit(handle, category)
+    finally:
+        conn.setlimit(category, original)
+    if applied != probe or seen != probe:
+        _unsafe(
+            "db_fd_unattributable",
+            "the connection opened on this thread is not the one returned",
+            path,
+        )
+    return handle
 
 
 def _main_after_connect(path: Path) -> os.stat_result:
@@ -137,72 +152,82 @@ def _main_after_connect(path: Path) -> os.stat_result:
     return named
 
 
-def _verify_main(path: Path, before: Snapshot) -> tuple[int, Identity]:
-    after = snapshot(path)
-    new = _changed(before, after)
-    if len(new) != 1:
-        _unsafe("db_fd_unknown", f"connect opened {len(new)} descriptors, expected 1", path)
-    fd, identity = next(iter(new.items()))
-    try:
-        opened = os.fstat(fd)
-    except OSError as exc:
-        _unsafe("db_stat_failed", f"fstat({fd}): {exc}", path, exc)
+def _verify_main(
+    path: Path, handle: int, pre_id: Identity | None
+) -> tuple[int, Identity]:
+    """The connection's main descriptor is the file at ``path`` now, and at the precheck."""
+    vfs = _sqlite_handle.vfs_name(handle)
+    if not vfs.startswith("unix"):
+        _unsafe("db_fd_unattributable", f"connection uses the {vfs!r} VFS, not unix", path)
+    fd = _sqlite_handle.main_fd(handle)
+    opened = _fstat(fd, path)
+    named = _main_after_connect(path)
+    if _identity(opened) != _identity(named):
+        _unsafe("db_swapped", "opened descriptor is not the file at the database path", path)
+    if pre_id is not None and _identity(opened) != pre_id:
+        _unsafe(
+            "db_swapped",
+            "opened descriptor is not the file the precheck found at the database path",
+            path,
+        )
     if not stat.S_ISREG(opened.st_mode):
         _unsafe("db_not_regular", "opened descriptor is not a regular file", path)
-    named = _main_after_connect(path)
-    if _identity(opened) != _identity(named) or identity != _identity(opened):
-        _unsafe("db_swapped", "opened descriptor is not the file at the database path", path)
     if opened.st_nlink != 1:
         _unsafe("db_hardlinked", f"opened database has {opened.st_nlink} links", path)
-    return fd, identity
+    return fd, _identity(opened)
+
+
+def _verify_side_descriptor(path: Path, suffix: str, fd: int) -> None:
+    """The connection's own ``suffix`` descriptor is the regular file at that name."""
+    sibling = Path(f"{path}{suffix}")
+    opened = _fstat(fd, sibling)
+    named = _lstat(sibling, absent_ok=True)
+    if named is None:
+        detail = f"{suffix} is absent after the first read"
+    elif stat.S_ISLNK(named.st_mode):
+        detail = f"{suffix} is a symbolic link"
+    elif not stat.S_ISREG(named.st_mode):
+        detail = f"{suffix} is not a regular file"
+    elif named.st_nlink != 1:
+        detail = f"{suffix} has {named.st_nlink} links"
+    elif _identity(opened) != _identity(named):
+        detail = f"open {suffix} descriptor is not the file at {sibling.name}"
+    elif not stat.S_ISREG(opened.st_mode):
+        detail = f"open {suffix} is not a regular file"
+    elif opened.st_nlink != 1:
+        detail = f"open {suffix} has {opened.st_nlink} links"
+    else:
+        return
+    _unsafe("db_sibling_unsafe", detail, sibling)
 
 
 def _verify_siblings(
     path: Path,
-    before: Snapshot,
+    handle: int,
     main: tuple[int, Identity],
     mode: str,
     *,
     immutable: bool,
 ) -> None:
-    after = snapshot(path)
     main_fd, main_identity = main
-    if after.get(main_fd) != main_identity:
+    again = _sqlite_handle.main_fd(handle)
+    if again != main_fd or _identity(_fstat(again, path)) != main_identity:
         _unsafe("db_fd_unknown", "main descriptor changed during first read", path)
-    new = _changed(before, after)
-    new.pop(main_fd, None)
     if immutable or mode != "wal":
-        if new:
-            _unsafe("db_fd_unknown", f"first read opened {len(new)} unexpected descriptors", path)
+        journal = _sqlite_handle.journal_fd(handle)
+        if journal is not None:
+            _verify_side_descriptor(path, "-journal", journal)
         return
-
-    expected: dict[str, Identity] = {}
-    for suffix in ("-wal", "-shm"):
-        sibling = Path(f"{path}{suffix}")
-        found = _check_sibling(sibling)
-        if found is None:
-            _unsafe("db_sibling_unsafe", f"{suffix} is absent after WAL read", sibling)
-        expected[suffix] = _identity(found)
-
-    counts = {suffix: 0 for suffix in expected}
-    for identity in new.values():
-        matches = [suffix for suffix, wanted in expected.items() if identity == wanted]
-        if len(matches) != 1:
-            _unsafe("db_fd_unknown", "new descriptor does not uniquely match -wal or -shm", path)
-        counts[matches[0]] += 1
-        if counts[matches[0]] > 1:
-            _unsafe("db_fd_unknown", f"multiple descriptors match {matches[0]}", path)
-
-    already = set(before.values())
-    for suffix, identity in expected.items():
-        if counts[suffix] == 1:
-            continue
-        if identity not in already:
-            _unsafe(
-                "db_sibling_unsafe",
-                f"{suffix} is neither newly opened nor already open in this process",
-                Path(f"{path}{suffix}"),
-            )
+    wal = _sqlite_handle.wal_fd(handle)
+    if wal is None:
+        _unsafe("db_sibling_unsafe", "-wal is not open after WAL read", Path(f"{path}-wal"))
+    _verify_side_descriptor(path, "-wal", wal)
+    shm = _sqlite_handle.shm_fd(handle)
+    if shm is None:
+        _unsafe(
+            "db_sibling_unsafe", "-shm is not attached after WAL read", Path(f"{path}-shm")
+        )
+    _verify_side_descriptor(path, "-shm", shm)
 
 
 def checked_connect(
@@ -215,34 +240,28 @@ def checked_connect(
     """Open and bind one SQLite connection before returning it to its caller."""
     conn: sqlite3.Connection | None = None
     try:
-        precheck_files(path)
-        before = snapshot(path)
+        found = _precheck(path)
+        pre_id = None if found is None else _identity(found)
+        _sqlite_handle.ensure_hook()
         _seam("before_connect", path)
-        try:
+        with _sqlite_handle.capturing() as captured:
             conn = opener()
-        except sqlite3.Error:
-            raise
         _seam("after_connect", path)
-        main = _verify_main(path, before)
+        handle = _bind(path, conn, captured)
+        main = _verify_main(path, handle, pre_id)
         _seam("before_first_read", path)
-        try:
-            row = conn.execute("PRAGMA journal_mode").fetchone()
-        except sqlite3.Error:
-            raise
+        row = conn.execute("PRAGMA journal_mode").fetchone()
         _seam("after_first_read", path)
         mode = str(row[0]).lower()
-        _verify_siblings(path, before, main, mode, immutable=immutable)
+        _verify_siblings(path, handle, main, mode, immutable=immutable)
 
         if set_wal and mode != "wal":
             _seam("before_wal_switch", path)
             precheck_siblings(path)
-            try:
-                row = conn.execute("PRAGMA journal_mode = WAL").fetchone()
-                mode = str(row[0]).lower()
-                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
-            except sqlite3.Error:
-                raise
-            _verify_siblings(path, before, main, mode, immutable=immutable)
+            row = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+            mode = str(row[0]).lower()
+            conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+            _verify_siblings(path, handle, main, mode, immutable=immutable)
         return conn, mode
     except BaseException as exc:
         if conn is not None:
@@ -251,6 +270,8 @@ def checked_connect(
             raise
         if isinstance(exc, (UnsafeDatabaseFile, sqlite3.Error)):
             raise
+        if isinstance(exc, _sqlite_handle.Unattributable):
+            _unsafe("db_fd_unattributable", str(exc), path, exc)
         if isinstance(exc, OSError):
             _unsafe("db_stat_failed", str(exc), path, exc)
         _unsafe("db_stat_failed", f"{type(exc).__name__}: {exc}", path, exc)

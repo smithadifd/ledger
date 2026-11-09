@@ -110,7 +110,7 @@ You need Python 3.11 or newer. Its `sqlite3` module must carry the JSON
 functions and FTS5, which the usual distributions do. Run from a clone of
 this repository with no install step, or `pip install .` from the clone to
 get `ledger` on your `PATH`; `ledger <verb>` and `python3 -m ledger <verb>`
-are the same.
+are the same. `ledger --version` prints the installed package version.
 
 ```sh
 mkdir -p /tmp/ledger-demo
@@ -304,7 +304,8 @@ trace.
 | Setting | Where | Meaning |
 |---------|-------|---------|
 | `--db` / `LEDGER_DB` | flag / env | the database path (required; the ledger picks no default) |
-| `LEDGER_HARNESS` | env | what is writing: a tool, a script, an agent runtime. Required for every write |
+| `LEDGER_HARNESS` | env | what is writing: a tool, a script, an agent runtime. Required for every write; the refusal suggests `LEDGER_HARNESS=claude-code` |
+| `LEDGER_PROG` | env | optional command prefix for runnable commands printed by `resume` and `card`; otherwise they preserve module invocation or the executable basename |
 | `LEDGER_OPERATOR`, `LEDGER_AGENT` | env | who is writing; the actor is stamped `<operator>/<agent>` when both are set |
 | `LEDGER_MODEL`, `LEDGER_SESSION` | env | optional attribution stamped on each event |
 | `LEDGER_EXPORT_DIR` | env | default for `export --dir` and `restore --dir` |
@@ -314,7 +315,7 @@ trace.
 
 ## For agents
 
-An agent that has only the installed package should learn from the ledger itself that it exists and what to write. [docs/agent-contract.md](docs/agent-contract.md) is the one page for it: what to write without asking, the reading order, the actor stamps and how to end a session. `ledger resume --brief` prints its short form followed by every open item's stop point and the command to resume it, so a session-start hook can put both into the agent's context.
+An agent that has only the installed package should learn from the ledger itself that it exists and what to write. [docs/agent-contract.md](docs/agent-contract.md) is the one page for it: what to write without asking, the reading order, the actor stamps and how to end a session. `ledger resume --brief` prints its short form followed by every open item's stop point and the command to resume it, so a session-start hook can put both into the agent's context. If open items have no stop, it reports their count and points to `ledger query` instead of claiming there are no open items.
 
 ## Working with agent skills
 

@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+First-write and first-resume output now names the action a new user needs.
+
+- A write without `LEDGER_HARNESS` suggests `LEDGER_HARNESS=claude-code`, and `item.stopped` phase errors list the allowed phases from the schema.
+- `ledger resume` reports how many open items lack a stop instead of saying there are no open items. Runnable commands from `resume` and `card` preserve `LEDGER_PROG`, `python3 -m ledger`, or the executable basename, and include `--db` only when it was passed.
+- Top-level `--version` prints `ledger <version>` without requiring a database.
+- Abbreviated long options (for example `--d` for `--db`) are no longer accepted; spell the option in full. A usage error (exit 2) results.
+
+## 0.1.15 — 2026-11-09
+
 An answer opens a gate only when the harness captured it for its ask.
 
 - **`ledger.answers.bound_answer(lg, K)`** is the one reader a gate calls: it returns the first election linked to ask K when that election quotes the harness's picker capture of the owner's answer to K, and otherwise the reason it does not count (`pre_binding`, `typed_answer`, `answer_other_item`, `answer_before_ask`, `answer_unbound`, `answer_other_ask`, `capture_conflict`, `display_fingerprint_bad`, `ask_not_pickable`, `display_differs`, `picker_multi_question`, `picker_typed`, `picker_ambiguous`, `picker_unanswered`, `picker_annotated`, the quote rule's code, `choice_mismatch`, `election_differs`; checked in that order). Every election recorded before this release reads `pre_binding`; nothing is migrated.
@@ -11,11 +20,22 @@ An answer opens a gate only when the harness captured it for its ask.
 - **`ledger pick` now takes `ITEM --ask K` and nothing else.** It elects from the earliest picker capture for K, records the capture's fingerprint and option position (`decision.elected` gains the optional `display_sha256` and `chosen_position`), derives every other field from K, and checks the answer as a gate would before writing. The old `--question/--option/--chosen` form is refused with `pick_needs_ask`.
 - **`ledger grants`**: a `granted` election is STANDING only when it answers an ask carrying its grant id and is that ask's bound answer; otherwise UNVERIFIED with the reason (`grant_unasked`, `not_first_answer`, or the gate's). A withdrawal still takes effect unverified. A grant recorded with `ledger elect` quoting a typed prompt no longer stands: raise the grant as an ask and record the picker answer with `pick --ask`.
 
+An ask is refused when the text it displays holds a control character.
+
+- **Control characters are refused in the text an ask displays.** The question id, the scope, the question, and each option's label and description are what the picker prints and what the display fingerprint and `ledger grants --check` match. A carriage return followed by an ANSI erase-line code could make a terminal show only the text after it while the stored value was longer, so the owner could approve a grant id they never saw. C0 (U+0000 to U+001F, so ESC and every ANSI escape), DEL (U+007F) and C1 (U+0080 to U+009F) are now refused, never escaped; a newline is allowed in the question only. Writing a `decision.asked`, or a `decision.elected` carrying the same text, with one is refused as `ask_control_character:<field>` (envelope code `validation`); a retry of a keyed ask stored before this release still returns the stored event. An ask already stored with one is not rewritten: `ledger ask-display` refuses it as `ask_not_pickable`, naming the field and the code point, so no pick, election or grant binds through it. `verify`, `export` and `restore` still read rows written before the rule.
+
+The database descriptor check is bound to the connection's own descriptors.
+
+- **The database descriptor check no longer refuses multi-threaded callers or a reopen.** 0.1.14 compared the whole process's open descriptors before and after each connect, so another thread's open in that window, or SQLite reusing a descriptor it already held, refused a valid connect (`db_fd_unknown`, and sometimes `db_not_regular`, `db_swapped` or `db_stat_failed`). The check now asks SQLite which descriptors the new connection holds, through SQLite's C library (`ctypes`), and compares each with the file at its name; it never reads the process's descriptor table. Concurrent connects on any threads, a process that opens a database it already has open, and other files opened meanwhile are accepted. 0.1.14 shipped with these refusals; upgrade to 0.1.15 rather than vendoring or pinning 0.1.14.
+- **What is still refused.** The database descriptor must be the file at the path when it is checked and the file the path named before connecting; otherwise `db_swapped`. A path renamed away and back during the connect, or replaced by a database the process already holds open, now refuses `db_swapped` (0.1.14 said `db_fd_unknown`). The connection's own `-wal`, `-shm` and open journal descriptors must be the files at those names after the first read (`db_sibling_unsafe`). Every refusal from 0.1.14's name checks (symbolic link, FIFO, hard link, planted side files) is unchanged.
+- **New refusal: `db_fd_unattributable`.** It means the ledger could not tell which descriptors the connection holds: the Python build hides SQLite's C functions, the connection capture could not be installed, a different SQLite library than the `sqlite3` module's was found, or a check on SQLite's internal file structures failed. The open is refused; there is no fallback to an unchecked open. `db_fd_listing_unavailable` is no longer raised. See "Opening the database file" in `docs/concepts.md`.
+- **Accepted limit: a ledger open inside an exit handler.** A ledger open inside an exit handler that was registered before the process's first ledger open is refused (`db_fd_unknown`), because the capture hook is cancelled at exit. Follow-up: LEDGER-EXIT-HOOK1.
+
+Upgrade with `@v0.1.15`.
+
 ## 0.1.14 — 2026-11-09
 
 - **Database opens are bound to the files at their names.** The ledger now refuses a database path whose final component is a symbolic link, a non-regular file such as a FIFO, or a file with another hard link. It also checks that SQLite opened exactly that database and safely accounts for the `-wal`, `-shm` and `-journal` files before returning a connection. Point configurations that use a symbolic link at the database name at the real file instead. A process that holds a ledger connection open may be refused with `db_fd_unknown` when it reopens the same database: SQLite may reuse its descriptor. See "Opening the database file" in `docs/concepts.md` for this limit and the accepted first-creation window.
-
-**Known issue: do not vendor or pin this release; wait for v0.1.15.** The descriptor check compares the process's open descriptors before and after connect, so when other threads in the same process open files (another ledger connection, or anything else) during that window, a connect can be refused, most often with `db_fd_unknown` (`connect opened 2 descriptors, expected 1`, `new descriptor does not uniquely match -wal or -shm`) and also with `db_not_regular`, `db_swapped` or `db_stat_failed`. Multi-threaded callers hit it. Separately, as documented in `docs/concepts.md`, reopening a database the same process already holds open may be refused.
 
 Upgrade with `@v0.1.14`.
 

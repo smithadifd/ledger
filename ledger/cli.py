@@ -9,6 +9,7 @@ revision (``--expect-revision`` no longer matches the item's newest event).
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import sqlite3
@@ -42,6 +43,7 @@ from ledger.verbs import (
     Verb,
     compose_actor,
     discover_verbs,
+    quote_command_arg,
 )
 
 
@@ -57,9 +59,34 @@ def _env(name: str) -> str | None:
     return value
 
 
+def _package_version() -> str:
+    try:
+        return importlib.metadata.version("ledger")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _program_name() -> str:
+    configured = _env("LEDGER_PROG")
+    if configured and not any(char in configured for char in "\r\n"):
+        return configured
+    try:
+        started = Path(sys.argv[0])
+        if started.name == "__main__.py":
+            if started.parent.name == "ledger":
+                return "python3 -m ledger"
+            return "ledger"
+        return quote_command_arg(started.name or "ledger")
+    except (OSError, TypeError, ValueError):
+        return "ledger"
+
+
 def build_parser(table: dict[str, Verb]) -> LedgerParser:
+    # allow_abbrev=False on the parser and on every subparser: a long option
+    # matches only by its full name, so "--d" can never stand for "--db".
     parser = LedgerParser(
         prog="ledger",
+        allow_abbrev=False,
         description=(
             "Append-only item ledger. Generic writes require LEDGER_HARNESS; "
             "loop-reserved events use the internal library writer. Actor fields come from "
@@ -69,6 +96,11 @@ def build_parser(table: dict[str, Verb]) -> LedgerParser:
         ),
     )
     parser.add_argument(
+        "--version",
+        action="version",
+        version=f"ledger {_package_version()}",
+    )
+    parser.add_argument(
         "--json",
         action="store_true",
         help="print a stable {ok, data, error} envelope",
@@ -76,7 +108,7 @@ def build_parser(table: dict[str, Verb]) -> LedgerParser:
     parser.add_argument("--db", help="database path (overrides LEDGER_DB)")
     sub = parser.add_subparsers(dest="verb", required=True)
     for name, verb in sorted(table.items()):
-        subparser = sub.add_parser(name, help=verb.help)
+        subparser = sub.add_parser(name, help=verb.help, allow_abbrev=False)
         subparser.add_argument(
             "--json",
             action="store_true",
@@ -179,10 +211,14 @@ def _run(
         session=_env("LEDGER_SESSION"),
         roadmap_parser=roadmap_parser,
         search_fallback_root=search_fallback_root,
+        program=_program_name(),
+        # Decided from the parse: the database was passed on the command line.
+        db_explicit=bool(args.db),
     )
     if verb.writes and not ctx.harness:
         raise CliError(
-            "LEDGER_HARNESS is required for writes",
+            "LEDGER_HARNESS is required for writes; set it, e.g. "
+            "LEDGER_HARNESS=claude-code",
             code="missing_harness",
             exit_code=EXIT_REFUSED,
         )
