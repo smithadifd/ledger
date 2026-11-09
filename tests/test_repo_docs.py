@@ -7,12 +7,21 @@ files are always present, so nothing skips. ``LEDGER_REPO_ROOT`` is not needed.
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
+from ledger import cli
+from ledger.paths import SUPPORTED_LOCATION
 from ledger.verbs.resume import SHORT_FORM
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / "docs" / "agent-contract.md"
+README = ROOT / "README.md"
+CLI_PAGE = ROOT / "docs" / "cli.md"
+START = ROOT / "docs" / "start-here.md"
+CHANGELOG = ROOT / "CHANGELOG.md"
+DB_HOME_PAGES = (README, CLI_PAGE, PAGE, START)
+DB_HOME = f"{SUPPORTED_LOCATION}/<system>.db"
 
 
 def _squash(text: str) -> str:
@@ -95,3 +104,121 @@ def test_readme_and_contract_page_never_say_pick_up() -> None:
         assert "pick up" not in path.read_text(encoding="utf-8").lower(), path
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/agent-contract.md" in readme and "ledger resume --brief" in readme
+
+
+# ---- install, upgrade, first-run and database-home docs ----------------------
+
+
+def _flat(path: Path) -> str:
+    return _squash(path.read_text(encoding="utf-8"))
+
+
+# Facts that drift: a pinned version, a schema number, a verb or test count, a
+# claim that no tag exists. The docs drop them; a number that stays is tied to
+# its source by the tests below.
+DRIFTING_FACTS = [
+    r"schema_version: \d",
+    r"schema version \d",
+    r"[Vv]ersion \d+\.\d+\.\d+",
+    r"no tag yet",
+    r"\b(?:\d+|(?:twenty|thirty|forty|fifty)(?:-[a-z]+)?) verbs\b",
+    r"about \d+ of them",
+]
+
+
+def test_readme_and_start_here_state_no_fact_that_drifts() -> None:
+    for page in (README, START):
+        flat = _flat(page)
+        for pattern in DRIFTING_FACTS:
+            found = re.search(pattern, flat)
+            assert found is None, f"{page.name} states a drifting fact: {found.group(0)!r}"
+
+
+def test_python_versions_the_docs_name_match_their_sources() -> None:
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    requires = project["project"]["requires-python"]
+    assert requires.startswith(">="), requires
+    minimum = requires.removeprefix(">=")
+    for page in (README, START):
+        assert f"Python {minimum} or newer" in _flat(page), (page.name, minimum)
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+    matrix = re.search(r"python-version: \[(.*?)\]", workflow).group(1)
+    tested = re.findall(r"\d+\.\d+", matrix)
+    assert tested, matrix
+    stated = re.search(r"run in CI on Python ((?:\d+\.\d+(?:,? and |, )?)+)", _flat(README))
+    assert stated is not None, "the README no longer says which Python versions CI runs"
+    assert re.findall(r"\d+\.\d+", stated.group(1)) == tested
+
+
+def test_install_and_upgrade_use_pipx_never_a_bare_pip() -> None:
+    tag_install = "pipx install git+https://github.com/smithadifd/ledger@vX.Y.Z"
+    for page in (README, START):
+        flat = _flat(page)
+        assert tag_install in flat, page.name
+        for line in page.read_text(encoding="utf-8").splitlines():
+            assert not re.match(r"\s*(python3? -m )?pip install", line), (page.name, line)
+    readme = README.read_text(encoding="utf-8")
+    assert "python3 -m venv" in _squash(readme)
+    upgrade = _squash(readme.split("\n## Upgrade", 1)[1].split("\n## ", 1)[0])
+    assert "pipx upgrade ledger" in upgrade
+    assert "pipx install --force git+https://github.com/smithadifd/ledger@vX.Y.Z" in upgrade
+    assert "ledger --version" in upgrade and "ledger doctor" in upgrade
+    assert "no other step" in upgrade and "no wrapper" in upgrade
+
+
+def test_ledger_has_no_default_database_path(monkeypatch, tmp_path, capsys) -> None:
+    monkeypatch.delenv("LEDGER_DB", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["doctor"]) == 2
+    assert "pass --db or set LEDGER_DB" in capsys.readouterr().err
+    assert not (tmp_path / ".local").exists()
+
+
+def test_every_page_spells_the_database_home_as_paths_py_does() -> None:
+    assert SUPPORTED_LOCATION == "~/.local/share/ledger"
+    for page in DB_HOME_PAGES:
+        flat = _flat(page)
+        assert DB_HOME in flat, f"{page.name} lacks {DB_HOME!r}"
+        assert "no default" in flat.lower(), f"{page.name} does not say there is no default"
+        for token in re.findall(r"[~\w/.<>-]*\.local/share[\w/.<>-]*", flat):
+            token = token.rstrip(".")
+            assert token == SUPPORTED_LOCATION or token.startswith(
+                SUPPORTED_LOCATION + "/"
+            ), f"{page.name} spells the database home {token!r}"
+
+
+def test_start_here_exists_and_the_readme_links_it_from_the_top() -> None:
+    assert START.is_file()
+    readme = README.read_text(encoding="utf-8")
+    link = "(docs/start-here.md)"
+    assert link in readme
+    assert readme.index(link) < readme.index("\n## Why")
+
+
+def test_start_here_runs_in_order_and_names_the_environment_the_code_reads() -> None:
+    flat = _flat(START)
+    steps = [
+        "Python 3.11 or newer",
+        "pipx --version",
+        "pipx install git+https://github.com/smithadifd/ledger@vX.Y.Z",
+        "no default database path",
+        "LEDGER_HARNESS",
+        "There is no `init` verb",
+        "ledger new --type ticket",
+        "ledger doctor",
+    ]
+    positions = [flat.index(step) for step in steps]
+    assert positions == sorted(positions), dict(zip(steps, positions))
+    source = (ROOT / "ledger" / "cli.py").read_text(encoding="utf-8")
+    for name in ("LEDGER_DB", "LEDGER_HARNESS", "LEDGER_AGENT"):
+        assert name in flat, name
+        assert f'"{name}"' in source, f"cli.py no longer reads {name}"
+    assert not (ROOT / "ledger" / "verbs" / "init.py").exists()
+    assert "https://github.com/smithadifd/skills" in flat
+
+
+def test_changelog_unreleased_names_the_pipx_docs_and_the_start_here_page() -> None:
+    text = CHANGELOG.read_text(encoding="utf-8")
+    unreleased = _squash(text.split("## Unreleased", 1)[1].split("\n## ", 1)[0])
+    assert "pipx" in unreleased and "docs/start-here.md" in unreleased

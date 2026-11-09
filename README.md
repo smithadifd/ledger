@@ -7,6 +7,9 @@ of one body of work, the decisions made about them, and the words those
 decisions rest on. One command, `ledger`, is the interface for people,
 scripts and automated agents alike.
 
+New here? [docs/start-here.md](docs/start-here.md) takes you from nothing to a
+working ledger, one step at a time.
+
 ## Why
 
 A body of work leaves two kinds of record. One kind is prose a person edits
@@ -55,15 +58,15 @@ None of this is new. [Built on](#built-on) says where the ideas came from.
 
 ## What this is
 
-One SQLite file and one command. `ledger` has twenty-eight verbs that create
+One SQLite file and one command. `ledger` has verbs that create
 items, append notes, record questions, elections and decision records, claim
 items with leases, render cards, search, export, back up and restore. It is
 written against the Python standard library (3.11 or newer) with no runtime
 dependencies, and it runs from a clone as `python3 -m ledger` or installs
-with `pip install .` as `ledger`.
+with `pipx` as `ledger` ([Install](#install)).
 
 The difference is in how it is built. Each promise the ledger makes is a
-test: about 880 of them live beside the code and run in CI on Python 3.11
+test: the tests live beside the code and run in CI on Python 3.11
 and 3.12. The schema is a forward-only series of migrations that change
 views and never rewrite an event, and tests open databases from older
 versions to prove it. The package is vendored byte for byte into the
@@ -104,13 +107,69 @@ away. The export is the durable copy: one canonical JSON file per event,
 committed to a git repository of its own, and `restore` replays it into a
 fresh database and checks the chain.
 
-## Install and quick start
+## Install
 
 You need Python 3.11 or newer. Its `sqlite3` module must carry the JSON
-functions and FTS5, which the usual distributions do. Run from a clone of
-this repository with no install step, or `pip install .` from the clone to
-get `ledger` on your `PATH`; `ledger <verb>` and `python3 -m ledger <verb>`
-are the same. `ledger --version` prints the installed package version.
+functions and FTS5, which the usual distributions do. For a walk from nothing
+to a working ledger, in order, follow [docs/start-here.md](docs/start-here.md).
+
+Install with [pipx](https://pipx.pypa.io/), which puts `ledger` on your `PATH`
+in an environment of its own. There is no wrapper script to write and no
+symlink to make:
+
+```sh
+pipx install git+https://github.com/smithadifd/ledger@vX.Y.Z
+ledger --version
+```
+
+`vX.Y.Z` stands for a release tag; the repository's
+[tags page](https://github.com/smithadifd/ledger/tags) lists them. Without
+`@vX.Y.Z`, pipx installs the default branch.
+
+To work on the ledger itself, install from a clone into a virtual
+environment:
+
+```sh
+git clone https://github.com/smithadifd/ledger
+cd ledger
+python3 -m venv .venv
+.venv/bin/python -m pip install .
+.venv/bin/ledger --version
+```
+
+Do not run a bare `pip install` against the system Python: current macOS and
+Homebrew Python refuse it (PEP 668, `externally-managed-environment`). From a
+clone with nothing installed, `python3 -m ledger <verb>` is the same as
+`ledger <verb>`.
+
+## Upgrade
+
+An install from a branch (or with no `@...` at all) upgrades in place:
+
+```sh
+pipx upgrade ledger
+```
+
+To move to a tag, install over the old one:
+
+```sh
+pipx install --force git+https://github.com/smithadifd/ledger@vX.Y.Z
+```
+
+An upgrade needs no other step: there is no wrapper to edit and no `PATH`
+change. Check the result:
+
+```sh
+ledger --version
+ledger doctor
+```
+
+`ledger --version` prints the installed version. `ledger doctor` reads the
+database that `--db` or `LEDGER_DB` names and exits 0 when it opens. Your
+database is not touched by the upgrade itself; the next write applies any
+migration it lacks ([docs/migrations.md](docs/migrations.md)).
+
+## Quick start
 
 ```sh
 mkdir -p /tmp/ledger-demo
@@ -118,23 +177,23 @@ export LEDGER_DB=/tmp/ledger-demo/ledger.db   # or pass --db on every call
 export LEDGER_HARNESS=cli                     # required for writes: what is writing
 export LEDGER_AGENT=me                        # optional: who is writing
 
-python3 -m ledger new --type ticket --title "Write the quick start" --id demo-1
-python3 -m ledger doctor
-python3 -m ledger note demo-1 --text "First draft of the quick start is done"
-python3 -m ledger append --item demo-1 --kind item.progress \
+ledger new --type ticket --title "Write the quick start" --id demo-1
+ledger doctor
+ledger note demo-1 --text "First draft of the quick start is done"
+ledger append --item demo-1 --kind item.progress \
   --payload '{"text": "examples checked against a fresh database"}'
-python3 -m ledger card demo-1
-python3 -m ledger search draft
-python3 -m ledger verify
+ledger card demo-1
+ledger search draft
+ledger verify
 ```
 
 The first write creates the database and applies every migration. `doctor`
 on a path that does not exist yet exits 1 (`database does not exist`); after
-the first write it prints:
+the first write it prints (`N` is the newest migration applied):
 
 ```text
 path: /tmp/ledger-demo/ledger.db
-schema_version: 9
+schema_version: N
 search: missing (ledger index rebuilds it)
 ```
 
@@ -161,7 +220,9 @@ This card is a projection; the events are the authority (ledger export-item -- d
 on first use and ranks matches with BM25. `verify` walks the hash chain and
 re-validates every payload (`ok events=3`).
 
-A good home for a real database is `~/.local/share/ledger/<system>.db`. Keep
+The ledger has no default database path: every call needs `--db` or
+`LEDGER_DB`. The supported location for a real database is
+`~/.local/share/ledger/<system>.db` (or whatever `LEDGER_DB` names). Keep
 it out of git working trees (`index` and `search` refuse to build `search.db`
 inside one, so the derived index is never committed) and out of synced
 folders (the ledger refuses to open a database under iCloud, Dropbox,
@@ -231,11 +292,11 @@ then `ledger pick --ask`; see "Answers that open a gate" in
 [docs/concepts.md](docs/concepts.md)).
 
 ```sh
-python3 -m ledger append --item demo-1 --kind utterance.captured \
+ledger append --item demo-1 --kind utterance.captured \
   --channel terminal --provenance-class submitted-prompt \
   --payload '{"text": "Ship the short version first.", "origin": "person"}'
 # appended  utterance.captured  event=4  item=demo-1
-python3 -m ledger elect demo-1 --question "Short or long quick start?" \
+ledger elect demo-1 --question "Short or long quick start?" \
   --chosen short --chosen-description "five commands" --rejected long \
   --scope "the README" --quote-ref 4 --quote "short version"
 ```
@@ -303,7 +364,7 @@ trace.
 
 | Setting | Where | Meaning |
 |---------|-------|---------|
-| `--db` / `LEDGER_DB` | flag / env | the database path (required; the ledger picks no default) |
+| `--db` / `LEDGER_DB` | flag / env | the database path (required; the ledger picks no default; the supported location is `~/.local/share/ledger/<system>.db`) |
 | `LEDGER_HARNESS` | env | what is writing: a tool, a script, an agent runtime. Required for every write; the refusal suggests `LEDGER_HARNESS=claude-code` |
 | `LEDGER_PROG` | env | optional command prefix for runnable commands printed by `resume` and `card`; otherwise they preserve module invocation or the executable basename |
 | `LEDGER_OPERATOR`, `LEDGER_AGENT` | env | who is writing; the actor is stamped `<operator>/<agent>` when both are set |
@@ -371,14 +432,16 @@ contracts against a fresh database, command by command.
   reverted, the test shown failing, then passing again with the fix restored.
 
 ```sh
-python3 -m pip install pytest
-python3 -m pytest -q
-python3 -m ledger.gen_verb_registry --check
+python3 -m venv .venv
+.venv/bin/python -m pip install pytest
+.venv/bin/python -m pytest -q
+.venv/bin/python -m ledger.gen_verb_registry --check
 ```
 
 ## Status and roadmap
 
-Version 0.1.2 (see [CHANGELOG.md](CHANGELOG.md)), schema version 9. The event model, the hash chain, the export
+The current version is in [CHANGELOG.md](CHANGELOG.md) and `ledger --version`, and
+the schema version is what `ledger doctor` prints. The event model, the hash chain, the export
 format, the JSON envelope, the exit codes and the verb table above are what
 the repositories that vendor the ledger run on today. Until 1.0 a verb may
 gain or rename a flag; the events never change, a migration never rewrites
@@ -399,7 +462,8 @@ In motion, in rough order:
 - **A remote transport.** `ledger serve`, so one system's ledger can be used
   from more than one host through the same CLI.
 
-Tags mark the commits that consumers pin; there is no tag yet.
+Tags mark the commits that consumers pin; [Install](#install) shows how to install
+at one, and the repository's tags page lists them.
 
 ## Built on
 

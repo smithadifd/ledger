@@ -8,6 +8,7 @@ First-write and first-resume output now names the action a new user needs.
 - `ledger resume` reports how many open items lack a stop instead of saying there are no open items. Runnable commands from `resume` and `card` preserve `LEDGER_PROG`, `python3 -m ledger`, or the executable basename, and include `--db` only when it was passed.
 - Top-level `--version` prints `ledger <version>` without requiring a database.
 - Abbreviated long options (for example `--d` for `--db`) are no longer accepted; spell the option in full. A usage error (exit 2) results.
+- The install and upgrade docs now use `pipx`, the database home is spelled one way, and a start-here page, `docs/start-here.md`, takes a new person from nothing to a working ledger.
 
 ## 0.1.15 — 2026-11-09
 
