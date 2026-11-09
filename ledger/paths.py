@@ -17,6 +17,8 @@ import warnings
 from pathlib import Path
 from typing import Mapping
 
+from .dbfile import UnsafeDatabaseFile
+
 SUPPORTED_LOCATION = "~/.local/share/ledger"
 
 
@@ -101,11 +103,21 @@ def _synced_warning(path: Path) -> str | None:
 
 
 def resolve_db_path(path: Path | str) -> Path:
-    """Expand ``~``, make absolute, and refuse a synced root."""
-    resolved = Path(path).expanduser()
-    if not resolved.is_absolute():
-        resolved = Path.cwd() / resolved
-    resolved = resolved.resolve()
+    """Expand ``~``, make absolute, and refuse a linked final name or synced root."""
+    given = Path(path).expanduser()
+    if not given.is_absolute():
+        given = Path.cwd() / given
+    given = Path(os.path.abspath(given))
+    try:
+        if given.lstat().st_mode & 0o170000 == 0o120000:
+            raise UnsafeDatabaseFile("db_symlink", "database path is a symbolic link", given)
+    except FileNotFoundError:
+        pass
+    except UnsafeDatabaseFile:
+        raise
+    except OSError as exc:
+        raise UnsafeDatabaseFile("db_stat_failed", str(exc), given) from exc
+    resolved = given.parent.resolve() / given.name
     reason = _synced_reason(resolved)
     if reason is not None:
         raise SyncPathError(f"refusing synced root ({reason}): {resolved}")
@@ -126,8 +138,9 @@ class SharedDatabaseError(ValueError):
 def resolve_system_paths(systems: Mapping[str, Path | str]) -> dict[str, Path]:
     """Resolve each system's database and refuse any two that share a file.
 
-    Paths are compared after ``~`` expansion and symlink resolution, so a
-    link or a relative spelling of another system's database is refused too.
+    Paths are compared after ``~`` expansion and parent-folder resolution.
+    A symbolic link in the final component is refused before comparison; a
+    relative spelling of another system's database is still detected.
     """
     resolved: dict[str, Path] = {}
     owners: dict[Path, str] = {}

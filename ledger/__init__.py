@@ -9,6 +9,7 @@ The library is importable and has no CLI. Callers open a path, append
 validated events, query current-state views, and verify the chain.
 """
 
+from .dbfile import UnsafeDatabaseFile
 from .paths import (
     SharedDatabaseError,
     SyncPathError,
@@ -36,6 +37,7 @@ __all__ = [
     "SharedDatabaseError",
     "SyncPathError",
     "SyncPathWarning",
+    "UnsafeDatabaseFile",
     "ValidationError",
     "claim_database",
     "known_kinds",

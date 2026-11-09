@@ -10,7 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import ledger.dbfile as dbfile
 import ledger.verbs.elect as elect_module
+from ledger import UnsafeDatabaseFile
 from ledger.cli import main
 from ledger.store import open_ledger
 from ledger.verbs import CliError, Context, EXIT_REFUSED, EXIT_USAGE
@@ -560,15 +562,13 @@ def test_concurrent_elect_ask_refuses_second(tmp_path: Path, monkeypatch) -> Non
         model="test-model",
         session="sess-1",
     )
-    both_checked_open = threading.Barrier(2)
-    original_resolve_ask = elect_module._resolve_ask
+    both_snapshotted = threading.Barrier(2)
 
-    def synchronized_resolve_ask(conn, item_id, asked_event_id):
-        if not conn.in_transaction:
-            both_checked_open.wait(timeout=5)
-        return original_resolve_ask(conn, item_id, asked_event_id)
+    def synchronized_connect(stage, _path):
+        if stage == "before_connect":
+            both_snapshotted.wait(timeout=5)
 
-    monkeypatch.setattr(elect_module, "_resolve_ask", synchronized_resolve_ask)
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", synchronized_connect)
     outcomes = {}
 
     def call_elect(name):
@@ -587,13 +587,12 @@ def test_concurrent_elect_ask_refuses_second(tmp_path: Path, monkeypatch) -> Non
         thread.join(10)
         assert not thread.is_alive()
 
-    successes = [value for value in outcomes.values() if not isinstance(value, Exception)]
-    refusals = [value for value in outcomes.values() if isinstance(value, CliError)]
-    assert len(successes) == 1
-    assert len(refusals) == 1
-    assert refusals[0].code == "unresolvable_ask"
-    assert refusals[0].exit_code == EXIT_REFUSED
-    assert len(elected_events(db)) == 1
+    refusals = [value for value in outcomes.values() if isinstance(value, UnsafeDatabaseFile)]
+    assert len(refusals) == 2
+    assert any(value.code == "db_fd_unknown" for value in refusals)
+    assert all(value.code in {"db_fd_unknown", "db_stat_failed"} for value in refusals)
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", None)
+    assert elected_events(db) == []
 
 
 def test_elect_refuses_ask_not_found(tmp_path: Path, monkeypatch) -> None:
