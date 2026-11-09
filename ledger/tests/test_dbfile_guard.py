@@ -1945,8 +1945,13 @@ code = (
     "sys.path.insert(0, " + repr(sys.argv[1]) + ")\n"
     "from pathlib import Path\n"
     "from ledger import open_ledger\n"
-    "open_ledger(Path(" + repr(sys.argv[2]) + ")).close()\n"
-    "print('subinterpreter open accepted', flush=True)\n"
+    "from ledger.dbfile import UnsafeDatabaseFile\n"
+    "try:\n"
+    "    open_ledger(Path(" + repr(sys.argv[2]) + ")).close()\n"
+    "except UnsafeDatabaseFile as exc:\n"
+    "    print('subinterpreter open refused: ' + str(exc), flush=True)\n"
+    "else:\n"
+    "    print('subinterpreter open accepted', flush=True)\n"
 )
 interpreters.run_string(interp, code)
 interpreters.destroy(interp)
@@ -1967,12 +1972,32 @@ def test_hook_installed_in_a_destroyed_subinterpreter_is_not_called_after(
     # the hook, so a later connect in the main interpreter does not call into
     # the destroyed interpreter (SIGSEGV), and the main interpreter's own first
     # open installs its own hook.
+    #
+    # The subinterpreter's own open depends on the Python version. The sqlite3
+    # module releases the GIL around the open that calls the hook, and ctypes
+    # takes it back for the callback through the PyGILState API. Python 3.11
+    # binds that API to the first thread state created on the OS thread, here
+    # the main interpreter's, so the subinterpreter's callback runs under the
+    # main thread state, reads that thread state's thread-local, finds no
+    # armed capture, and the hook's self-test refuses: the open fails closed.
+    # Python 3.12 binds the API to the active thread state, so the callback
+    # runs in the subinterpreter and the open is accepted. On every version
+    # the child exits 0 and the main interpreter's connect and open after the
+    # destroy are accepted.
     result = _run_child(_SUBINTERPRETER_OPEN, str(ROOT), str(tmp_path / "ledger.db"))
     output = result.stdout + result.stderr
     tail = output.splitlines()[-4:]
     assert result.returncode == 0, f"child exited {result.returncode}: {tail}"
-    assert result.stdout.splitlines() == [
-        "subinterpreter open accepted",
+    lines = result.stdout.splitlines()
+    assert len(lines) == 4, output[-3000:]
+    if sys.version_info < (3, 12):
+        assert lines[0].startswith(
+            "subinterpreter open refused: db_fd_unattributable: connection capture"
+            " unavailable: capture self-test saw 0 connections, expected 1: "
+        ), output[-3000:]
+    else:
+        assert lines[0] == "subinterpreter open accepted", output[-3000:]
+    assert lines[1:] == [
         "subinterpreter destroyed",
         "main connect accepted",
         "main open accepted",
