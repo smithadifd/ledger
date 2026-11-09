@@ -220,7 +220,8 @@ def test_spaced_database_is_posix_quoted_and_runnable(tmp_path, monkeypatch) -> 
 
 def test_space_heavy_database_keeps_card_within_word_limit(tmp_path, monkeypatch) -> None:
     # Fill the path with spaced words up to just under SQLite's 512-byte path
-    # limit (components stay under the 255-byte name limit).
+    # limit (components stay under the 255-byte name limit). The space budget
+    # comes from the temp root's length, so a long root leaves fewer spaces.
     parent = tmp_path
     budget = 490 - len(str(tmp_path)) - len("/ledger.db")
     while budget >= 4:
@@ -230,6 +231,22 @@ def test_space_heavy_database_keeps_card_within_word_limit(tmp_path, monkeypatch
     parent.mkdir(parents=True)
     db = str(parent / "ledger.db")
     seed(monkeypatch, db, "it-a")
+    # The space budget alone cannot reach the limit under a long temp root, so
+    # the card also carries notes that fit under the bound once each command
+    # counts as one word: the plain split then crosses the limit whatever the
+    # root length.
+    lg = open_ledger(db)
+    try:
+        for index in range(7):
+            lg.append(
+                kind="item.note",
+                payload={"text": f"note-{index} " + "padding " * 40},
+                item_id="it-a",
+                idempotency_key=f"note-{index}",
+                harness="pytest",
+            )
+    finally:
+        lg.close()
     code, out, err = invoke(monkeypatch, ["--db", db, "card", "it-a"])
     assert code == 0, err
     resume_lines = [line for line in out.splitlines() if line.startswith("Resume with: ")]
