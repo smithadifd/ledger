@@ -4,6 +4,8 @@
 
 - **Database opens are bound to the files at their names.** The ledger now refuses a database path whose final component is a symbolic link, a non-regular file such as a FIFO, or a file with another hard link. It also checks that SQLite opened exactly that database and safely accounts for the `-wal`, `-shm` and `-journal` files before returning a connection. Point configurations that use a symbolic link at the database name at the real file instead. A process that holds a ledger connection open may be refused with `db_fd_unknown` when it reopens the same database: SQLite may reuse its descriptor. See "Opening the database file" in `docs/concepts.md` for this limit and the accepted first-creation window.
 
+**Known issue: do not vendor or pin this release; wait for v0.1.15.** The descriptor check compares the process's open descriptors before and after connect, so when other threads in the same process open files (another ledger connection, or anything else) during that window, a connect can be refused with `db_fd_unknown` (`connect opened 2 descriptors, expected 1`, `new descriptor does not uniquely match -wal or -shm`). Multi-threaded callers hit it. Separately, as documented in `docs/concepts.md`, reopening a database the same process already holds open may be refused.
+
 Upgrade with `@v0.1.14`.
 
 ## 0.1.13 — 2026-11-08
