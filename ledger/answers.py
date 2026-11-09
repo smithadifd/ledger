@@ -47,7 +47,12 @@ Refusal reasons, checked in this order (the first failure is the reason):
 ==========================  =====================================================
 
 An ask is pickable when it has a scope, two to four options, no two options
-with one label, and an ``ask K`` header of at most 12 characters.
+with one label, an ``ask K`` header of at most 12 characters, and no control
+character (C0, DEL or C1) in any text the picker displays: the question id,
+the scope, an option label or description, or the question (where a newline
+alone is allowed). The write path refuses such an ask; one stored before that
+rule reads ``ask_not_pickable`` naming the field, so no pick, election or
+grant binds through it.
 """
 from __future__ import annotations
 
@@ -55,7 +60,7 @@ import hashlib
 import re
 from typing import Any, Mapping, NamedTuple
 
-from .schema import PICKER_CHANNEL, PROMPT_CHANNEL
+from .schema import PICKER_CHANNEL, PROMPT_CHANNEL, display_control_character
 from .store import Event, Ledger, _event_from_row, canonical_dumps
 from .verbs import CliError
 from .verbs.elect import validate_quote_provenance
@@ -154,6 +159,35 @@ def option_description(option: Mapping[str, Any]) -> str:
     return option["label"]
 
 
+def _require_displayable(asked_event_id: int, ask: Mapping[str, Any]) -> None:
+    """Fail closed on the text the picker will show: every displayed field
+    must be a string, and none may hold a control character (a newline alone
+    is allowed in the question). The reason names the field and the code
+    point, never the character."""
+    question = ask.get("question")
+    if not isinstance(question, str) or question == "":
+        raise AskNotPickable(f"ask {asked_event_id} has no question text")
+    question_id = ask.get("question_id")
+    if question_id is not None and not isinstance(question_id, str):
+        raise AskNotPickable(f"ask {asked_event_id} has a question id that is not text")
+    options = ask.get("options")
+    for index, option in enumerate(options if isinstance(options, list) else []):
+        label = option.get("label") if isinstance(option, dict) else None
+        description = option.get("description") if isinstance(option, dict) else None
+        if not isinstance(label, str) or label == "":
+            raise AskNotPickable(f"ask {asked_event_id} option {index + 1} has no label")
+        if description is not None and not isinstance(description, str):
+            raise AskNotPickable(
+                f"ask {asked_event_id} option {index + 1} has a description that is not text"
+            )
+    hit = display_control_character("decision.asked", ask)
+    if hit is not None:
+        raise AskNotPickable(
+            f"ask {asked_event_id} holds a control character ({hit[1]}) in {hit[0]},"
+            " which the picker would display: write a new ask without it"
+        )
+
+
 def render_ask_display(asked_event_id: int, ask: Mapping[str, Any]) -> list[dict[str, Any]]:
     """The ``questions`` array a seat sends as its AskUserQuestion input for K.
 
@@ -164,6 +198,7 @@ def render_ask_display(asked_event_id: int, ask: Mapping[str, Any]) -> list[dict
     the answer stands for, so the owner sees it and the fingerprint covers it.
     """
     header = f"ask {asked_event_id}"
+    _require_displayable(asked_event_id, ask)
     scope = ask.get("scope")
     if not isinstance(scope, str) or scope == "":
         raise AskNotPickable(f"ask {asked_event_id} has no scope")
