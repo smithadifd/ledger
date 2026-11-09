@@ -27,9 +27,14 @@ exists to prevent.
   the answer. Link the brief itself by path with
   `ledger link ITEM --rel url --target PATH`.
 - **follow-up filed** — work in a session turns up something to do later (a
-  hardening finding, a flake, a deferred piece of your own work): create it
-  with `ledger new --type TYPE --title TITLE`, then link it to the item it
-  came from with `ledger link NEW --rel child-of --target PARENT`.
+  hardening finding, a flake, a deferred piece of your own work): make a
+  source `SRC` from the parent's id, a colon and a short slug of the
+  follow-up (`it-1a2b3c4d5e6f:flaky-retry`), create the follow-up with
+  `ledger new --type TYPE --title TITLE --source SRC`, then link it to the
+  item it came from with
+  `ledger link NEW --rel child-of --target PARENT --idempotency-key SRC:child-of`.
+  If you are interrupted between the two, run both again unchanged: the
+  same source reaches the same child and the same key leaves one link.
 - **thread parked** — work pauses with more to do: write `item.stopped`.
 - **thread stopped** — a session ends mid-item: write `item.stopped`.
 

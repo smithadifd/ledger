@@ -18,7 +18,7 @@ from pathlib import Path
 import pytest
 
 from ledger.schema import PHASES
-from ledger.store import Ledger, open_ledger
+from ledger.store import Ledger, current_anchors, open_ledger
 from ledger.verbs import EXIT_NOT_FOUND
 from ledger.verbs.resume import SHORT_FORM, _entry_text
 
@@ -201,6 +201,36 @@ def test_short_form_stop_example_appends_and_resume_shows_it(tmp_path, monkeypat
     assert "skills: review" in out
 
 
+def _follow_up_block(out: str) -> str:
+    """The follow-up trigger of the printed brief, with its continuation lines, squashed."""
+    lines = out.splitlines()
+    [at] = [i for i, ln in enumerate(lines) if ln.startswith("- follow-up filed:")]
+    block = [lines[at]]
+    for line in lines[at + 1:]:
+        if not line.startswith("  "):
+            break
+        block.append(line)
+    return " ".join(" ".join(block).split())
+
+
+def _printed_follow_up_commands(out: str) -> tuple[list[str], list[str]]:
+    """The printed ledger new and ledger link commands, as argv with placeholders."""
+    block = _follow_up_block(out)
+    new = re.search(r"ledger new(?: --[a-z-]+ [^\s,;]+)+", block)
+    link = re.search(r"ledger link NEW(?: --[a-z-]+ [^\s,;]+)+", block)
+    assert new and link, block
+    return shlex.split(new.group(0)), shlex.split(link.group(0))
+
+
+def _fill(argv: list[str], **values: str) -> list[str]:
+    out = []
+    for token in argv:
+        for placeholder, value in values.items():
+            token = token.replace(placeholder, value)
+        out.append(token)
+    return out
+
+
 def test_brief_prints_the_follow_up_line_and_its_commands_run(
     tmp_path, monkeypatch
 ) -> None:
@@ -208,27 +238,43 @@ def test_brief_prints_the_follow_up_line_and_its_commands_run(
     seed(monkeypatch, db, "it-parent")
     code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
     assert code == 0, err
-    lines = out.splitlines()
-    [at] = [i for i, ln in enumerate(lines) if ln.startswith("- follow-up filed:")]
-    new_line, link_line = lines[at], lines[at + 1]
-    assert "ledger new --type TYPE --title TITLE" in new_line
-    assert link_line.strip() == "ledger link NEW --rel child-of --target PARENT"
+    new_argv, link_argv = _printed_follow_up_commands(out)
+    assert new_argv[:2] == ["ledger", "new"]
+    assert new_argv[new_argv.index("--source") + 1] == "SRC"
+    assert link_argv[link_argv.index("--rel") + 1] == "child-of"
+    assert link_argv[link_argv.index("--idempotency-key") + 1] == "SRC:child-of"
 
-    # The printed commands run: file the follow-up, then link it to its source.
-    new_text = new_line.split(": ", 1)[1].split(", then")[0]
-    new_cmd = shlex.split(
-        new_text.replace("TYPE", "ticket").replace("TITLE", "'flaky test found later'")
-    )
-    code, out, err = invoke(monkeypatch, ["--json", "--db", db, *new_cmd[1:]])
-    assert code == 0, err
-    new_id = json.loads(out)["data"]["item_id"]
-    link_cmd = shlex.split(link_line.replace("NEW", new_id).replace("PARENT", "it-parent"))
-    code, _out, err = invoke(monkeypatch, ["--db", db, *link_cmd[1:]])
-    assert code == 0, err
+    src = "it-parent:flaky-test"
+
+    def file_follow_up(*, link: bool = True) -> str:
+        new_cmd = _fill(new_argv, TYPE="ticket", TITLE="flaky test found later", SRC=src)
+        code, out, err = invoke(monkeypatch, ["--json", "--db", db, *new_cmd[1:]])
+        assert code == 0, err
+        new_id = json.loads(out)["data"]["item_id"]
+        if link:
+            link_cmd = _fill(link_argv, NEW=new_id, PARENT="it-parent", SRC=src)
+            code, _out, err = invoke(monkeypatch, ["--db", db, *link_cmd[1:]])
+            assert code == 0, err
+        return new_id
+
+    # Interrupted between the two writes: the child exists, the link does not.
+    first = file_follow_up(link=False)
+    # The printed sequence, run again in full, recovers the same child and links it.
+    second = file_follow_up()
+    # A completed sequence run once more changes nothing.
+    third = file_follow_up()
+    assert first == second == third
+
     with open_ledger(db, create=False) as lg:
-        [link] = list(lg.events(item_id=new_id, kind="item.linked"))
-    assert link.payload["rel"] == "child-of"
-    assert link.payload["target"] == "it-parent"
+        created = [e.item_id for e in lg.events(kind="item.created")]
+        assert sorted(created) == sorted(["it-parent", first]), created
+        links = [
+            e for e in lg.events(item_id=first, kind="item.linked")
+            if e.payload.get("rel") == "child-of"
+        ]
+        assert len(links) == 1, links
+        assert links[0].payload["target"] == "it-parent"
+        assert current_anchors(lg._conn).get(first) == "it-parent"
 
 
 def test_short_form_phase_list_equals_the_schema_phases() -> None:
