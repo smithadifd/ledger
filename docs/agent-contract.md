@@ -115,7 +115,9 @@ plugin or harness that starts your session normally exports them.
 | `LEDGER_MODEL` | the model id, so a later reader knows what wrote it |
 | `LEDGER_SESSION` | the session id, so every event of one session can be found together |
 
-The database path comes from `LEDGER_DB` (or `--db`).
+The database path comes from `LEDGER_DB` (or `--db`). There is no default
+path; the supported location is `~/.local/share/ledger/<system>.db`, or
+whatever `LEDGER_DB` names.
 
 ## The close rule
 

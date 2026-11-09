@@ -7,7 +7,10 @@ ledger --version
 ```
 
 `--db` and `--json` may appear before or after the verb. `--db` overrides
-`LEDGER_DB`; one of them is required. `ledger <verb> --help` is the
+`LEDGER_DB`; one of them is required, because the ledger has no default
+database path. The supported location is
+`~/.local/share/ledger/<system>.db` (or whatever `LEDGER_DB` names).
+`ledger <verb> --help` is the
 authoritative flag list; this page summarises it. `--version` needs no
 verb or database and prints `ledger <version>`.
 
@@ -43,7 +46,7 @@ never prints a stack trace.
 
 | Variable | Meaning |
 |----------|---------|
-| `LEDGER_DB` | database path when `--db` is not given |
+| `LEDGER_DB` | database path when `--db` is not given; there is no default, and the supported location is `~/.local/share/ledger/<system>.db` |
 | `LEDGER_HARNESS` | what is writing (a shell, a scheduled job, an agent runtime); every write verb refuses without it and suggests `LEDGER_HARNESS=claude-code` |
 | `LEDGER_PROG` | command prefix printed by `resume` and `card`; otherwise a module run uses `python3 -m ledger` and other runs use the basename of `argv[0]` |
 | `LEDGER_OPERATOR` | the person on whose behalf the write happens |
