@@ -293,23 +293,6 @@ def test_db_token_after_double_dash_is_an_operand_not_the_flag(tmp_path, monkeyp
     assert " --db " + shlex.quote(db) not in out
 
 
-def test_json_resume_counts_open_items_without_a_stop(tmp_path, monkeypatch) -> None:
-    db = _db(tmp_path)
-    seed(monkeypatch, db, "it-a")
-    seed(monkeypatch, db, "it-b")
-    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
-    assert code == 0, err
-    data = json.loads(out)["data"]
-    assert data["items"] == []
-    assert data["open_without_stop"] == 2
-    _stop(monkeypatch, db, "it-a", "stop a")
-    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
-    assert code == 0, err
-    data = json.loads(out)["data"]
-    assert [entry["item_id"] for entry in data["items"]] == ["it-a"]
-    assert data["open_without_stop"] == 1
-
-
 def test_inferred_program_basename_is_shell_quoted(tmp_path, monkeypatch) -> None:
     db = _db(tmp_path)
     seed(monkeypatch, db, "it-a")

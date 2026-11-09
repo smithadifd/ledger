@@ -390,4 +390,3 @@ form of the agent contract ([agent-contract.md](agent-contract.md)), so a
 session-start hook can print both. It never writes. With no items it prints
 `no open items`; when open items exist but none has a stop, it prints
 `N open item(s) with no stop recorded; ledger query lists them`. Both exit 0.
-With `--json`, `data.open_without_stop` carries that count.

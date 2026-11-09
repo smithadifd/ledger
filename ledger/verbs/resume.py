@@ -229,7 +229,7 @@ def run(args, ctx: Context) -> Result:
         )
     else:
         body = NO_OPEN_ITEMS
-    data: dict[str, Any] = {"items": entries, "open_without_stop": open_without_stop}
+    data: dict[str, Any] = {"items": entries}
     text = body
     if args.brief:
         data["contract"] = SHORT_FORM
