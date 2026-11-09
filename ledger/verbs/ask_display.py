@@ -4,7 +4,10 @@ The output is the whole AskUserQuestion input for ask K, a ``questions``
 array holding exactly one question rendered from the ask alone, and the
 fingerprint of that array (SHA-256 hex of its canonical JSON):
 
-- question: ``[ask K] <question> (scope: <scope>)``
+- question: ``[ask K] <question> (scope: <scope>)``, or
+  ``[ask K] <question> (scope: <scope>; question id: <question_id>)`` when
+  the ask has a question id (a grant id decides which grant the answer
+  stands for, so the owner sees it)
 - header: ``ask K``
 - options: the ask's options in order as ``{label, description}``; an option
   without a description shows its label

@@ -1084,6 +1084,82 @@ def test_a_grant_whose_ask_was_answered_first_by_another_election_is_unverified(
     assert code_name == "grant_unverified" and "(not_first_answer)" in message
 
 
+# --- the grant id on the display; R4a and R9 one guard at a time ----------------
+
+
+def test_a_grant_id_the_display_never_named_does_not_stand(db, monkeypatch) -> None:
+    # The seat asks under a grant id with a question that never names it, and
+    # raises the picker the same ask would render without the id; the owner
+    # clicks granted.
+    grant_id = "grant:review-round-past-cap"
+    fields = {"question": "Fix the README typo?", "scope": "the README only",
+              "options": GRANT_OPTIONS}
+    asked = grant_ask(monkeypatch, db, grant_id, **fields)
+    questions = render_ask_display(asked, ask_payload(**fields))
+    assert grant_id not in json.dumps(questions)
+    question = questions[0]["question"]
+    capture_id = captured(monkeypatch, db, picker_hook(questions, {question: "granted"}))
+    assert stored(db, capture_id).payload["picker"]["chosen_position"] == 1
+    code, env = pick(monkeypatch, db, asked)
+    assert code == 3 and refusal(env)[0] == "display_differs"
+    assert event_count(db, "decision.elected") == 0
+    raw_elect(monkeypatch, db, forged(db, asked, capture_id))
+    assert reason(db, asked) == "display_differs"
+    code, env = grant_check(monkeypatch, db, grant_id)
+    assert code == 3
+    code_name, message = refusal(env)
+    assert code_name == "grant_unverified" and "(display_differs)" in message
+    # What ask-display prints names the grant id.
+    assert ask_display(monkeypatch, db, asked)[0]["question"] == (
+        f"[ask {asked}] Fix the README typo? (scope: the README only; question id: {grant_id})"
+    )
+
+
+def test_a_later_capture_of_another_display_at_the_same_position_reads_capture_conflict(
+        db, monkeypatch) -> None:
+    asked = ask(monkeypatch, db)
+    first = answer(monkeypatch, db, asked, "apply")
+    later = answer(
+        monkeypatch, db, asked, "apply",
+        edit=lambda qs: qs[0]["options"][0].update(description="Apply it to a scratch copy"),
+    )
+    first_picker = stored(db, first).payload["picker"]
+    later_picker = stored(db, later).payload["picker"]
+    assert first_picker["chosen_position"] == later_picker["chosen_position"] == 1
+    assert first_picker["display_sha256"] != later_picker["display_sha256"]
+    code, env = pick(monkeypatch, db, asked)
+    assert code == 3 and refusal(env)[0] == "capture_conflict"
+    raw_elect(monkeypatch, db, forged(db, asked, first))
+    assert reason(db, asked) == "capture_conflict"
+
+
+def test_a_later_capture_carrying_an_owner_note_reads_capture_conflict(db, monkeypatch) -> None:
+    asked = ask(monkeypatch, db)
+    first = answer(monkeypatch, db, asked, "apply")
+    later = answer(monkeypatch, db, asked, "apply", annotations={"notes": "only if tests pass"})
+    first_picker = stored(db, first).payload["picker"]
+    later_picker = stored(db, later).payload["picker"]
+    assert "annotation" not in first_picker
+    assert first_picker["chosen_position"] == later_picker["chosen_position"] == 1
+    assert first_picker["display_sha256"] == later_picker["display_sha256"]
+    code, env = pick(monkeypatch, db, asked)
+    assert code == 3 and refusal(env)[0] == "capture_conflict"
+    raw_elect(monkeypatch, db, forged(db, asked, first))
+    assert reason(db, asked) == "capture_conflict"
+
+
+def test_an_election_recording_another_fingerprint_reads_choice_mismatch(
+        db, monkeypatch) -> None:
+    asked = ask(monkeypatch, db)
+    capture_id = answer(monkeypatch, db, asked, "apply")
+    wrong = fingerprint([{"question": "another display"}])
+    assert wrong != stored(db, capture_id).payload["picker"]["display_sha256"]
+    election = forged(db, asked, capture_id, display_sha256=wrong)
+    assert election["chosen_position"] == 1  # only the fingerprint is forged
+    raw_elect(monkeypatch, db, election)
+    assert reason(db, asked) == "choice_mismatch"
+
+
 # --- I2: the grammar's near misses refuse by name --------------------------------
 
 

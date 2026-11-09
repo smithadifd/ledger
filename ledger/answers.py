@@ -158,7 +158,10 @@ def render_ask_display(asked_event_id: int, ask: Mapping[str, Any]) -> list[dict
     """The ``questions`` array a seat sends as its AskUserQuestion input for K.
 
     Exactly one question, built only from the ask; raises ``AskNotPickable``
-    when the ask cannot be shown in a picker.
+    when the ask cannot be shown in a picker. The question text names the
+    scope and, when the ask has one, its ``question_id``: an election takes
+    that id from the ask, and ``ledger grants`` reads it to decide which grant
+    the answer stands for, so the owner sees it and the fingerprint covers it.
     """
     header = f"ask {asked_event_id}"
     scope = ask.get("scope")
@@ -182,9 +185,13 @@ def render_ask_display(asked_event_id: int, ask: Mapping[str, Any]) -> list[dict
         raise AskNotPickable(
             f"the header {header!r} is longer than {PICKER_HEADER_MAX} characters"
         )
+    shown = f"scope: {scope}"
+    # The same condition derive_election copies the question id under.
+    if ask.get("question_id") is not None:
+        shown += f"; question id: {ask['question_id']}"
     return [
         {
-            "question": f"[ask {asked_event_id}] {ask['question']} (scope: {scope})",
+            "question": f"[ask {asked_event_id}] {ask['question']} ({shown})",
             "header": header,
             "options": [
                 {"label": option["label"], "description": option_description(option)}

@@ -239,7 +239,9 @@ to ask K when the owner answered K in the question picker and the harness
 captured that answer, and otherwise the reason it does not count.
 
 The flow: the seat records the ask with its scope; `ledger ask-display K`
-prints the one-question picker for it; the seat sends exactly that; the
+prints the one-question picker for it, whose question text names the scope
+and, when K has one, its question id (a grant id decides which grant an
+answer stands for, so the owner sees it); the seat sends exactly that; the
 harness's PostToolUse hook runs `ledger capture --kind picker`, which records
 the displayed picker verbatim, its fingerprint (SHA-256 of its canonical
 JSON) and the position of the option chosen; then `ledger pick ITEM --ask K`

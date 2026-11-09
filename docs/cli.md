@@ -195,7 +195,9 @@ example. An election `elect` writes is evidence: no gate opens on it (see
 "Answers that open a gate" in [concepts.md](concepts.md)).
 
 **`ask-display EVENT`** Print the AskUserQuestion input for the ask: a
-`questions` array with one question, `[ask K] <question> (scope: <scope>)`,
+`questions` array with one question, `[ask K] <question> (scope: <scope>)`
+(`[ask K] <question> (scope: <scope>; question id: <question_id>)` when the
+ask has a question id, so a grant id is on what the owner sees),
 header `ask K`, the ask's options in order as `{label, description}` (a
 missing description shows the label) and `multiSelect` false, then a line
 `display_sha256 <hex>`, the SHA-256 of that array's canonical JSON. `--json`
