@@ -155,12 +155,18 @@ def test_install_and_upgrade_use_pipx_never_a_bare_pip() -> None:
     for page in (README, START):
         flat = _flat(page)
         assert tag_install in flat, page.name
-        for line in page.read_text(encoding="utf-8").splitlines():
-            # Allowed: the virtual environment's own pip, and the sentence that
-            # tells the reader not to run a bare `pip install`; nothing else.
-            line = re.sub(r"\.venv/bin/python -m pip install", "", line)
-            line = re.sub(r"Do not (?:run|use) a bare `pip install`", "", line)
-            assert not re.search(r"\bpip3?\s+install\b", line), (page.name, line)
+        # The whole page, flattened, so prose wrapped across two lines is seen
+        # as one. Allowed: the virtual environment's own pip (`.venv` starting
+        # the path: at the start of the text, or after whitespace or a
+        # backtick), and the sentence that tells the reader not to run a bare
+        # `pip install`; nothing else. Covers pip, pip3 and pip3.NN.
+        text = re.sub(r"(?<![^\s`])\.venv/bin/python -m pip install", "", flat)
+        text = re.sub(r"Do not (?:run|use) a bare `pip install`", "", text)
+        bare = re.search(r"\bpip(?:3(?:\.\d+)?)?\s+install\b", text)
+        assert bare is None, (
+            page.name,
+            text[max(0, bare.start() - 40) : bare.end() + 40],
+        )
     readme = README.read_text(encoding="utf-8")
     assert "python3 -m venv" in _squash(readme)
     upgrade = _squash(readme.split("\n## Upgrade", 1)[1].split("\n## ", 1)[0])
@@ -193,9 +199,14 @@ def test_every_page_spells_the_database_home_as_paths_py_does() -> None:
 
 
 def test_start_here_export_line_points_under_the_database_home() -> None:
-    exports = re.findall(r"^\s*export LEDGER_DB=(\S+)\s*$", START.read_text(encoding="utf-8"), re.M)
+    # The value is the first word after the `=`: a trailing `# comment` is not
+    # part of it, and such a line is still checked.
+    exports = re.findall(r"^\s*export LEDGER_DB=(\S+)", START.read_text(encoding="utf-8"), re.M)
     assert exports, "docs/start-here.md has no `export LEDGER_DB=` line"
     for value in exports:
+        assert ".." not in value.split("/"), (
+            f"start-here's export line {value!r} has a parent-directory (..) segment"
+        )
         assert value.startswith(SUPPORTED_LOCATION + "/"), (
             f"start-here's export line points at {value!r}, not under {SUPPORTED_LOCATION}/"
         )
