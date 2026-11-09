@@ -15,6 +15,7 @@ refused.
 from __future__ import annotations
 
 import re
+import shlex
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -98,6 +99,13 @@ class Context:
 
 
 ACTOR_SEPARATOR = "/"
+
+
+def invocation_prefix(program: str, db: str, db_explicit: bool) -> str:
+    """Build the command prefix repeated in runnable CLI output."""
+    if not db_explicit:
+        return program
+    return f"{program} --db {shlex.quote(db)}"
 
 
 def compose_actor(operator: str | None, agent: str | None) -> str | None:

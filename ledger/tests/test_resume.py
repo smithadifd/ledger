@@ -121,14 +121,65 @@ def test_module_run_prints_module_program(tmp_path) -> None:
     assert "  resume: python3 -m ledger resume --item=it-a" in resumed.stdout
 
 
-def test_card_uses_program_name(tmp_path, monkeypatch) -> None:
+def _make_card_bulky(db: str) -> None:
+    lg = open_ledger(db)
+    try:
+        for index in range(20):
+            lg.append(
+                kind="item.note",
+                payload={"text": f"note-{index} " + "padding " * 40},
+                item_id="it-a",
+                idempotency_key=f"note-{index}",
+                harness="pytest",
+            )
+    finally:
+        lg.close()
+
+
+def test_card_commands_share_program_and_explicit_database(tmp_path, monkeypatch) -> None:
     db = _db(tmp_path)
     seed(monkeypatch, db, "it-a")
+    _make_card_bulky(db)
     code, out, err = invoke(
         monkeypatch, ["--db", db, "card", "it-a"], env={"LEDGER_PROG": "custom-ledger"}
     )
     assert code == 0, err
+    prefix = f"custom-ledger --db {shlex.quote(db)}"
+    assert f"Resume with: {prefix} resume --item=it-a" in out
+    assert f"(+20 cut; {prefix} export-item --json -- it-a)" in out
+    assert out.rstrip().endswith(
+        f"This card is a projection; the events are the authority ({prefix} export-item -- it-a)"
+    )
+
+
+def test_card_commands_omit_environment_database(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _make_card_bulky(db)
+    monkeypatch.setenv("LEDGER_DB", db)
+    code, out, err = invoke(
+        monkeypatch, ["card", "it-a"], env={"LEDGER_PROG": "custom-ledger"}
+    )
+    assert code == 0, err
     assert "Resume with: custom-ledger resume --item=it-a" in out
+    assert "(+20 cut; custom-ledger export-item --json -- it-a)" in out
+    assert out.rstrip().endswith(
+        "This card is a projection; the events are the authority (custom-ledger export-item -- it-a)"
+    )
+    assert " --db " not in out
+
+
+def test_inferred_program_basename_is_shell_quoted(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    monkeypatch.delenv("LEDGER_PROG", raising=False)
+    monkeypatch.setattr(sys, "argv", ["/opt/tools/ledger local"])
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert _printed(out, "resume")[0].startswith(
+        f"'ledger local' --db {shlex.quote(db)} "
+    )
 
 
 def test_two_stopped_items_print_two_runnable_resume_lines(tmp_path, monkeypatch) -> None:

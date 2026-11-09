@@ -12,6 +12,7 @@ import argparse
 import importlib.metadata
 import json
 import os
+import shlex
 import sqlite3
 import sys
 from pathlib import Path
@@ -75,7 +76,7 @@ def _program_name() -> str:
             if started.parent.name == "ledger":
                 return "python3 -m ledger"
             return "ledger"
-        return started.name or "ledger"
+        return shlex.quote(started.name or "ledger")
     except (OSError, TypeError, ValueError):
         return "ledger"
 

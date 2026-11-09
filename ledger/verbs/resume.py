@@ -21,7 +21,15 @@ from typing import Any
 
 from ledger.paths import resolve_db_path
 from ledger.store import open_ledger_readonly
-from ledger.verbs import EXIT_NOT_FOUND, CliError, Context, Result, Verb, require_item
+from ledger.verbs import (
+    EXIT_NOT_FOUND,
+    CliError,
+    Context,
+    Result,
+    Verb,
+    invocation_prefix,
+    require_item,
+)
 
 NO_OPEN_ITEMS = "no open items"
 
@@ -97,16 +105,11 @@ def _quote(value: str) -> str:
     return "$'" + body + "'"
 
 
-def _commands(
-    db: str, item_id: str, program: str = "ledger", db_explicit: bool = True
-) -> tuple[str, str]:
-    base = program
-    if db_explicit:
-        base += f" --db {_quote(db)}"
+def _commands(item_id: str, prefix: str = "ledger") -> tuple[str, str]:
     item = _quote(item_id)
     # ``--item=`` and ``card --`` keep an id that starts with a hyphen a value,
     # not an option, so the printed commands run for every valid id.
-    return f"{base} resume --item={item}", f"{base} card -- {item}"
+    return f"{prefix} resume --item={item}", f"{prefix} card -- {item}"
 
 
 def _stop_row(event) -> dict[str, Any]:
@@ -133,15 +136,13 @@ def _rollup(rows: list[dict[str, Any]], item_id: str) -> dict[str, int] | None:
 
 
 def _entry(
-    db: str,
     item: dict[str, Any],
     stop,
     rollup: dict[str, int] | None = None,
     *,
-    program: str = "ledger",
-    db_explicit: bool = True,
+    prefix: str = "ledger",
 ) -> dict[str, Any]:
-    resume_cmd, card_cmd = _commands(db, item["item_id"], program, db_explicit)
+    resume_cmd, card_cmd = _commands(item["item_id"], prefix)
     extra = {} if rollup is None else {"children": rollup}
     return {
         **extra,
@@ -183,7 +184,7 @@ def run(args, ctx: Context) -> Result:
     if resolved.exists():
         lg = open_ledger_readonly(resolved)
         try:
-            db = str(lg.path)
+            prefix = invocation_prefix(ctx.program, str(lg.path), ctx.db_explicit)
             # One read transaction: the stops and the items come from the same
             # snapshot, so a writer appending between the two reads cannot make
             # an open item with a stop vanish from the list.
@@ -196,12 +197,10 @@ def run(args, ctx: Context) -> Result:
                     item = require_item(lg, args.item_id)
                     entries.append(
                         _entry(
-                            db,
                             item,
                             stops[-1] if stops else None,
                             _rollup(rows, item["item_id"]),
-                            program=ctx.program,
-                            db_explicit=ctx.db_explicit,
+                            prefix=prefix,
                         )
                     )
                 else:
@@ -216,12 +215,10 @@ def run(args, ctx: Context) -> Result:
                             continue
                         entries.append(
                             _entry(
-                                db,
                                 row,
                                 newest[row["item_id"]],
                                 _rollup(rows, row["item_id"]),
-                                program=ctx.program,
-                                db_explicit=ctx.db_explicit,
+                                prefix=prefix,
                             )
                         )
             finally:

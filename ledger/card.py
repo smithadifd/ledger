@@ -243,7 +243,7 @@ def derive_next_step(
             _clip(name, STEP_NAME_WORDS) for name in blockers[:NEXT_STEP_BLOCKERS]
         )
         if len(blockers) > NEXT_STEP_BLOCKERS:
-            named += f" {_cut_count(len(blockers) - NEXT_STEP_BLOCKERS, item_id)}"
+            named += f" {_cut_count(len(blockers) - NEXT_STEP_BLOCKERS, item_id, program)}"
         clear = f"Clear blockers: {named}."
     if open_questions:
         if blockers:
@@ -358,7 +358,7 @@ class Card:
                 self.spec_hash,
             ),
             "truncated": list(self.truncated),
-            "footer": footer_line(self.item_id),
+            "footer": footer_line(self.item_id, self.program),
         }
 
 
@@ -471,39 +471,41 @@ def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
 # the command that prints the item's events and so recovers it.
 
 
-def recover_command(item_id: str) -> str:
+def recover_command(item_id: str, program: str = "ledger") -> str:
     """The command that prints every event the card was cut from."""
     # Flags first, then ``--``: an id with a leading hyphen or shell
     # metacharacters stays one safe token in a copied command.
-    return shlex.join(["ledger", "export-item", "--json", "--", item_id])
+    return f"{program} {shlex.join(['export-item', '--json', '--', item_id])}"
 
 
-def footer_line(item_id: str) -> str:
+def footer_line(item_id: str, program: str = "ledger") -> str:
     """The card's last line: a projection, with what is authoritative."""
-    return f"{FOOTER} ({shlex.join(['ledger', 'export-item', '--', item_id])})"
+    return f"{FOOTER} ({program} {shlex.join(['export-item', '--', item_id])})"
 
 
-def _cut_count(count: int, item_id: str) -> str:
+def _cut_count(count: int, item_id: str, program: str = "ledger") -> str:
     """Marker for rows or ids cut from a section or the header."""
-    return f"(+{count} cut; {recover_command(item_id)})"
+    return f"(+{count} cut; {recover_command(item_id, program)})"
 
 
-def children_command(item_id: str) -> str:
+def children_command(item_id: str, program: str = "ledger") -> str:
     """The command that prints every child ``item_id`` has when it runs."""
     # The --flag=value form keeps an id with a leading hyphen one argument.
-    return shlex.join(["ledger", "query", f"--parent={item_id}", "--all"])
+    return f"{program} {shlex.join(['query', f'--parent={item_id}', '--all'])}"
 
 
-def _cut_words(count: int, item_id: str) -> str:
+def _cut_words(count: int, item_id: str, program: str = "ledger") -> str:
     """Marker for words trimmed from the title or next step."""
-    return f"(+{count} words cut; {recover_command(item_id)})"
+    return f"(+{count} words cut; {recover_command(item_id, program)})"
 
 
-def _cut_marker(count: int, event_id: int, item_id: str) -> str:
+def _cut_marker(
+    count: int, event_id: int, item_id: str, program: str = "ledger"
+) -> str:
     """Inline marker for words cut from an ask field held by ``event_id``."""
     return (
         f"… (+{count} words cut; full text in event {event_id}; "
-        f"{recover_command(item_id)})"
+        f"{recover_command(item_id, program)})"
     )
 
 
@@ -511,20 +513,24 @@ def _cut_marker(count: int, event_id: int, item_id: str) -> str:
 _MARKER_WORDS = len(_cut_marker(1, 1, "x").split())
 
 
-def _shown(row: Mapping[str, Any], path: str, value: str, item_id: str) -> str:
+def _shown(
+    row: Mapping[str, Any], path: str, value: str, item_id: str, program: str = "ledger"
+) -> str:
     cut = int((row.get("omitted_words") or {}).get(path, 0))
     if cut <= 0:
         return value
-    return f"{value} {_cut_marker(cut, int(row['asked_event_id']), item_id)}"
+    return f"{value} {_cut_marker(cut, int(row['asked_event_id']), item_id, program)}"
 
 
-def _option_lines(row: Mapping[str, Any], item_id: str) -> list[str]:
+def _option_lines(
+    row: Mapping[str, Any], item_id: str, program: str = "ledger"
+) -> list[str]:
     lines: list[str] = []
     for index, option in enumerate(row.get("options") or []):
         label = str(option.get("label") or "").strip()
         description = str(option.get("description") or "").strip()
         if description:
-            description = _shown(row, f"options.{index}.description", description, item_id)
+            description = _shown(row, f"options.{index}.description", description, item_id, program)
         letter = chr(ord("A") + index) if index < 26 else str(index + 1)
         # An option pick already labels its options with letters.
         if len(label) == 1 and "A" <= label <= "Z":
@@ -548,19 +554,21 @@ def _default_only(payload: Mapping[str, Any]) -> bool:
     )
 
 
-def _fmt_questions(rows: tuple[dict[str, Any], ...], item_id: str) -> str:
+def _fmt_questions(
+    rows: tuple[dict[str, Any], ...], item_id: str, program: str = "ledger"
+) -> str:
     lines: list[str] = []
     for row in rows:
         lines.append(f"- event={row['asked_event_id']}: {row['question']}")
         if row.get("ask"):
-            lines.append(f"  ask: {_shown(row, 'ask', row['ask'], item_id)}")
+            lines.append(f"  ask: {_shown(row, 'ask', row['ask'], item_id, program)}")
         if row.get("options") and not row.get("default_only"):
             lines.append("  options:")
-            lines.extend(_option_lines(row, item_id))
+            lines.extend(_option_lines(row, item_id, program))
         for name in ASK_FIELDS:
             value = row.get(name)
             if value:
-                lines.append(f"  {name}: {_shown(row, name, value, item_id)}")
+                lines.append(f"  {name}: {_shown(row, name, value, item_id, program)}")
     return _fmt_list(lines)
 
 
@@ -610,7 +618,7 @@ def _children_block(card: Card) -> list[str]:
     count = _omitted_count(card, "children")
     if count > 0:
         # The children are other items' events: name the query that lists them.
-        marker = f"(+{count} cut; {children_command(card.item_id)})"
+        marker = f"(+{count} cut; {children_command(card.item_id, card.program)})"
         body = marker if body == "(none)" else f"{body}\n{marker}"
     return [
         "",
@@ -659,14 +667,16 @@ def _fmt_tried(rows: tuple[dict[str, Any], ...]) -> str:
     return _fmt_list(lines)
 
 
-def _fmt_reviews(rows: tuple[dict[str, Any], ...], item_id: str) -> str:
+def _fmt_reviews(
+    rows: tuple[dict[str, Any], ...], item_id: str, program: str = "ledger"
+) -> str:
     lines: list[str] = []
     for row in rows:
         lines.append(f"- event={row['event_id']} round {row['round']}: {row['verdict']}")
         lines.extend(f"  finding: {finding}" for finding in row["findings"])
         if row.get("findings_cut"):
             lines.append(
-                f"  {_cut_count(row['findings_cut'], item_id)} findings; "
+                f"  {_cut_count(row['findings_cut'], item_id, program)} findings; "
                 f"full list in event {row['event_id']}"
             )
     return _fmt_list(lines)
@@ -711,7 +721,7 @@ def _with_marker(body: str, card: Card, section: str) -> str:
     count = _omitted_count(card, section)
     if count <= 0:
         return body
-    marker = _cut_count(count, card.item_id)
+    marker = _cut_count(count, card.item_id, card.program)
     if body == "(none)":
         return marker
     return f"{body}\n{marker}"
@@ -721,14 +731,14 @@ def _with_inline_marker(text: str, card: Card, section: str) -> str:
     count = _omitted_count(card, section)
     if count <= 0:
         return text
-    return f"{text} {_cut_words(count, card.item_id)}"
+    return f"{text} {_cut_words(count, card.item_id, card.program)}"
 
 
 def format_card(card: Card) -> str:
     """Render the stable text/markdown card, including the authority footer."""
     source = ", ".join(str(i) for i in card.source_event_ids)
     if card.source_omitted > 0:
-        source = f"{source} {_cut_count(card.source_omitted, card.item_id)}"
+        source = f"{source} {_cut_count(card.source_omitted, card.item_id, card.program)}"
     parts = [
         f"# {card.item_id}",
         f"revision: {card.revision_id} {card.revision_hash}",
@@ -752,7 +762,7 @@ def format_card(card: Card) -> str:
         "",
         "## Open questions",
         _with_marker(
-            _fmt_questions(card.open_questions, card.item_id), card, "open_questions"
+            _fmt_questions(card.open_questions, card.item_id, card.program), card, "open_questions"
         ),
         "",
         "## Next step",
@@ -772,11 +782,11 @@ def format_card(card: Card) -> str:
         rows = getattr(card, section)
         if not rows and _omitted_count(card, section) <= 0:
             continue
-        body = fmt(rows, card.item_id) if fmt is _fmt_reviews else fmt(rows)
+        body = fmt(rows, card.item_id, card.program) if fmt is _fmt_reviews else fmt(rows)
         parts.extend(["", f"## {heading}", _with_marker(body, card, section)])
     if card.truncated:
         parts.extend(["", "## Truncated", "dropped: " + ", ".join(card.truncated)])
-    parts.extend(["", footer_line(card.item_id)])
+    parts.extend(["", footer_line(card.item_id, card.program)])
     return "\n".join(parts) + "\n"
 
 
@@ -901,6 +911,7 @@ def _shorten_one(
     excess: int,
     *,
     overhead: int = 0,
+    marker_words: int = _MARKER_WORDS,
 ) -> tuple[tuple[dict[str, Any], ...], int]:
     """Cut ``excess`` words (plus a new marker's own) from one ask field.
 
@@ -914,7 +925,7 @@ def _shorten_one(
     words = _get_path(row, path).split()
     omitted_words = dict(row.get("omitted_words") or {})
     already = int(omitted_words.get(path, 0))
-    marker = 0 if already else _MARKER_WORDS
+    marker = 0 if already else marker_words
     room = len(words) - ASK_MIN_WORDS
     if room <= marker + overhead:
         return rows, 0
@@ -1045,6 +1056,7 @@ def bound_card(card: Card) -> Card:
             path,
             size + header - WORD_LIMIT,
             overhead=header,
+            marker_words=len(_cut_marker(1, 1, "x", current.program).split()),
         )
         if cut:
             _record_omission(truncated, omitted, "ask", cut)
