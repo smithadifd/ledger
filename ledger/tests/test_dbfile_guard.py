@@ -9,6 +9,7 @@ import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -103,6 +104,32 @@ def test_fifo_is_refused_without_blocking_readonly_open(tmp_path: Path) -> None:
         pytest.fail("read-only FIFO open blocked instead of refusing")
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("UnsafeDatabaseFile:db_not_regular:"), result.stdout
+
+
+def test_unlinked_sibling_is_absent_but_hardlinked_sibling_refuses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    sibling = tmp_path / "ledger.db-journal"
+    sibling.write_bytes(b"journal")
+    actual = os.lstat(sibling)
+    link_count = 0
+
+    def lstat_with_link_count(path):
+        assert Path(path) == sibling
+        return SimpleNamespace(st_mode=actual.st_mode, st_nlink=link_count)
+
+    def outcome() -> str:
+        try:
+            found = dbfile._check_sibling(sibling)
+        except UnsafeDatabaseFile as exc:
+            return exc.code
+        return "absent" if found is None else "accepted"
+
+    monkeypatch.setattr(os, "lstat", lstat_with_link_count)
+    assert outcome() == "absent", "a zero-link side file must be treated as absent"
+
+    link_count = 2
+    assert outcome() == "db_sibling_unsafe", "a second hard link must still be refused"
 
 
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])

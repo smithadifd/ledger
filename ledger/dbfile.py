@@ -68,8 +68,10 @@ def _check_sibling(path: Path) -> os.stat_result | None:
         detail = f"{suffix} is a symbolic link"
     elif not stat.S_ISREG(found.st_mode):
         detail = f"{suffix} is not a regular file"
-    elif found.st_nlink != 1:
+    elif found.st_nlink > 1:
         detail = f"{suffix} has {found.st_nlink} links"
+    elif found.st_nlink == 0:
+        return None
     else:
         return found
     _unsafe("db_sibling_unsafe", detail, path)
