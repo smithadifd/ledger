@@ -242,27 +242,29 @@ def test_brief_prints_the_follow_up_line_and_its_commands_run(
     assert new_argv[:2] == ["ledger", "new"]
     assert new_argv[new_argv.index("--source") + 1] == "SRC"
     assert link_argv[link_argv.index("--rel") + 1] == "child-of"
-    assert link_argv[link_argv.index("--idempotency-key") + 1] == "SRC:child-of"
+    # No link key: a keyed rerun from a later session would conflict on attribution.
+    assert "--idempotency-key" not in link_argv
 
     src = "it-parent:flaky-test"
 
-    def file_follow_up(*, link: bool = True) -> str:
+    def file_follow_up(*, link: bool = True, env: dict | None = None) -> str:
         new_cmd = _fill(new_argv, TYPE="ticket", TITLE="flaky test found later", SRC=src)
-        code, out, err = invoke(monkeypatch, ["--json", "--db", db, *new_cmd[1:]])
+        code, out, err = invoke(monkeypatch, ["--json", "--db", db, *new_cmd[1:]], env=env)
         assert code == 0, err
         new_id = json.loads(out)["data"]["item_id"]
         if link:
             link_cmd = _fill(link_argv, NEW=new_id, PARENT="it-parent", SRC=src)
-            code, _out, err = invoke(monkeypatch, ["--db", db, *link_cmd[1:]])
+            code, _out, err = invoke(monkeypatch, ["--db", db, *link_cmd[1:]], env=env)
             assert code == 0, err
         return new_id
 
     # Interrupted between the two writes: the child exists, the link does not.
     first = file_follow_up(link=False)
-    # The printed sequence, run again in full, recovers the same child and links it.
-    second = file_follow_up()
-    # A completed sequence run once more changes nothing.
-    third = file_follow_up()
+    # The printed sequence, run again in full from a later session (another
+    # seat and session stamp), recovers the same child and links it.
+    second = file_follow_up(env={"LEDGER_AGENT": "seat-two", "LEDGER_SESSION": "sess-2"})
+    # A completed sequence run once more, from a third session, changes nothing.
+    third = file_follow_up(env={"LEDGER_AGENT": "seat-three", "LEDGER_SESSION": "sess-3"})
     assert first == second == third
 
     with open_ledger(db, create=False) as lg:

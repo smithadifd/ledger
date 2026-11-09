@@ -43,7 +43,7 @@ Write triggers:
   link the brief by path: ledger link ITEM --rel url --target PATH
 - follow-up filed: SRC is PARENT:SLUG (the parent's id, a colon, a short slug of the follow-up);
   ledger new --type TYPE --title TITLE --source SRC, then link it to its source:
-  ledger link NEW --rel child-of --target PARENT --idempotency-key SRC:child-of
+  ledger link NEW --rel child-of --target PARENT
   (interrupted between the two? run both again unchanged: one child, one link)
 - thread parked: write item.stopped (see the close rule)
 - thread stopped: write item.stopped (see the close rule)

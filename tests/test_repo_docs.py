@@ -78,7 +78,7 @@ def test_follow_up_trigger_files_and_links_as_a_child() -> None:
     page = _page_triggers()["follow-up filed"]
     assert page == [
         "ledger new --type TYPE --title TITLE --source SRC",
-        "ledger link NEW --rel child-of --target PARENT --idempotency-key SRC:child-of",
+        "ledger link NEW --rel child-of --target PARENT",
     ]
 
 

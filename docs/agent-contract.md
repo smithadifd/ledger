@@ -32,9 +32,10 @@ exists to prevent.
   follow-up (`it-1a2b3c4d5e6f:flaky-retry`), create the follow-up with
   `ledger new --type TYPE --title TITLE --source SRC`, then link it to the
   item it came from with
-  `ledger link NEW --rel child-of --target PARENT --idempotency-key SRC:child-of`.
-  If you are interrupted between the two, run both again unchanged: the
-  same source reaches the same child and the same key leaves one link.
+  `ledger link NEW --rel child-of --target PARENT`.
+  If you are interrupted between the two, run both again unchanged, even
+  from a later session: the same source reaches the same child, and a link
+  it already has to that parent writes nothing, so one link remains.
 - **thread parked** — work pauses with more to do: write `item.stopped`.
 - **thread stopped** — a session ends mid-item: write `item.stopped`.
 
