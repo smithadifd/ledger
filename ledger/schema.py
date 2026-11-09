@@ -499,7 +499,7 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
         "item_id": "required",
         "required": {
             "point": {"type": "string", "min_len": 1, "max_len": 600},
-            "phase": {"enum": PHASES},
+            "phase": {"enum": PHASES, "show_allowed": True},
         },
         "optional": {
             "skills": {"type": "array", "max_len": 12, "items": _SKILL},
@@ -729,10 +729,17 @@ def _is_json(value: Any) -> bool:
     return False
 
 
+def _field_error(reason: str, path: str, spec: Mapping[str, Any]) -> str:
+    message = f"{reason}:{path}"
+    if spec.get("show_allowed"):
+        message += f"; allowed: {', '.join(spec['enum'])}"
+    return message
+
+
 def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
     if "enum" in spec:
         if not isinstance(value, str) or value not in spec["enum"]:
-            _fail(f"bad-type:{path}")
+            _fail(_field_error("bad-type", path, spec))
         return
     field_type = spec["type"]
     if field_type == "string":
@@ -811,7 +818,8 @@ def _check_object(
     missing = set(required) - actual
     if missing:
         key = sorted(missing)[0]
-        _fail(f"missing-key:{path}.{key}" if path else f"missing-key:{key}")
+        field_path = f"{path}.{key}" if path else key
+        _fail(_field_error("missing-key", field_path, required[key]))
     for key, spec in required.items():
         _check_field(obj[key], spec, f"{path}.{key}" if path else key)
     for key, spec in optional.items():

@@ -3,11 +3,13 @@
 ```text
 ledger [--db PATH] [--json] <verb> [verb flags]
 python3 -m ledger [--db PATH] [--json] <verb> [verb flags]
+ledger --version
 ```
 
 `--db` and `--json` may appear before or after the verb. `--db` overrides
 `LEDGER_DB`; one of them is required. `ledger <verb> --help` is the
-authoritative flag list; this page summarises it.
+authoritative flag list; this page summarises it. `--version` needs no
+verb or database and prints `ledger <version>`.
 
 ## Output
 
@@ -17,7 +19,7 @@ JSON object on stdout:
 
 ```json
 {"data": {...}, "error": null, "ok": true}
-{"data": null, "error": {"code": "missing_harness", "message": "LEDGER_HARNESS is required for writes"}, "ok": false}
+{"data": null, "error": {"code": "missing_harness", "message": "LEDGER_HARNESS is required for writes; set it, e.g. LEDGER_HARNESS=claude-code"}, "ok": false}
 ```
 
 ## Exit codes
@@ -42,7 +44,8 @@ never prints a stack trace.
 | Variable | Meaning |
 |----------|---------|
 | `LEDGER_DB` | database path when `--db` is not given |
-| `LEDGER_HARNESS` | what is writing (a shell, a scheduled job, an agent runtime); every write verb refuses without it |
+| `LEDGER_HARNESS` | what is writing (a shell, a scheduled job, an agent runtime); every write verb refuses without it and suggests `LEDGER_HARNESS=claude-code` |
+| `LEDGER_PROG` | command prefix printed by `resume` and `card`; otherwise a module run uses `python3 -m ledger` and other runs use the basename of `argv[0]` |
 | `LEDGER_OPERATOR` | the person on whose behalf the write happens |
 | `LEDGER_AGENT` | the process writing; the actor is `<operator>/<agent>` when both are set |
 | `LEDGER_MODEL`, `LEDGER_SESSION` | optional attribution stamped on each event |
@@ -379,9 +382,11 @@ for whatever reads it: the ledger records it and enforces nothing.
 **`resume [--item ID] [--brief]`**
 For each open item that has an `item.stopped` event, print the newest stop
 (its point, the skills to invoke next, the files to read) and the commands
-that continue it: `ledger --db PATH resume --item ID` and
-`ledger --db PATH card ID`. With `--item`, show only that item (exit 1 when
-it does not exist). `--brief` first prints the short form of the agent
-contract ([agent-contract.md](agent-contract.md)), so a session-start hook can
-print both. It never writes, and a database that does not exist yet prints
-`no open items` and exits 0.
+that continue it, using the command prefix the person ran. The printed command
+includes `--db PATH` only when this invocation received `--db`; with
+`LEDGER_DB`, it relies on that environment setting. With `--item`, show only
+that item (exit 1 when it does not exist). `--brief` first prints the short
+form of the agent contract ([agent-contract.md](agent-contract.md)), so a
+session-start hook can print both. It never writes. With no items it prints
+`no open items`; when open items exist but none has a stop, it prints
+`N open item(s) with no stop recorded; ledger query lists them`. Both exit 0.

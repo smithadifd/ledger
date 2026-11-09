@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import io
+import importlib.metadata
 import json
 import os
 import sqlite3
@@ -296,9 +297,24 @@ def test_write_refused_without_harness(tmp_path: Path, monkeypatch) -> None:
         env={"LEDGER_HARNESS": None},
     )
     assert code == EXIT_REFUSED
-    assert "LEDGER_HARNESS" in err
+    assert err == (
+        "LEDGER_HARNESS is required for writes; set it, e.g. "
+        "LEDGER_HARNESS=claude-code\n"
+    )
     assert "Traceback" not in err
     assert not Path(db).exists()
+
+
+def test_version_needs_no_database(monkeypatch) -> None:
+    monkeypatch.delenv("LEDGER_DB", raising=False)
+    code, out, err = invoke(monkeypatch, ["--version"])
+    try:
+        version = importlib.metadata.version("ledger")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+    assert code == 0
+    assert out == f"ledger {version}\n"
+    assert err == ""
 
 
 def test_json_error_envelope(tmp_path: Path, monkeypatch) -> None:

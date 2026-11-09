@@ -15,13 +15,21 @@ directory.
 """
 from __future__ import annotations
 
-import shlex
 import unicodedata
 from typing import Any
 
 from ledger.paths import resolve_db_path
 from ledger.store import open_ledger_readonly
-from ledger.verbs import EXIT_NOT_FOUND, CliError, Context, Result, Verb, require_item
+from ledger.verbs import (
+    EXIT_NOT_FOUND,
+    CliError,
+    Context,
+    Result,
+    Verb,
+    invocation_prefix,
+    quote_command_arg,
+    require_item,
+)
 
 NO_OPEN_ITEMS = "no open items"
 
@@ -87,22 +95,11 @@ def _escape(text: str) -> str:
     return "".join(out)
 
 
-def _quote(value: str) -> str:
-    """shlex.quote, except a value with a control character becomes an
-    ANSI-C ``$'...'`` word, which a POSIX-like shell reads as the same value
-    and which stays on one line."""
-    if not any(_is_control(ch) for ch in value):
-        return shlex.quote(value)
-    body = _escape(value.replace("\\", "\\\\").replace("'", "\\'"))
-    return "$'" + body + "'"
-
-
-def _commands(db: str, item_id: str) -> tuple[str, str]:
-    base = f"ledger --db {_quote(db)}"
-    item = _quote(item_id)
+def _commands(item_id: str, prefix: str = "ledger") -> tuple[str, str]:
+    item = quote_command_arg(item_id)
     # ``--item=`` and ``card --`` keep an id that starts with a hyphen a value,
     # not an option, so the printed commands run for every valid id.
-    return f"{base} resume --item={item}", f"{base} card -- {item}"
+    return f"{prefix} resume --item={item}", f"{prefix} card -- {item}"
 
 
 def _stop_row(event) -> dict[str, Any]:
@@ -129,9 +126,13 @@ def _rollup(rows: list[dict[str, Any]], item_id: str) -> dict[str, int] | None:
 
 
 def _entry(
-    db: str, item: dict[str, Any], stop, rollup: dict[str, int] | None = None
+    item: dict[str, Any],
+    stop,
+    rollup: dict[str, int] | None = None,
+    *,
+    prefix: str = "ledger",
 ) -> dict[str, Any]:
-    resume_cmd, card_cmd = _commands(db, item["item_id"])
+    resume_cmd, card_cmd = _commands(item["item_id"], prefix)
     extra = {} if rollup is None else {"children": rollup}
     return {
         **extra,
@@ -169,10 +170,11 @@ def _entry_text(entry: dict[str, Any]) -> str:
 def run(args, ctx: Context) -> Result:
     resolved = resolve_db_path(ctx.db)
     entries: list[dict[str, Any]] = []
+    open_without_stop = 0
     if resolved.exists():
         lg = open_ledger_readonly(resolved)
         try:
-            db = str(lg.path)
+            prefix = invocation_prefix(ctx.program, str(lg.path), ctx.db_explicit)
             # One read transaction: the stops and the items come from the same
             # snapshot, so a writer appending between the two reads cannot make
             # an open item with a stop vanish from the list.
@@ -185,10 +187,10 @@ def run(args, ctx: Context) -> Result:
                     item = require_item(lg, args.item_id)
                     entries.append(
                         _entry(
-                            db,
                             item,
                             stops[-1] if stops else None,
                             _rollup(rows, item["item_id"]),
+                            prefix=prefix,
                         )
                     )
                 else:
@@ -196,14 +198,17 @@ def run(args, ctx: Context) -> Result:
                     for event in lg.events(kind="item.stopped"):
                         newest[event.item_id] = event
                     for row in rows:
-                        if row["status"] == "closed" or row["item_id"] not in newest:
+                        if row["status"] == "closed":
+                            continue
+                        if row["item_id"] not in newest:
+                            open_without_stop += 1
                             continue
                         entries.append(
                             _entry(
-                                db,
                                 row,
                                 newest[row["item_id"]],
                                 _rollup(rows, row["item_id"]),
+                                prefix=prefix,
                             )
                         )
             finally:
@@ -215,7 +220,15 @@ def run(args, ctx: Context) -> Result:
         raise CliError(
             f"item not found: {args.item_id}", code="not_found", exit_code=EXIT_NOT_FOUND
         )
-    body = "\n".join(_entry_text(entry) for entry in entries) if entries else NO_OPEN_ITEMS
+    if entries:
+        body = "\n".join(_entry_text(entry) for entry in entries)
+    elif open_without_stop:
+        body = (
+            f"{open_without_stop} open item(s) with no stop recorded; "
+            "ledger query lists them"
+        )
+    else:
+        body = NO_OPEN_ITEMS
     data: dict[str, Any] = {"items": entries}
     text = body
     if args.brief:

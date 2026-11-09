@@ -382,7 +382,7 @@ def test_json_structured_same_content(tmp_path: Path, monkeypatch) -> None:
     assert data["revision"]["hash"]
     assert data["decisions"][0]["event_id"] == elected.id
     assert data["decisions"][0]["quote_ref"] == 1
-    assert data["footer"] == footer_line(data["item_id"])
+    assert data["footer"] == footer_line(data["item_id"], f"ledger --db {db}")
     assert f"revision: {data['revision']['id']} {data['revision']['hash']}" in text_out
     assert data["next_step"] in text_out
     assert f"event={elected.id} quote_ref=1" in text_out
@@ -402,7 +402,7 @@ def test_md_writes_human_copy(tmp_path: Path, monkeypatch) -> None:
     assert dest.exists()
     written = dest.read_text(encoding="utf-8")
     assert written == out
-    assert footer_line("it-1") in written
+    assert footer_line("it-1", f"ledger --db {db}") in written
 
 
 def test_md_refuses_synced_root(tmp_path: Path, monkeypatch) -> None:
@@ -638,7 +638,7 @@ def test_reopened_item_matches_ready_after_blocker_closes(
     assert code == 0, err
     assert "## Blockers\n(none)" in card_out
     assert "Clear blockers" not in card_out
-    assert "Resume with: ledger resume --item=C" in card_out
+    assert f"Resume with: ledger --db {db} resume --item=C" in card_out
 
 
 def test_reopen_clears_blockers_while_blocker_still_open(tmp_path: Path) -> None:
@@ -726,7 +726,7 @@ def test_md_overwrites_existing_via_replace(tmp_path: Path, monkeypatch) -> None
     written = dest.read_text(encoding="utf-8")
     assert written == out
     assert written != "stale\n"
-    assert footer_line("it-1") in written
+    assert footer_line("it-1", f"ledger --db {db}") in written
     assert replaced
     src, dst = replaced[0]
     assert dst.resolve() == dest.resolve()
@@ -775,7 +775,7 @@ def test_blocks_link_direction_matches_ready(tmp_path: Path, monkeypatch) -> Non
     assert code == 0, err
     assert "## Blockers\n(none)" in out_a
     assert "Clear blockers" not in out_a
-    assert "Resume with: ledger resume --item=blk-a" in out_a
+    assert f"Resume with: ledger --db {db} resume --item=blk-a" in out_a
     code, out_b, err = invoke(monkeypatch, ["--db", db, "card", "blk-b"])
     assert code == 0, err
     assert "## Blockers\n- blk-a" in out_b
@@ -791,7 +791,7 @@ def test_blocks_link_direction_matches_ready(tmp_path: Path, monkeypatch) -> Non
     assert code == 0, err
     assert "## Blockers\n(none)" in out_b
     assert "Clear blockers" not in out_b
-    assert "Resume with: ledger resume --item=blk-b" in out_b
+    assert f"Resume with: ledger --db {db} resume --item=blk-b" in out_b
 
 
 def test_blocker_flood_next_step_bounded(tmp_path: Path) -> None:
@@ -1082,7 +1082,10 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
     assert data["decisions"][0]["event_id"] == elected.id
     assert data["next_step"] == "Answer open questions before continuing."
     assert data["truncated"] == ["ask"]
-    assert data["open_questions"][0]["omitted_words"] == {"ask": cut}
+    cli_row = data["open_questions"][0]
+    cli_cut = cli_row["omitted_words"]["ask"]
+    assert len(cli_row["ask"].split()) + cli_cut == 600
+    assert cli_cut >= cut
     assert "a599" not in data["open_questions"][0]["ask"]
 
 

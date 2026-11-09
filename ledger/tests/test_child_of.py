@@ -520,7 +520,7 @@ def test_a_capped_children_section_names_a_command_that_prints_every_child(
     shown = [line for line in lines if line.startswith("- ")]
     assert 0 < len(shown) < len(kids)
     command = shlex.split(marker[marker.index("; ") + 2 : -1])
-    assert command[:2] == ["ledger", "query"]
+    assert command[:4] == ["ledger", "--db", db, "query"]
     assert not any(part.startswith("--limit") for part in command), command
     # A child linked after the card was drawn is still listed.
     late = "it-kid-late"
@@ -530,7 +530,7 @@ def test_a_capped_children_section_names_a_command_that_prints_every_child(
     )
     assert code == 0, err
     assert _child_of(monkeypatch, db, late, "it-anchor")[0] == 0
-    code, out, err = invoke(monkeypatch, ["--db", db, *command[1:]])
+    code, out, err = invoke(monkeypatch, command[1:])
     assert code == 0, err
     assert sorted(line.split("\t")[0] for line in out.splitlines()) == sorted(
         [*kids, late]
