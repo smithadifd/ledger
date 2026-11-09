@@ -23,7 +23,7 @@ pipx --version
 ```
 
 If that prints "command not found", install it by the steps at
-https://pipx.pypa.io/stable/installation/, then run `pipx ensurepath` and open
+https://pipx.pypa.io/stable/how-to/install-pipx.html, then run `pipx ensurepath` and open
 a new terminal. Do not use a bare `pip install` for this: current macOS and
 Homebrew Python refuse it (PEP 668, `externally-managed-environment`).
 

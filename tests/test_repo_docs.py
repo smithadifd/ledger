@@ -156,7 +156,11 @@ def test_install_and_upgrade_use_pipx_never_a_bare_pip() -> None:
         flat = _flat(page)
         assert tag_install in flat, page.name
         for line in page.read_text(encoding="utf-8").splitlines():
-            assert not re.match(r"\s*(python3? -m )?pip install", line), (page.name, line)
+            # Allowed: the virtual environment's own pip, and the sentence that
+            # tells the reader not to run a bare `pip install`; nothing else.
+            line = re.sub(r"\.venv/bin/python -m pip install", "", line)
+            line = re.sub(r"Do not (?:run|use) a bare `pip install`", "", line)
+            assert not re.search(r"\bpip3?\s+install\b", line), (page.name, line)
     readme = README.read_text(encoding="utf-8")
     assert "python3 -m venv" in _squash(readme)
     upgrade = _squash(readme.split("\n## Upgrade", 1)[1].split("\n## ", 1)[0])
@@ -186,6 +190,16 @@ def test_every_page_spells_the_database_home_as_paths_py_does() -> None:
             assert token == SUPPORTED_LOCATION or token.startswith(
                 SUPPORTED_LOCATION + "/"
             ), f"{page.name} spells the database home {token!r}"
+
+
+def test_start_here_export_line_points_under_the_database_home() -> None:
+    exports = re.findall(r"^\s*export LEDGER_DB=(\S+)\s*$", START.read_text(encoding="utf-8"), re.M)
+    assert exports, "docs/start-here.md has no `export LEDGER_DB=` line"
+    for value in exports:
+        assert value.startswith(SUPPORTED_LOCATION + "/"), (
+            f"start-here's export line points at {value!r}, not under {SUPPORTED_LOCATION}/"
+        )
+        assert value.endswith(".db"), f"start-here's export line {value!r} does not end in .db"
 
 
 def test_start_here_exists_and_the_readme_links_it_from_the_top() -> None:
