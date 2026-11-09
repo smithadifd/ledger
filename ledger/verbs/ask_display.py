@@ -17,8 +17,10 @@ The seat pastes this input as its AskUserQuestion call and never composes
 the picker itself: a gate counts the owner's answer only when the harness
 captured exactly this display (``ledger.answers``). An ask with no scope,
 with fewer than two or more than four options, with two options sharing a
-label, or whose ``ask K`` header would be longer than 12 characters is
-refused with ``ask_not_pickable``.
+label, whose ``ask K`` header would be longer than 12 characters, or whose
+displayed text (question id, scope, an option label or description, the
+question) holds a control character (C0, DEL or C1; a newline is allowed in
+the question only) is refused with ``ask_not_pickable``, naming the field.
 
 Text output is the input object as indented JSON, then one line
 ``display_sha256 <hex>``. ``--json`` carries ``{asked_event_id, item_id,
