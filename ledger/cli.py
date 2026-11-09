@@ -12,7 +12,6 @@ import argparse
 import importlib.metadata
 import json
 import os
-import shlex
 import sqlite3
 import sys
 from pathlib import Path
@@ -44,6 +43,7 @@ from ledger.verbs import (
     Verb,
     compose_actor,
     discover_verbs,
+    quote_command_arg,
 )
 
 
@@ -76,7 +76,7 @@ def _program_name() -> str:
             if started.parent.name == "ledger":
                 return "python3 -m ledger"
             return "ledger"
-        return shlex.quote(started.name or "ledger")
+        return quote_command_arg(started.name or "ledger")
     except (OSError, TypeError, ValueError):
         return "ledger"
 

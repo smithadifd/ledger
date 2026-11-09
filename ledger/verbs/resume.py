@@ -15,7 +15,6 @@ directory.
 """
 from __future__ import annotations
 
-import shlex
 import unicodedata
 from typing import Any
 
@@ -28,6 +27,7 @@ from ledger.verbs import (
     Result,
     Verb,
     invocation_prefix,
+    quote_command_arg,
     require_item,
 )
 
@@ -95,18 +95,8 @@ def _escape(text: str) -> str:
     return "".join(out)
 
 
-def _quote(value: str) -> str:
-    """shlex.quote, except a value with a control character becomes an
-    ANSI-C ``$'...'`` word, which a POSIX-like shell reads as the same value
-    and which stays on one line."""
-    if not any(_is_control(ch) for ch in value):
-        return shlex.quote(value)
-    body = _escape(value.replace("\\", "\\\\").replace("'", "\\'"))
-    return "$'" + body + "'"
-
-
 def _commands(item_id: str, prefix: str = "ledger") -> tuple[str, str]:
-    item = _quote(item_id)
+    item = quote_command_arg(item_id)
     # ``--item=`` and ``card --`` keep an id that starts with a hyphen a value,
     # not an option, so the printed commands run for every valid id.
     return f"{prefix} resume --item={item}", f"{prefix} card -- {item}"

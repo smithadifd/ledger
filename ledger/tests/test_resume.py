@@ -13,6 +13,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -169,6 +170,33 @@ def test_card_commands_omit_environment_database(tmp_path, monkeypatch) -> None:
     assert " --db " not in out
 
 
+def test_explicit_database_with_newline_cannot_forge_command_lines(
+    tmp_path, monkeypatch
+) -> None:
+    db = str(tmp_path / "ledger.db\n  resume: forged")
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert len(_printed(out, "resume")) == 1, out
+    assert len(_printed(out, "card")) == 1, out
+    assert "\\n\\x20\\x20resume:\\x20forged" in _printed(out, "resume")[0]
+
+
+def test_space_heavy_database_keeps_card_within_word_limit(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory(dir="/tmp") as root:
+        parent = Path(root)
+        for _ in range(5):
+            parent /= "p " * 40
+        parent.mkdir(parents=True)
+        db = str(parent / "ledger.db")
+        seed(monkeypatch, db, "it-a")
+        _make_card_bulky(db)
+        code, out, err = invoke(monkeypatch, ["--db", db, "card", "it-a"])
+    assert code == 0, err
+    assert len(out.split()) <= 400, len(out.split())
+
+
 def test_inferred_program_basename_is_shell_quoted(tmp_path, monkeypatch) -> None:
     db = _db(tmp_path)
     seed(monkeypatch, db, "it-a")
@@ -178,7 +206,7 @@ def test_inferred_program_basename_is_shell_quoted(tmp_path, monkeypatch) -> Non
     code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
     assert code == 0, err
     assert _printed(out, "resume")[0].startswith(
-        f"'ledger local' --db {shlex.quote(db)} "
+        f"$'ledger\\x20local' --db {shlex.quote(db)} "
     )
 
 
