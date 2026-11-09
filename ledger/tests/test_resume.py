@@ -260,6 +260,46 @@ def test_space_heavy_database_keeps_card_within_word_limit(tmp_path, monkeypatch
     assert tokens[tokens.index("--db") + 1] == db
 
 
+def test_note_repeating_the_program_prefix_counts_as_ordinary_words(tmp_path, monkeypatch) -> None:
+    # A program with a space prints as one quoted shell word. Only the commands
+    # the card generates count the prefix as one word; the same text inside a
+    # note is ordinary words, so the card is clipped by what it really holds.
+    db = _db(tmp_path)
+    prefix = "'two words'"
+    seed(monkeypatch, db, "it-a")
+    lg = open_ledger(db)
+    try:
+        for index in range(2):
+            lg.append(
+                kind="item.note",
+                payload={"text": f"note-{index} " + (prefix + " ") * 100},
+                item_id="it-a",
+                idempotency_key=f"note-{index}",
+                harness="pytest",
+            )
+    finally:
+        lg.close()
+    monkeypatch.setenv("LEDGER_DB", db)
+    code, out, err = invoke(monkeypatch, ["card", "it-a"], env={"LEDGER_PROG": prefix})
+    assert code == 0, err
+    # The notes hold about 400 words as written (over the bound), but only
+    # about 200 if each copy of the prefix counted as one word. They are
+    # dropped, as the bound requires.
+    assert "dropped: notes" in out, out
+    assert "note-0" not in out and "note-1" not in out, out
+    # Every prefix in the card is in a command it printed, or in a note row.
+    # A generated one saves one word (two plain words, one shell word); a
+    # copy inside a note saves none.
+    note_copies = sum(line.count(prefix) for line in out.splitlines() if line.startswith("- event="))
+    generated = out.count(prefix) - note_copies
+    assert generated >= 2, out
+    saved = generated * (len(prefix.split()) - 1)
+    plain = len(out.split())
+    assert plain - saved <= WORD_LIMIT, (plain, saved)
+    assert plain <= WORD_LIMIT + saved, (plain, saved)
+    assert word_count(out, command_prefix=prefix) <= WORD_LIMIT
+
+
 @pytest.mark.parametrize(
     "form",
     [
