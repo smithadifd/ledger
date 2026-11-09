@@ -1037,7 +1037,11 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
     elected = _colour_election(lg, "dc-1")
     asked = _full_ask(lg, ask=_words("a", 600))
     lg.close()
-    card = project_card(open_ledger(db), "dc-1")
+    reader = open_ledger(db)
+    try:
+        card = project_card(reader, "dc-1")
+    finally:
+        reader.close()
     text = format_card(card)
     # Exact: the cut pays for its own marker and the Truncated line.
     assert word_count(text) == WORD_LIMIT
@@ -1102,7 +1106,11 @@ def test_huge_option_description_is_shortened(tmp_path: Path, monkeypatch) -> No
         "ask-1",
     )
     lg.close()
-    card = project_card(open_ledger(db), "dc-1")
+    reader = open_ledger(db)
+    try:
+        card = project_card(reader, "dc-1")
+    finally:
+        reader.close()
     text = format_card(card)
     assert word_count(text) <= WORD_LIMIT
     assert card.truncated == ("ask",)

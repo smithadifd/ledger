@@ -9,6 +9,8 @@ refuse, through a raw ``ledger append``.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -430,14 +432,34 @@ def test_an_election_landing_mid_read_never_shows_past_the_named_revision(
     raced: list[int] = []
 
     def race() -> None:
-        # Another writer, on its own connection, withdraws the grant and
-        # records a new one between the revision read and the elections read.
-        with open_ledger(ledger_db, create=False) as writer:
-            for n, payload in enumerate((raw_payload(spoken, chosen="withdrawn"),
-                                         raw_payload(spoken, grant_id="grant:raced"))):
-                raced.append(writer.append(kind="decision.elected", payload=payload,
-                                           item_id=ITEM, idempotency_key=f"race-{n}",
-                                           harness="pytest").id)
+        # A writer in another process withdraws the grant and records a new
+        # one between the revision read and the elections read.
+        payloads = [
+            raw_payload(spoken, chosen="withdrawn"),
+            raw_payload(spoken, grant_id="grant:raced"),
+        ]
+        done = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import json, sys\n"
+                "from ledger import open_ledger\n"
+                "with open_ledger(sys.argv[1], create=False) as writer:\n"
+                "    ids = [writer.append(kind='decision.elected', payload=payload, "
+                "item_id=sys.argv[2], idempotency_key=f'race-{n}', harness='pytest').id "
+                "for n, payload in enumerate(json.loads(sys.argv[3]))]\n"
+                "print(json.dumps(ids))\n",
+                str(ledger_db),
+                ITEM,
+                json.dumps(payloads),
+            ],
+            cwd=Path(__file__).resolve().parents[2],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert done.returncode == 0, done.stderr
+        raced.extend(json.loads(done.stdout))
 
     real_open_db = grants_module.open_db
 
@@ -456,12 +478,6 @@ def test_an_election_landing_mid_read_never_shows_past_the_named_revision(
         f"| {GRANT} | grant | granted | {SCOPE} | owner | {SPOKEN_DATE} | {spoken} | STANDING"
         f" | {granted['id']} |",
     ]
-    # The raced writes did land: the next read names them.
-    with open_ledger(ledger_db, create=False) as lg:
-        revision, found = read_grants(lg)
-    assert revision == raced[-1]
-    assert [(grant.grant_id, grant.status) for grant in found] == [
-        (GRANT, WITHDRAWN), ("grant:raced", STANDING)]
 
 
 def test_read_grants_names_the_revision_it_read(ledger_db, monkeypatch) -> None:

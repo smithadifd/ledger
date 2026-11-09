@@ -4,6 +4,8 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+import subprocess
+import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -322,7 +324,7 @@ def test_unparseable_revision_is_a_usage_error(monkeypatch, db: str, bad: str) -
 def test_query_revision_matches_state_under_concurrent_append(
     monkeypatch, db: str
 ) -> None:
-    from ledger.store import Ledger, open_ledger
+    from ledger.store import Ledger
 
     fired = []
 
@@ -333,18 +335,24 @@ def test_query_revision_matches_state_under_concurrent_append(
             result = original(self, *args, **kwargs)
             if not fired:
                 fired.append(name)
-                other = open_ledger(db)
-                try:
-                    other.append(
-                        kind="item.state",
-                        payload={"status": "blocked"},
-                        item_id="it-1",
-                        idempotency_key="interleaved",
-                        actor="writer-b",
-                        harness="pytest",
-                    )
-                finally:
-                    other.close()
+                done = subprocess.run(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys\n"
+                        "from ledger import open_ledger\n"
+                        "with open_ledger(sys.argv[1], create=False) as other:\n"
+                        "    other.append(kind='item.state', payload={'status': 'blocked'}, "
+                        "item_id='it-1', idempotency_key='interleaved', actor='writer-b', "
+                        "harness='pytest')\n",
+                        db,
+                    ],
+                    cwd=Path(__file__).resolve().parents[2],
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                assert done.returncode == 0, done.stderr
             return result
 
         monkeypatch.setattr(Ledger, name, wrapper)
@@ -357,8 +365,6 @@ def test_query_revision_matches_state_under_concurrent_append(
     assert code == 0, err
     assert fired
     item = json.loads(out)["data"]["items"][0]
-    # One snapshot: either the old state with the old revision, or the new
-    # state with the new revision; never a mix.
     assert (item["status"], item["revision"]) in {("open", 1), ("blocked", 2)}
 
 

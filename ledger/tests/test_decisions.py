@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
@@ -20,6 +21,7 @@ from ledger import (
     Ledger,
     LedgerError,
     SharedDatabaseError,
+    UnsafeDatabaseFile,
     claim_database,
     open_ledger,
     resolve_system_paths,
@@ -278,13 +280,17 @@ def test_guard_holds_for_batch_and_cli_writers(ledger, ticket, tmp_path, monkeyp
             "idempotency_key": "batch-settle",
         }])
     db = str(ledger.path)
-    code, _out, err = invoke(monkeypatch, [
+    argv = [
         "--db", db, "append", "--kind", "decision.standing", "--item", ITEM,
         "--payload", json.dumps({"decision_event_id": decision, "standing": "settled"}),
-    ])
+    ]
+    code, _out, err = invoke(monkeypatch, argv)
+    assert code == 3 and "db_fd_unknown" in err
+    assert _record(ledger, decision)["standing"] == "lean"
+    ledger.close()
+    code, _out, err = invoke(monkeypatch, argv)
     assert code == 3, err
     assert "settled-needs-source-event" in err
-    assert _record(ledger, decision)["standing"] == "lean"
 
 
 def test_superseded_needs_a_decision_link_and_is_final(ledger, ticket) -> None:
@@ -637,8 +643,12 @@ def test_cli_card_runs_the_sidecar_named_in_the_environment(ledger, ticket, tmp_
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     db = str(ledger.path)
-    code, out, err = invoke(monkeypatch, ["--db", db, "card", ITEM],
-                            env={"LEDGER_POINTER_SIDECAR": str(script)})
+    argv = ["--db", db, "card", ITEM]
+    env = {"LEDGER_POINTER_SIDECAR": str(script)}
+    code, _out, err = invoke(monkeypatch, argv, env=env)
+    assert code == 3 and "db_fd_unknown" in err
+    ledger.close()
+    code, out, err = invoke(monkeypatch, argv, env=env)
     assert code == 0, err
     assert "- transcripts/x.jsonl:7: item TK-100" in out
     code, out, err = invoke(monkeypatch, ["--db", db, "card", ITEM])
@@ -761,11 +771,15 @@ def test_picker_writes_both_events_or_neither(ledger, ticket, monkeypatch) -> No
 
 def test_cli_pick_records_utterance_and_election(ledger, ticket, monkeypatch) -> None:
     db = str(ledger.path)
-    code, out, err = invoke(monkeypatch, [
+    argv = [
         "--json", "--db", db, "pick", ITEM, "--question", "Ship it?",
         "--option", "Yes::ship today", "--option", "No", "--chosen", "Yes",
         "--scope", "release",
-    ])
+    ]
+    code, out, err = invoke(monkeypatch, argv)
+    assert code == 3 and json.loads(out)["error"]["code"] == "db_fd_unknown"
+    ledger.close()
+    code, out, err = invoke(monkeypatch, argv)
     assert code == 0, err
     data = json.loads(out)["data"]
     assert data["utterance"]["channel"] == TOOL_ANSWER
@@ -778,12 +792,16 @@ def test_cli_pick_records_utterance_and_election(ledger, ticket, monkeypatch) ->
 
 def test_cli_decisions_and_export_item(ledger, ticket, monkeypatch) -> None:
     db = str(ledger.path)
-    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "decisions",
-                                          "--tag", "team:TEAM-A", "--standing", "superseded"])
+    argv = ["--json", "--db", db, "decisions",
+            "--tag", "team:TEAM-A", "--standing", "superseded"]
+    code, out, err = invoke(monkeypatch, argv)
+    assert code == 3 and json.loads(out)["error"]["code"] == "db_fd_unknown"
+    _close(ledger)
+    ledger.close()
+    code, out, err = invoke(monkeypatch, argv)
     assert code == 0, err
     rows = json.loads(out)["data"]["decisions"]
     assert [row["decision_event_id"] for row in rows] == [ticket["naming"]]
-    _close(ledger)
     code, out, err = invoke(monkeypatch, ["--json", "--db", db, "export-item", ITEM])
     assert code == 0, err
     kinds = {record["kind"] for record in json.loads(out)["data"]["events"]}
@@ -835,9 +853,10 @@ def test_hard_link_to_a_claimed_database_is_refused(tmp_path: Path) -> None:
     linked = tmp_path / "home" / "ledger.db"
     linked.parent.mkdir()
     os.link(db, linked)
-    with pytest.raises(SharedDatabaseError, match="'work' and 'home' share one database"):
+    with pytest.raises(UnsafeDatabaseFile, match=r"^db_hardlinked:"):
         claim_database(linked, "home")
-    assert _claims(linked) == [{"system": "work"}]
+    linked.unlink()
+    assert _claims(db) == [{"system": "work"}]
 
 
 def test_database_named_like_a_stamp_is_its_own_database(tmp_path: Path) -> None:
@@ -1131,18 +1150,37 @@ def test_busy_claim_checkpoint_is_reported(tmp_path: Path) -> None:
     with open_ledger(db) as lg:
         lg.append(kind="item.created", payload={"type": "ticket", "title": "t"},
                   item_id="W-1", idempotency_key="w1")
-    # A real second connection holding a read transaction keeps the
-    # checkpoint from truncating the WAL.
-    reader = sqlite3.connect(str(db), isolation_level=None)
+    # A reader in another process holding a transaction keeps the
+    # checkpoint from truncating the WAL without sharing SQLite descriptors.
+    reader = """
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1], isolation_level=None)
+conn.execute("BEGIN")
+conn.execute("SELECT count(*) FROM events").fetchone()
+print("held", flush=True)
+sys.stdin.readline()
+conn.close()
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", reader, str(db)],
+        cwd=Path(__file__).resolve().parents[2],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == "held"
     try:
-        reader.execute("BEGIN")
-        reader.execute("SELECT count(*) FROM events").fetchone()
         with pytest.raises(SharedDatabaseError, match=r"checkpoint of .* is busy"):
             claim_database(db, "work")
     finally:
-        reader.close()
+        assert proc.stdin is not None
+        proc.stdin.write("\n")
+        proc.stdin.flush()
+        _out, err = proc.communicate(timeout=30)
+        assert proc.returncode == 0, err
     assert _claims(db) == [{"system": "work"}]
-    claim_database(db, "work")
 
 
 def test_claim_through_a_hard_link_with_unsaved_frames_is_refused(tmp_path: Path) -> None:
@@ -1150,11 +1188,11 @@ def test_claim_through_a_hard_link_with_unsaved_frames_is_refused(tmp_path: Path
     claim_database(db, "work")
     linked = tmp_path / "home" / "ledger.db"
     linked.parent.mkdir()
-    os.link(db, linked)
     with open_ledger(db) as holder:
         holder.append(kind="item.created", payload={"type": "ticket", "title": "pending"},
                       item_id="W-1", idempotency_key="w1")
-        with pytest.raises(SharedDatabaseError):
+        os.link(db, linked)
+        with pytest.raises(UnsafeDatabaseFile, match=r"^db_hardlinked:"):
             claim_database(linked, "home")
 
 

@@ -29,6 +29,14 @@ def test_short_form_names_every_trigger_on_the_page() -> None:
         assert trigger.lower() in lowered, f"short form lacks write trigger: {trigger}"
 
 
+def test_concepts_state_the_database_first_creation_window() -> None:
+    text = (ROOT / "docs" / "concepts.md").read_text(encoding="utf-8")
+    section = text.split("## Opening the database file", 1)[1].split("\n## ", 1)[0]
+    prose = " ".join(section.split())
+    assert "opens or creates those side files by name" in prose
+    assert "read-only open of a database path swapped to a FIFO" in prose
+
+
 def test_readme_and_contract_page_never_say_pick_up() -> None:
     for path in (ROOT / "README.md", PAGE):
         assert "pick up" not in path.read_text(encoding="utf-8").lower(), path
