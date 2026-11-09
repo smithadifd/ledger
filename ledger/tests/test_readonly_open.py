@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from ledger import UnsafeDatabaseFile, guidance, open_ledger, store
+from ledger import guidance, open_ledger, store
 from ledger.store import open_ledger_readonly
 
 SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
@@ -112,25 +112,24 @@ def test_read_only_dir_open_with_a_live_writer_in_a_writable_dir_reads_wal_conte
         writer.close()
 
 
-def test_read_and_write_reopens_refuse_reused_descriptor_while_writer_is_open(at_rest):
+def test_read_and_write_reopens_are_accepted_while_writer_is_open(at_rest):
+    # SQLite may reuse the descriptor the open writer's file already has; the
+    # guard asks SQLite which descriptor each reopen holds, so reuse is accepted.
     writer = _seed(at_rest, "third", "T3")  # committed, still in the -wal, writer open
     expected = [("T1", "first"), ("T2", "second"), ("T3", "third")]
     try:
         assert (at_rest.parent / f"{at_rest.name}-wal").stat().st_size > 0
-        with open_ledger_readonly(at_rest) as reader:
-            assert _titles(reader) == expected
-        writer.append(kind="item.created", item_id="T4",
-                      payload={"type": "ticket", "title": "fourth"},
-                      idempotency_key="k-T4", harness="fixture")
-        expected.append(("T4", "fourth"))
-        for opener in (open_ledger_readonly, open_ledger):
-            with pytest.raises(UnsafeDatabaseFile, match=r"^db_fd_unknown:"):
-                opener(at_rest)
+        for round_number in range(3):
+            key = f"T{4 + round_number}"
+            writer.append(kind="item.created", item_id=key,
+                          payload={"type": "ticket", "title": f"round {round_number}"},
+                          idempotency_key=f"k-{key}", harness="fixture")
+            expected.append((key, f"round {round_number}"))
+            for opener in (open_ledger_readonly, open_ledger):
+                with opener(at_rest) as reopened:
+                    assert _titles(reopened) == sorted(expected), opener.__name__
     finally:
         writer.close()
-    for opener in (open_ledger_readonly, open_ledger):
-        with opener(at_rest) as reopened:
-            assert _titles(reopened) == expected
 
 
 @pytest.mark.parametrize("leftover, message", [
