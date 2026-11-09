@@ -97,8 +97,12 @@ def _quote(value: str) -> str:
     return "$'" + body + "'"
 
 
-def _commands(db: str, item_id: str) -> tuple[str, str]:
-    base = f"ledger --db {_quote(db)}"
+def _commands(
+    db: str, item_id: str, program: str = "ledger", db_explicit: bool = True
+) -> tuple[str, str]:
+    base = program
+    if db_explicit:
+        base += f" --db {_quote(db)}"
     item = _quote(item_id)
     # ``--item=`` and ``card --`` keep an id that starts with a hyphen a value,
     # not an option, so the printed commands run for every valid id.
@@ -129,9 +133,15 @@ def _rollup(rows: list[dict[str, Any]], item_id: str) -> dict[str, int] | None:
 
 
 def _entry(
-    db: str, item: dict[str, Any], stop, rollup: dict[str, int] | None = None
+    db: str,
+    item: dict[str, Any],
+    stop,
+    rollup: dict[str, int] | None = None,
+    *,
+    program: str = "ledger",
+    db_explicit: bool = True,
 ) -> dict[str, Any]:
-    resume_cmd, card_cmd = _commands(db, item["item_id"])
+    resume_cmd, card_cmd = _commands(db, item["item_id"], program, db_explicit)
     extra = {} if rollup is None else {"children": rollup}
     return {
         **extra,
@@ -169,6 +179,7 @@ def _entry_text(entry: dict[str, Any]) -> str:
 def run(args, ctx: Context) -> Result:
     resolved = resolve_db_path(ctx.db)
     entries: list[dict[str, Any]] = []
+    open_without_stop = 0
     if resolved.exists():
         lg = open_ledger_readonly(resolved)
         try:
@@ -189,6 +200,8 @@ def run(args, ctx: Context) -> Result:
                             item,
                             stops[-1] if stops else None,
                             _rollup(rows, item["item_id"]),
+                            program=ctx.program,
+                            db_explicit=ctx.db_explicit,
                         )
                     )
                 else:
@@ -196,7 +209,10 @@ def run(args, ctx: Context) -> Result:
                     for event in lg.events(kind="item.stopped"):
                         newest[event.item_id] = event
                     for row in rows:
-                        if row["status"] == "closed" or row["item_id"] not in newest:
+                        if row["status"] == "closed":
+                            continue
+                        if row["item_id"] not in newest:
+                            open_without_stop += 1
                             continue
                         entries.append(
                             _entry(
@@ -204,6 +220,8 @@ def run(args, ctx: Context) -> Result:
                                 row,
                                 newest[row["item_id"]],
                                 _rollup(rows, row["item_id"]),
+                                program=ctx.program,
+                                db_explicit=ctx.db_explicit,
                             )
                         )
             finally:
@@ -215,7 +233,15 @@ def run(args, ctx: Context) -> Result:
         raise CliError(
             f"item not found: {args.item_id}", code="not_found", exit_code=EXIT_NOT_FOUND
         )
-    body = "\n".join(_entry_text(entry) for entry in entries) if entries else NO_OPEN_ITEMS
+    if entries:
+        body = "\n".join(_entry_text(entry) for entry in entries)
+    elif open_without_stop:
+        body = (
+            f"{open_without_stop} open item(s) with no stop recorded; "
+            "ledger query lists them"
+        )
+    else:
+        body = NO_OPEN_ITEMS
     data: dict[str, Any] = {"items": entries}
     text = body
     if args.brief:

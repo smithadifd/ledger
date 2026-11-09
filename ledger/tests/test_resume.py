@@ -57,6 +57,80 @@ def _run_printed(command: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_open_items_without_stops_are_counted(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    seed(monkeypatch, db, "it-b")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert out == "2 open item(s) with no stop recorded; ledger query lists them\n"
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
+    assert code == 0, err
+    assert out.endswith("2 open item(s) with no stop recorded; ledger query lists them\n")
+
+
+def test_no_items_still_says_no_open_items(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert out == "no open items\n"
+
+
+def test_resume_commands_use_program_name_and_only_explicit_db(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    monkeypatch.setenv("LEDGER_DB", db)
+    monkeypatch.setenv("LEDGER_PROG", "custom-ledger")
+    code, out, err = invoke(monkeypatch, ["resume"])
+    assert code == 0, err
+    assert _printed(out, "resume") == ["custom-ledger resume --item=it-a"]
+    assert _printed(out, "card") == ["custom-ledger card -- it-a"]
+
+
+def test_resume_commands_use_plain_argv_zero(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop")
+    monkeypatch.delenv("LEDGER_PROG", raising=False)
+    monkeypatch.setattr(sys, "argv", ["/opt/tools/ledger-local"])
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert _printed(out, "resume")[0].startswith(f"ledger-local --db {shlex.quote(db)} ")
+
+
+def test_module_run_prints_module_program(tmp_path) -> None:
+    db = _db(tmp_path)
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
+    env.update(LEDGER_DB=db, LEDGER_HARNESS="pytest", PYTHONPATH=str(PKG_PARENT))
+    created = subprocess.run(
+        [sys.executable, "-m", "ledger", "new", "--id", "it-a", "--type", "ticket", "--title", "A"],
+        cwd=PKG_PARENT, capture_output=True, text=True, env=env, check=False,
+    )
+    assert created.returncode == 0, created.stderr
+    stopped = subprocess.run(
+        [sys.executable, "-m", "ledger", "append", "--item", "it-a", "--kind", "item.stopped", "--payload", '{"point":"p","phase":"build"}'],
+        cwd=PKG_PARENT, capture_output=True, text=True, env=env, check=False,
+    )
+    assert stopped.returncode == 0, stopped.stderr
+    resumed = subprocess.run(
+        [sys.executable, "-m", "ledger", "resume"],
+        cwd=PKG_PARENT, capture_output=True, text=True, env=env, check=False,
+    )
+    assert resumed.returncode == 0, resumed.stderr
+    assert "  resume: python3 -m ledger resume --item=it-a" in resumed.stdout
+
+
+def test_card_uses_program_name(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    code, out, err = invoke(
+        monkeypatch, ["--db", db, "card", "it-a"], env={"LEDGER_PROG": "custom-ledger"}
+    )
+    assert code == 0, err
+    assert "Resume with: custom-ledger resume --item=it-a" in out
+
+
 def test_two_stopped_items_print_two_runnable_resume_lines(tmp_path, monkeypatch) -> None:
     db = _db(tmp_path)
     for item in ("it-a", "it-b", "it-nostop", "it-closed"):

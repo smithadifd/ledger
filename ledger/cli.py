@@ -9,6 +9,7 @@ revision (``--expect-revision`` no longer matches the item's newest event).
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import sqlite3
@@ -57,6 +58,32 @@ def _env(name: str) -> str | None:
     return value
 
 
+def _package_version() -> str:
+    try:
+        return importlib.metadata.version("ledger")
+    except importlib.metadata.PackageNotFoundError:
+        return "unknown"
+
+
+def _program_name() -> str:
+    configured = _env("LEDGER_PROG")
+    if configured and not any(char in configured for char in "\r\n"):
+        return configured
+    try:
+        started = Path(sys.argv[0])
+        if started.name == "__main__.py":
+            if started.parent.name == "ledger":
+                return "python3 -m ledger"
+            return "ledger"
+        return started.name or "ledger"
+    except (OSError, TypeError, ValueError):
+        return "ledger"
+
+
+def _db_was_explicit(argv: list[str]) -> bool:
+    return any(arg == "--db" or arg.startswith("--db=") for arg in argv)
+
+
 def build_parser(table: dict[str, Verb]) -> LedgerParser:
     parser = LedgerParser(
         prog="ledger",
@@ -67,6 +94,11 @@ def build_parser(table: dict[str, Verb]) -> LedgerParser:
             "the actor is stamped as <operator>/<agent> when both are set. "
             "Global flags --json and --db may appear before or after the verb."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"ledger {_package_version()}",
     )
     parser.add_argument(
         "--json",
@@ -179,10 +211,13 @@ def _run(
         session=_env("LEDGER_SESSION"),
         roadmap_parser=roadmap_parser,
         search_fallback_root=search_fallback_root,
+        program=_program_name(),
+        db_explicit=_db_was_explicit(argv),
     )
     if verb.writes and not ctx.harness:
         raise CliError(
-            "LEDGER_HARNESS is required for writes",
+            "LEDGER_HARNESS is required for writes; set it, e.g. "
+            "LEDGER_HARNESS=claude-code",
             code="missing_harness",
             exit_code=EXIT_REFUSED,
         )

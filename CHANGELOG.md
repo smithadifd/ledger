@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+First-write and first-resume output now names the action a new user needs.
+
+- A write without `LEDGER_HARNESS` suggests `LEDGER_HARNESS=claude-code`, and `item.stopped` phase errors list the allowed phases from the schema.
+- `ledger resume` reports how many open items lack a stop instead of saying there are no open items. Runnable commands from `resume` and `card` preserve `LEDGER_PROG`, `python3 -m ledger`, or the executable basename, and include `--db` only when it was passed.
+- Top-level `--version` prints `ledger <version>` without requiring a database.
+
 An answer opens a gate only when the harness captured it for its ask.
 
 - **`ledger.answers.bound_answer(lg, K)`** is the one reader a gate calls: it returns the first election linked to ask K when that election quotes the harness's picker capture of the owner's answer to K, and otherwise the reason it does not count (`pre_binding`, `typed_answer`, `answer_other_item`, `answer_before_ask`, `answer_unbound`, `answer_other_ask`, `capture_conflict`, `display_fingerprint_bad`, `ask_not_pickable`, `display_differs`, `picker_multi_question`, `picker_typed`, `picker_ambiguous`, `picker_unanswered`, `picker_annotated`, the quote rule's code, `choice_mismatch`, `election_differs`; checked in that order). Every election recorded before this release reads `pre_binding`; nothing is migrated.

@@ -91,6 +91,10 @@ class Context:
     # person (LEDGER_OPERATOR) and the seat (LEDGER_AGENT).
     operator: str | None = None
     agent: str | None = None
+    # Command prefix shown in runnable output, and whether this invocation
+    # supplied --db rather than LEDGER_DB.
+    program: str = "ledger"
+    db_explicit: bool = False
 
 
 ACTOR_SEPARATOR = "/"

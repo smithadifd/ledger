@@ -23,7 +23,9 @@ def run(args, ctx: Context) -> Result:
     lg = open_db(ctx, write=False)
     try:
         require_item(lg, args.item)
-        card = project_card(lg, args.item, pointers=sidecar_from_env())
+        card = project_card(
+            lg, args.item, pointers=sidecar_from_env(), program=ctx.program
+        )
         text = format_card(card)
         data = card.as_dict()
     finally:

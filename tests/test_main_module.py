@@ -55,4 +55,7 @@ def test_exit_code_passes_through(tmp_path: Path) -> None:
         "--db", str(tmp_path / "ledger.db"), "note", "it-1", "--text", "x", env=_env()
     )
     assert result.returncode == 3, result.stderr
-    assert result.stderr.strip() == "LEDGER_HARNESS is required for writes"
+    assert result.stderr.strip() == (
+        "LEDGER_HARNESS is required for writes; set it, e.g. "
+        "LEDGER_HARNESS=claude-code"
+    )

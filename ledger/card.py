@@ -217,6 +217,7 @@ def derive_next_step(
     item_type: str = "",
     chosen: str | None = None,
     item_id: str = "",
+    program: str = "ledger",
 ) -> str:
     """Project a next step from current status, blockers, and open questions.
 
@@ -270,7 +271,7 @@ def derive_next_step(
     if status == "blocked":
         return "Clear blockers."
     return claimed or (
-        f"Resume with: {shlex.join(['ledger', 'resume', f'--item={item_id}'])}".rstrip()
+        f"Resume with: {program} {shlex.join(['resume', f'--item={item_id}'])}".rstrip()
     )
 
 
@@ -314,6 +315,8 @@ class Card:
     children: tuple[dict[str, Any], ...] = ()
     children_closed: int = 0
     children_total: int = 0
+    # Invocation prefix used only to preserve runnable commands while bounding.
+    program: str = "ledger"
 
     def as_dict(self) -> dict[str, Any]:
         """Structured form of the same content the text card shows."""
@@ -971,6 +974,7 @@ def bound_card(card: Card) -> Card:
                 item_type=current.type,
                 chosen=_latest_choice(card.decisions),
                 item_id=current.item_id,
+                program=current.program,
             )
         updated = replace(
             current,
@@ -1283,7 +1287,11 @@ def children_of(
 
 
 def project_item(
-    lg: Ledger, item: Mapping[str, Any], *, pointers: PointerSource | None = None
+    lg: Ledger,
+    item: Mapping[str, Any],
+    *,
+    pointers: PointerSource | None = None,
+    program: str = "ledger",
 ) -> Card:
     """Build an unbounded card from current views and the item's events.
 
@@ -1388,6 +1396,7 @@ def project_item(
         item_type=item["type"],
         chosen=_latest_choice(elected),
         item_id=item_id,
+        program=program,
     )
     base: set[int] = set()
     created_id = item.get("created_event_id")
@@ -1424,6 +1433,7 @@ def project_item(
         spec_claim_version=spec_claim,
         spec_hash=None if spec is None else spec.payload.get("content_hash"),
         spec_claim_hash=spec_content_hash(own_events, spec_claim),
+        program=program,
     )
     # The creation, state and current spec events are always named; past SOURCE_ID_LIMIT
     # the header keeps them, the newest open ask and the latest election,
@@ -1432,12 +1442,16 @@ def project_item(
 
 
 def project_card(
-    lg: Ledger, item_id: str, *, pointers: PointerSource | None = None
+    lg: Ledger,
+    item_id: str,
+    *,
+    pointers: PointerSource | None = None,
+    program: str = "ledger",
 ) -> Card:
     """Project a bounded card for ``item_id``; raise KeyError if missing."""
     for row in lg.items():
         if row["item_id"] == item_id:
-            return bound_card(project_item(lg, row, pointers=pointers))
+            return bound_card(project_item(lg, row, pointers=pointers, program=program))
     raise KeyError(item_id)
 
 

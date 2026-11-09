@@ -123,6 +123,25 @@ def test_valid_payload_appends(tmp_path: Path, kind: str) -> None:
     lg.verify()
 
 
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        ({"point": "waiting"}, "missing-key:phase"),
+        ({"point": "waiting", "phase": 1}, "bad-type:phase"),
+    ],
+)
+def test_stopped_phase_errors_name_allowed_values(tmp_path, payload, reason) -> None:
+    lg = open_ledger(_db(tmp_path))
+    with pytest.raises(ValidationError) as caught:
+        lg.append(
+            kind="item.stopped",
+            payload=payload,
+            idempotency_key=f"k-{reason}",
+            item_id="item-1",
+        )
+    assert str(caught.value) == f"{reason}; allowed: orient, plan, build, review, close"
+
+
 def test_unknown_kind_refused(tmp_path: Path) -> None:
     lg = open_ledger(_db(tmp_path))
     with pytest.raises(ValidationError, match="unknown-kind:item.exploded"):
