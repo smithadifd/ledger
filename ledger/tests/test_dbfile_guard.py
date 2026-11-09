@@ -1313,12 +1313,12 @@ def test_holder_under_a_case_variant_spelling_does_not_change_the_verdict(
             conn = _checked(db, kind)
             try:
                 assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == 1
+                # Compare while the connection is open: the last connection on a
+                # database removes its -shm when it closes.
+                shared = _path_id(Path(f"{variant}-shm")) == _path_id(Path(f"{db}-shm"))
+                assert shared is same_file
             finally:
                 conn.close()
-            if same_file:
-                assert _path_id(Path(f"{variant}-shm")) == _path_id(Path(f"{db}-shm"))
-            else:
-                assert _path_id(Path(f"{variant}-shm")) != _path_id(Path(f"{db}-shm"))
         finally:
             holder.close()
 
