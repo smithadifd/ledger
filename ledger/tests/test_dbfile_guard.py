@@ -1836,34 +1836,147 @@ def test_unix_file_offsets_on_64_bit_are_unchanged() -> None:
     assert native == _layout_with_pointer_width(ctypes.sizeof(ctypes.c_void_p))
 
 
-def test_exit_handler_registered_before_the_first_open_can_open_the_ledger(
+def _run_child(program: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-c", program, *args],
+        cwd=ROOT, text=True, capture_output=True, timeout=120, check=False,
+    )
+
+
+def test_exit_handler_registered_before_the_first_open_is_refused(
     tmp_path: Path,
 ) -> None:
+    # Accepted limit. The capture hook is cancelled through atexit when it is
+    # installed, so SQLite never calls it after teardown frees it. Exit handlers
+    # run last-registered first: one registered after the first open runs while
+    # the hook is live and opens the ledger; one registered before it runs after
+    # the cancel, captures no connection, and is refused.
     db = tmp_path / "ledger.db"
     program = (
         "import atexit, sys\n"
         "from pathlib import Path\n"
         "from ledger import open_ledger\n"
-        "def at_exit():\n"
-        "    try:\n"
-        "        open_ledger(Path(sys.argv[1])).close()\n"
-        "    except BaseException as exc:\n"
-        "        print(f'exit open refused: {exc}', flush=True)\n"
-        "    else:\n"
-        "        print('exit open accepted', flush=True)\n"
-        "atexit.register(at_exit)\n"
+        "def opener(label):\n"
+        "    def at_exit():\n"
+        "        try:\n"
+        "            open_ledger(Path(sys.argv[1])).close()\n"
+        "        except BaseException as exc:\n"
+        "            print(f'{label} exit open refused: {exc}', flush=True)\n"
+        "        else:\n"
+        "            print(f'{label} exit open accepted', flush=True)\n"
+        "    return at_exit\n"
+        "atexit.register(opener('early'))\n"
         "open_ledger(Path(sys.argv[1])).close()\n"
+        "atexit.register(opener('late'))\n"
         "print('first open accepted', flush=True)\n"
     )
-    result = subprocess.run(
-        [sys.executable, "-c", program, str(db)],
-        cwd=ROOT, text=True, capture_output=True, timeout=60, check=False,
-    )
+    result = _run_child(program, str(db))
     assert result.returncode == 0, result.stderr
+    lines = result.stdout.splitlines()
+    assert lines[:2] == ["first open accepted", "late exit open accepted"], result.stdout
+    assert len(lines) == 3, result.stdout
+    assert lines[2].startswith(
+        "early exit open refused: db_fd_unknown: connect opened 0 connections, expected 1: "
+    ), result.stdout
+
+
+_TEARDOWN_CONNECTS = r'''
+import os, sqlite3, sys
+from pathlib import Path
+from ledger import open_ledger
+
+open_ledger(Path(sys.argv[1])).close()
+
+
+class LateConnect:
+    def __init__(self, name):
+        self.name = name
+
+    def __del__(self, connect=sqlite3.connect, write=os.write, error=BaseException):
+        try:
+            connect(":memory:").close()
+        except error as exc:
+            write(1, ("late connect refused " + self.name + ": " + str(exc) + "\n").encode())
+        else:
+            write(1, ("late connect accepted " + self.name + "\n").encode())
+
+
+for name, module in list(sys.modules.items()):
+    try:
+        setattr(module, "_late_connect", LateConnect(name))
+    except Exception:
+        pass
+print("main done", flush=True)
+'''
+
+
+def test_connects_during_interpreter_teardown_never_reach_a_freed_hook(
+    tmp_path: Path,
+) -> None:
+    # After a checked open, every loaded module holds an object that connects
+    # to SQLite when teardown collects it, so connects run while teardown
+    # clears the hook's module and frees its callback. The hook is cancelled at
+    # exit, before teardown, so SQLite never calls it then: no connect is
+    # refused by a failing hook and the process does not crash (SIGSEGV).
+    result = _run_child(_TEARDOWN_CONNECTS, str(tmp_path / "ledger.db"))
+    output = result.stdout + result.stderr
+    tail = output.splitlines()[-4:]
+    assert result.returncode == 0, f"child exited {result.returncode}: {tail}"
+    lines = result.stdout.splitlines()
+    assert "main done" in lines, tail
+    assert any(line.startswith("late connect accepted ") for line in lines), tail
+    refused = [line for line in output.splitlines() if "automatic extension" in line]
+    assert refused == [], refused[:4]
+
+
+_SUBINTERPRETER_OPEN = r'''
+import sqlite3, sys
+from pathlib import Path
+
+# A legacy (shared-GIL) subinterpreter, through the API each Python has.
+if sys.version_info >= (3, 13):
+    import _interpreters as interpreters
+    interp = interpreters.create("legacy")
+else:
+    import _xxsubinterpreters as interpreters
+    interp = interpreters.create(isolated=False)
+code = (
+    "import sys\n"
+    "sys.path.insert(0, " + repr(sys.argv[1]) + ")\n"
+    "from pathlib import Path\n"
+    "from ledger import open_ledger\n"
+    "open_ledger(Path(" + repr(sys.argv[2]) + ")).close()\n"
+    "print('subinterpreter open accepted', flush=True)\n"
+)
+interpreters.run_string(interp, code)
+interpreters.destroy(interp)
+print("subinterpreter destroyed", flush=True)
+sqlite3.connect(":memory:").close()
+print("main connect accepted", flush=True)
+from ledger import open_ledger
+open_ledger(Path(sys.argv[2])).close()
+print("main open accepted", flush=True)
+'''
+
+
+def test_hook_installed_in_a_destroyed_subinterpreter_is_not_called_after(
+    tmp_path: Path,
+) -> None:
+    # A subinterpreter's first open installs the hook with a callback that
+    # interpreter owns. Its exit handlers run when it is destroyed and cancel
+    # the hook, so a later connect in the main interpreter does not call into
+    # the destroyed interpreter (SIGSEGV), and the main interpreter's own first
+    # open installs its own hook.
+    result = _run_child(_SUBINTERPRETER_OPEN, str(ROOT), str(tmp_path / "ledger.db"))
+    output = result.stdout + result.stderr
+    tail = output.splitlines()[-4:]
+    assert result.returncode == 0, f"child exited {result.returncode}: {tail}"
     assert result.stdout.splitlines() == [
-        "first open accepted",
-        "exit open accepted",
-    ], result.stdout
+        "subinterpreter open accepted",
+        "subinterpreter destroyed",
+        "main connect accepted",
+        "main open accepted",
+    ], output[-3000:]
 
 
 def test_anchors_hold_for_threaded_connects(tmp_path: Path) -> None:

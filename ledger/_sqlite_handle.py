@@ -25,6 +25,7 @@ only after the main anchor has confirmed the ``unixFile`` layout.
 """
 from __future__ import annotations
 
+import atexit
 import ctypes
 import sqlite3
 import threading
@@ -185,9 +186,12 @@ def _install() -> _Hook:
     rc = lib.sqlite3_auto_extension(pointer)
     if rc != SQLITE_OK:
         return _Hook(None, f"sqlite3_auto_extension returned {rc}")
-    # Never cancelled at exit: exit handlers run last-registered first, so one
-    # registered before this install would find no capture when it opens a
-    # ledger. Process teardown discards the hook.
+    # Cancelled at exit, before interpreter teardown frees the callback or the
+    # interpreter that owns it (a subinterpreter runs this at its destruction):
+    # SQLite must never call a freed callback. Exit handlers run last-registered
+    # first, so one registered before this install opens no ledger: it finds no
+    # capture and is refused.
+    atexit.register(lib.sqlite3_cancel_auto_extension, pointer)
     failure: str | None
     try:
         with capturing() as captured:
