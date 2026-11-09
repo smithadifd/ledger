@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.1.16 — 2026-11-09
 
 First-write and first-resume output now names the action a new user needs.
 
@@ -9,6 +9,9 @@ First-write and first-resume output now names the action a new user needs.
 - Top-level `--version` prints `ledger <version>` without requiring a database.
 - Abbreviated long options (for example `--d` for `--db`) are no longer accepted; spell the option in full. A usage error (exit 2) results.
 - The install and upgrade docs now use `pipx`, the database home is spelled one way, and a start-here page, `docs/start-here.md`, takes a new person from nothing to a working ledger.
+- **The agent contract now says how to file a follow-up mid-session.** Make a source from the parent's id, a colon and a short slug of the follow-up (`it-1a2b3c4d5e6f:flaky-retry`), create the follow-up with `ledger new` and that source, then link it to the parent with `ledger link NEW --rel child-of --target PARENT`. If you are interrupted between the two, run both again unchanged: one child and one link remain. The follow-up line in the `ledger resume` brief prints the same commands as `docs/agent-contract.md`.
+
+Upgrade with `@v0.1.16`.
 
 ## 0.1.15 — 2026-11-09
 

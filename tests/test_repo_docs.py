@@ -258,7 +258,13 @@ def test_start_here_runs_in_order_and_names_the_environment_the_code_reads() -> 
     assert "https://github.com/smithadifd/skills" in flat
 
 
-def test_changelog_unreleased_names_the_pipx_docs_and_the_start_here_page() -> None:
+def test_changelog_newest_section_names_the_pipx_docs_and_the_start_here_page() -> None:
     text = CHANGELOG.read_text(encoding="utf-8")
-    unreleased = _squash(text.split("## Unreleased", 1)[1].split("\n## ", 1)[0])
-    assert "pipx" in unreleased and "docs/start-here.md" in unreleased
+    sections = re.split(r"^## ", text, flags=re.MULTILINE)[1:]
+    assert sections, "CHANGELOG.md has no second-level heading"
+    heading, _, body = sections[0].partition("\n")
+    assert re.fullmatch(r"Unreleased|\d+\.\d+\.\d+ \u2014 \d{4}-\d{2}-\d{2}", heading), (
+        f"newest CHANGELOG heading is neither Unreleased nor a dated version: {heading!r}"
+    )
+    newest = _squash(body)
+    assert "pipx" in newest and "docs/start-here.md" in newest
