@@ -333,3 +333,247 @@ def test_first_wal_read_opens_exactly_two_side_descriptors(
 
 def test_two_back_to_back_descriptor_snapshots_are_equal() -> None:
     assert dbfile.snapshot(Path("descriptor-probe")) == dbfile.snapshot(Path("descriptor-probe"))
+
+
+def _set_rollback_mode(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("PRAGMA journal_mode = DELETE").fetchone()[0] == "delete"
+    finally:
+        conn.close()
+
+
+def test_zero_new_descriptor_refuses_when_name_points_to_another_file(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    replacement = tmp_path / "replacement.db"
+    _seed(replacement).close()
+    parked = sqlite3.connect(db)
+
+    def return_parked_after_swap():
+        os.replace(replacement, db)
+        return parked
+
+    with pytest.raises(
+        UnsafeDatabaseFile,
+        match=r"^db_fd_unknown: connect opened 0 descriptors, expected 1:",
+    ):
+        dbfile.checked_connect(db, return_parked_after_swap)
+
+
+def test_opened_main_descriptor_with_second_link_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    real_fstat = os.fstat
+    armed = False
+    identity = (os.lstat(db).st_dev, os.lstat(db).st_ino)
+
+    def arm(stage: str, path: Path) -> None:
+        nonlocal armed
+        if stage == "after_connect" and path == db:
+            armed = True
+
+    def linked_fstat(fd: int):
+        found = real_fstat(fd)
+        if armed and (found.st_dev, found.st_ino) == identity:
+            return SimpleNamespace(
+                st_dev=found.st_dev,
+                st_ino=found.st_ino,
+                st_mode=found.st_mode,
+                st_nlink=2,
+            )
+        return found
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", arm)
+    monkeypatch.setattr(os, "fstat", linked_fstat)
+    with pytest.raises(
+        UnsafeDatabaseFile, match=r"^db_hardlinked: opened database has 2 links:"
+    ):
+        open_ledger_readonly(db)
+
+
+def test_rollback_first_read_refuses_unrelated_new_descriptor(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    _set_rollback_mode(db)
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_text("unrelated", encoding="utf-8")
+    held = []
+
+    def open_extra(stage: str, path: Path) -> None:
+        if stage == "before_first_read" and path == db and not held:
+            held.append(unrelated.open("rb"))
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", open_extra)
+    try:
+        with pytest.raises(
+            UnsafeDatabaseFile,
+            match=r"^db_fd_unknown: first read opened 1 unexpected descriptors:",
+        ):
+            dbfile.checked_connect(db, lambda: sqlite3.connect(db))
+    finally:
+        for handle in held:
+            handle.close()
+
+
+def test_wal_switch_rechecks_planted_sibling_symlink(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    _set_rollback_mode(db)
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"victim")
+    fired = False
+
+    def plant(stage: str, path: Path) -> None:
+        nonlocal fired
+        if stage == "before_wal_switch" and path == db and not fired:
+            os.symlink(victim, Path(f"{db}-wal"))
+            fired = True
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", plant)
+    with pytest.raises(UnsafeDatabaseFile, match=r"^db_sibling_unsafe:"):
+        open_ledger(db)
+    assert fired
+    assert victim.read_bytes() == b"victim"
+
+
+def test_descriptor_replaced_at_same_number_counts_as_new(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    _set_rollback_mode(db)
+    old_file = tmp_path / "old"
+    replacement = tmp_path / "replacement"
+    old_file.write_text("old", encoding="utf-8")
+    replacement.write_text("replacement", encoding="utf-8")
+
+    with old_file.open("rb") as target, replacement.open("rb") as source:
+        fired = False
+
+        def replace_fd(stage: str, path: Path) -> None:
+            nonlocal fired
+            if stage == "before_connect" and path == db and not fired:
+                os.dup2(source.fileno(), target.fileno())
+                fired = True
+
+        monkeypatch.setattr(dbfile, "_TEST_SEAM", replace_fd)
+        with pytest.raises(
+            UnsafeDatabaseFile,
+            match=r"^db_fd_unknown: connect opened 2 descriptors, expected 1:",
+        ):
+            dbfile.checked_connect(db, lambda: sqlite3.connect(db))
+        assert fired
+
+
+def test_unrelated_descriptor_after_first_wal_read_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    unrelated = tmp_path / "unrelated"
+    unrelated.write_text("unrelated", encoding="utf-8")
+    held = []
+
+    def open_extra(stage: str, path: Path) -> None:
+        if stage == "after_first_read" and path == db and not held:
+            held.append(unrelated.open("rb"))
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", open_extra)
+    try:
+        with pytest.raises(
+            UnsafeDatabaseFile,
+            match=(
+                r"^db_fd_unknown: new descriptor does not uniquely match -wal or -shm:"
+            ),
+        ):
+            open_ledger_readonly(db)
+    finally:
+        for handle in held:
+            handle.close()
+
+
+def test_backup_partial_symlink_is_refused_before_victim_is_touched(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = tmp_path / "source.db"
+    _seed(source).close()
+    victim = tmp_path / "victim.db"
+    _seed(victim).close()
+    victim_before = victim.read_bytes()
+    dest = tmp_path / "backup.db"
+    partial = Path(f"{dest}.partial")
+    fired = False
+
+    def plant(stage: str, path: Path) -> None:
+        nonlocal fired
+        if stage == "before_connect" and path == partial and not fired:
+            os.symlink(victim, partial)
+            fired = True
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", plant)
+    with pytest.raises(UnsafeDatabaseFile, match=r"^db_symlink:"):
+        backup_db(source, dest)
+    assert fired
+    assert victim.read_bytes() == victim_before
+    assert not dest.exists()
+    assert not partial.exists()
+
+
+def test_non_exception_during_checked_open_closes_connection_and_propagates(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    opened = []
+
+    def opener():
+        conn = sqlite3.connect(db)
+        opened.append(conn)
+        return conn
+
+    def interrupt(stage: str, path: Path) -> None:
+        if stage == "after_connect" and path == db:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        dbfile.checked_connect(db, opener)
+    assert len(opened) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+        opened[0].execute("SELECT 1")
+
+
+def test_main_descriptor_change_during_first_read_is_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = tmp_path / "ledger.db"
+    before = {10: (1, 2)}
+    monkeypatch.setattr(dbfile, "snapshot", lambda _path: {10: (1, 3)})
+
+    with pytest.raises(
+        UnsafeDatabaseFile,
+        match=r"^db_fd_unknown: main descriptor changed during first read:",
+    ):
+        dbfile._verify_siblings(
+            path, before, (10, (1, 2)), "delete", immutable=False
+        )
+
+
+def test_doctor_summary_does_not_hide_database_refusal(tmp_path: Path) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"victim")
+    os.symlink(victim, Path(f"{db}-shm"))
+
+    with pytest.raises(UnsafeDatabaseFile, match=r"^db_sibling_unsafe:"):
+        doctor_mod._summary(db)

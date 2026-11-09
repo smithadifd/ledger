@@ -394,8 +394,8 @@ def test_claim_refuses_when_the_spec_moves_mid_claim(db, monkeypatch) -> None:
     monkeypatch.setattr(lease, "takeover_holder", spec_lands_meanwhile)
     code, body, _err = cli_json(monkeypatch, db, "claim", ITEM)
     assert code == 3, body
-    assert landed
-    assert body["error"]["code"] == "db_fd_unknown"
+    assert body["error"]["code"] == "claim_changed"
+    assert "the spec changed while this claim was being recorded" in body["error"]["message"]
     with open_ledger(db, create=False) as lg:
         assert lg.events(item_id=ITEM, kind="item.state") == []
 

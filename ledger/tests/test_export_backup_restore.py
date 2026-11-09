@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 
-from ledger import UnsafeDatabaseFile
 from ledger.backup import backup_db, integrity_check
 from ledger.cli import main
 from ledger.export import (
@@ -840,10 +839,6 @@ def test_backup_snapshots_wal_events_not_yet_checkpointed(tmp_path: Path) -> Non
             actor="tester",
         )
     dest = tmp_path / "copy.db"
-    with pytest.raises(UnsafeDatabaseFile, match=r"^db_fd_unknown:"):
-        backup_db(db, dest)
-    assert not dest.exists()
-    lg.close()
     result = backup_db(db, dest)
     assert result.integrity == "ok"
     copy = open_ledger(dest)

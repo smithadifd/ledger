@@ -9,13 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from ledger import (
-    IdempotencyConflict,
-    UnsafeDatabaseFile,
-    ValidationError,
-    guidance,
-    open_ledger,
-)
+from ledger import IdempotencyConflict, ValidationError, guidance, open_ledger
 from ledger.cli import main as ledger_cli
 
 TODAY = date(2026, 10, 19)
@@ -295,9 +289,10 @@ def test_a_withdraw_racing_a_set_never_leaves_the_set_closed(tmp_path):
         time.sleep(0.5)
     thread.join(30)
     assert not thread.is_alive()
-    assert isinstance(outcome.get("error"), UnsafeDatabaseFile)
-    assert outcome["error"].code == "db_fd_unknown"
+    assert "error" not in outcome, f"the set failed: {outcome.get('error')!r}"
     item = withdrawer.item(item_id)
     reasons = [g.reason for g in guidance.in_force(withdrawer, TODAY)]
     withdrawer.close()
-    assert (item["status"], reasons) == ("closed", [])
+    assert (item["status"], reasons) == ("open", ["after the race"]), (
+        "a set that succeeds after a racing withdraw must reopen the item, never stay closed"
+    )

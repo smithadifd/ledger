@@ -123,18 +123,7 @@ def _seam(stage: str, path: Path) -> None:
         _TEST_SEAM(stage, path)
 
 
-def _verify_main(path: Path, before: Snapshot) -> tuple[int, Identity]:
-    after = snapshot(path)
-    new = _changed(before, after)
-    if len(new) != 1:
-        _unsafe("db_fd_unknown", f"connect opened {len(new)} descriptors, expected 1", path)
-    fd, identity = next(iter(new.items()))
-    try:
-        opened = os.fstat(fd)
-    except OSError as exc:
-        _unsafe("db_stat_failed", f"fstat({fd}): {exc}", path, exc)
-    if not stat.S_ISREG(opened.st_mode):
-        _unsafe("db_not_regular", "opened descriptor is not a regular file", path)
+def _main_after_connect(path: Path) -> os.stat_result:
     named = _lstat(path, absent_ok=True)
     if named is None:
         _unsafe("db_swapped", "database path disappeared after connect", path)
@@ -145,6 +134,35 @@ def _verify_main(path: Path, before: Snapshot) -> tuple[int, Identity]:
         _unsafe("db_not_regular", "database path is not a regular file", path)
     if named.st_nlink != 1:
         _unsafe("db_hardlinked", f"database file has {named.st_nlink} links", path)
+    return named
+
+
+def _verify_main(path: Path, before: Snapshot) -> tuple[int, Identity]:
+    after = snapshot(path)
+    new = _changed(before, after)
+    named: os.stat_result | None = None
+    if len(new) == 1:
+        fd, identity = next(iter(new.items()))
+    elif not new:
+        named = _main_after_connect(path)
+        matches = [
+            (fd, identity)
+            for fd, identity in before.items()
+            if identity == _identity(named)
+        ]
+        if not matches:
+            _unsafe("db_fd_unknown", "connect opened 0 descriptors, expected 1", path)
+        fd, identity = matches[0]
+    else:
+        _unsafe("db_fd_unknown", f"connect opened {len(new)} descriptors, expected 1", path)
+    try:
+        opened = os.fstat(fd)
+    except OSError as exc:
+        _unsafe("db_stat_failed", f"fstat({fd}): {exc}", path, exc)
+    if not stat.S_ISREG(opened.st_mode):
+        _unsafe("db_not_regular", "opened descriptor is not a regular file", path)
+    if named is None:
+        named = _main_after_connect(path)
     if _identity(opened) != _identity(named) or identity != _identity(opened):
         _unsafe("db_swapped", "opened descriptor is not the file at the database path", path)
     if opened.st_nlink != 1:
@@ -242,6 +260,8 @@ def checked_connect(
     except BaseException as exc:
         if conn is not None:
             conn.close()
+        if not isinstance(exc, Exception):
+            raise
         if isinstance(exc, (UnsafeDatabaseFile, sqlite3.Error)):
             raise
         if isinstance(exc, OSError):
