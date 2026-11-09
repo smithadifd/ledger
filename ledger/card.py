@@ -195,8 +195,20 @@ POINTER_LIMIT = 10
 PointerSource = Callable[[str], Iterable[Mapping[str, Any]]]
 
 
-def word_count(text: str) -> int:
+def word_count(text: str, *, command_prefix: str | None = None) -> int:
+    """Count card words, treating each shell-quoted command argument as one."""
+    if command_prefix and command_prefix in text:
+        try:
+            prefix_words = len(shlex.split(command_prefix))
+        except ValueError:
+            prefix_words = len(command_prefix.split())
+        replacement = " ".join("command" for _ in range(max(1, prefix_words)))
+        text = text.replace(command_prefix, replacement)
     return len(text.split())
+
+
+def _card_word_count(card: Card) -> int:
+    return word_count(format_card(card), command_prefix=card.program)
 
 
 def _clip(text: str, limit: int) -> str:
@@ -957,7 +969,7 @@ def bound_card(card: Card) -> Card:
     def ids_over(candidate: Card) -> bool:
         return len(required | _content_ids(candidate)) > SOURCE_ID_LIMIT
 
-    if word_count(format_card(card)) <= WORD_LIMIT and not ids_over(card):
+    if _card_word_count(card) <= WORD_LIMIT and not ids_over(card):
         return card
     truncated: list[str] = list(card.truncated)
     omitted: dict[str, int] = dict(card.omitted)
@@ -1011,13 +1023,13 @@ def bound_card(card: Card) -> Card:
         words = (getattr(current, field) or "").split()
         if len(words) <= FIELD_MIN_WORDS:
             continue
-        size = word_count(format_card(current))
+        size = _card_word_count(current)
         if size <= WORD_LIMIT:
             break
         saved = (list(truncated), dict(omitted))
         _record_omission(truncated, omitted, field, len(words) - FIELD_MIN_WORDS)
         trial = apply(**{field: " ".join(words[:FIELD_MIN_WORDS])})
-        trial_size = word_count(format_card(trial))
+        trial_size = _card_word_count(trial)
         if trial_size >= size:
             # The marker would cost more than the cut saves.
             truncated[:] = saved[0]
@@ -1029,7 +1041,7 @@ def bound_card(card: Card) -> Card:
         current = apply(**{field: " ".join(words[:keep])})
 
     for section in RESUME_DROP_ORDER + DROP_ORDER:
-        if word_count(format_card(current)) <= WORD_LIMIT:
+        if _card_word_count(current) <= WORD_LIMIT:
             return current
         items = getattr(current, section)
         if not items:
@@ -1042,21 +1054,24 @@ def bound_card(card: Card) -> Card:
     for index, path in _shorten_paths(current.open_questions):
         if len(_get_path(current.open_questions[index], path).split()) <= ASK_MIN_WORDS:
             continue
-        size = word_count(format_card(current))
+        size = _card_word_count(current)
         if size <= WORD_LIMIT:
             break
         # The first cut also adds "ask" to the Truncated section.
         header = 0
         if "ask" not in truncated:
             probe = replace(current, truncated=tuple(truncated) + ("ask",))
-            header = word_count(format_card(probe)) - size
+            header = _card_word_count(probe) - size
         rows, cut = _shorten_one(
             current.open_questions,
             index,
             path,
             size + header - WORD_LIMIT,
             overhead=header,
-            marker_words=len(_cut_marker(1, 1, "x", current.program).split()),
+            marker_words=word_count(
+                _cut_marker(1, 1, "x", current.program),
+                command_prefix=current.program,
+            ),
         )
         if cut:
             _record_omission(truncated, omitted, "ask", cut)
@@ -1066,7 +1081,7 @@ def bound_card(card: Card) -> Card:
     # go last, the last listed first, only when nothing else is left to cut.
     for section in ("children", "decision_records") + CAP_ORDER + ("refs",):
         items = list(getattr(current, section))
-        while word_count(format_card(current)) > WORD_LIMIT and items:
+        while _card_word_count(current) > WORD_LIMIT and items:
             if keep_newest[section]:
                 items.pop(0)
             else:
@@ -1076,7 +1091,7 @@ def bound_card(card: Card) -> Card:
 
     for field in ("title", "next_step"):
         words = getattr(current, field).split()
-        while word_count(format_card(current)) > WORD_LIMIT and len(words) > 1:
+        while _card_word_count(current) > WORD_LIMIT and len(words) > 1:
             words.pop()
             _record_omission(truncated, omitted, field, 1)
             current = apply(**{field: " ".join(words)})

@@ -102,7 +102,11 @@ class Context:
 ACTOR_SEPARATOR = "/"
 
 
-_NAMED_SHELL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t", " ": "\\x20"}
+_NAMED_SHELL_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+
+
+def _is_control(char: str) -> bool:
+    return unicodedata.category(char) in ("Cc", "Zl", "Zp")
 
 
 def _shell_escape(value: str) -> str:
@@ -114,7 +118,7 @@ def _shell_escape(value: str) -> str:
             out.append("\\'")
         elif char in _NAMED_SHELL_ESCAPES:
             out.append(_NAMED_SHELL_ESCAPES[char])
-        elif char.isspace() or unicodedata.category(char) in ("Cc", "Zl", "Zp"):
+        elif _is_control(char):
             codepoint = ord(char)
             if codepoint < 0x100:
                 out.append(f"\\x{codepoint:02x}")
@@ -128,11 +132,8 @@ def _shell_escape(value: str) -> str:
 
 
 def quote_command_arg(value: str) -> str:
-    """Quote one shell argument without literal whitespace or line breaks."""
-    if not any(
-        char.isspace() or unicodedata.category(char) in ("Cc", "Zl", "Zp")
-        for char in value
-    ):
+    """Quote one shell argument, escaping controls to keep output on one line."""
+    if not any(_is_control(char) for char in value):
         return shlex.quote(value)
     return "$'" + _shell_escape(value) + "'"
 

@@ -11,6 +11,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -18,6 +19,7 @@ from pathlib import Path
 
 import pytest
 
+from ledger.card import WORD_LIMIT, word_count
 from ledger.schema import PHASES
 from ledger.store import Ledger, open_ledger
 from ledger.verbs import EXIT_NOT_FOUND
@@ -180,21 +182,61 @@ def test_explicit_database_with_newline_cannot_forge_command_lines(
     assert code == 0, err
     assert len(_printed(out, "resume")) == 1, out
     assert len(_printed(out, "card")) == 1, out
-    assert "\\n\\x20\\x20resume:\\x20forged" in _printed(out, "resume")[0]
+    assert "\\n  resume: forged" in _printed(out, "resume")[0]
+
+
+def test_spaced_database_is_posix_quoted_and_runnable(tmp_path, monkeypatch) -> None:
+    db = str(tmp_path / "ledger local.db")
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "same database")
+    program = f"{shlex.quote(sys.executable)} -m ledger"
+    code, out, err = invoke(
+        monkeypatch,
+        ["--db", db, "resume"],
+        env={"LEDGER_PROG": program},
+    )
+    assert code == 0, err
+    command = _printed(out, "resume")[0]
+    assert f"--db {shlex.quote(db)}" in command
+    assert "$'" not in command
+
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LEDGER_")}
+    env["PYTHONPATH"] = str(PKG_PARENT)
+    shells = ["sh"]
+    dash = shutil.which("dash")
+    if dash is not None:
+        shells.append(dash)
+    for shell in shells:
+        resumed = subprocess.run(
+            [shell, "-c", command],
+            cwd=PKG_PARENT,
+            capture_output=True,
+            text=True,
+            env=env,
+            check=False,
+        )
+        assert resumed.returncode == 0, (shell, resumed.stderr)
+        assert "same database" in resumed.stdout, (shell, resumed.stdout)
 
 
 def test_space_heavy_database_keeps_card_within_word_limit(monkeypatch) -> None:
-    with tempfile.TemporaryDirectory(dir="/tmp") as root:
+    temp_root = "/private/tmp" if Path("/private/tmp").is_dir() else "/tmp"
+    with tempfile.TemporaryDirectory(dir=temp_root) as root:
         parent = Path(root)
         for _ in range(5):
             parent /= "p " * 40
         parent.mkdir(parents=True)
         db = str(parent / "ledger.db")
         seed(monkeypatch, db, "it-a")
-        _make_card_bulky(db)
         code, out, err = invoke(monkeypatch, ["--db", db, "card", "it-a"])
     assert code == 0, err
-    assert len(out.split()) <= 400, len(out.split())
+    resume_lines = [line for line in out.splitlines() if line.startswith("Resume with: ")]
+    assert len(resume_lines) == 1, out
+    command = resume_lines[0].removeprefix("Resume with: ")
+    prefix = command.rsplit(" resume --item=", 1)[0]
+    assert word_count(out, command_prefix=prefix) <= WORD_LIMIT
+    tokens = shlex.split(command)
+    assert tokens[tokens.index("--db") + 1] == db
 
 
 def test_inferred_program_basename_is_shell_quoted(tmp_path, monkeypatch) -> None:
@@ -206,7 +248,7 @@ def test_inferred_program_basename_is_shell_quoted(tmp_path, monkeypatch) -> Non
     code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
     assert code == 0, err
     assert _printed(out, "resume")[0].startswith(
-        f"$'ledger\\x20local' --db {shlex.quote(db)} "
+        f"'ledger local' --db {shlex.quote(db)} "
     )
 
 
