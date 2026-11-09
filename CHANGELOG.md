@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.1.15 — 2026-11-09
+## Unreleased
 
 First-write and first-resume output now names the action a new user needs.
 
@@ -8,6 +8,8 @@ First-write and first-resume output now names the action a new user needs.
 - `ledger resume` reports how many open items lack a stop instead of saying there are no open items. Runnable commands from `resume` and `card` preserve `LEDGER_PROG`, `python3 -m ledger`, or the executable basename, and include `--db` only when it was passed.
 - Top-level `--version` prints `ledger <version>` without requiring a database.
 - Abbreviated long options (for example `--d` for `--db`) are no longer accepted; spell the option in full. A usage error (exit 2) results.
+
+## 0.1.15 — 2026-11-09
 
 An answer opens a gate only when the harness captured it for its ask.
 
