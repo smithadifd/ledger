@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import math
 import re
+import unicodedata
 from typing import Any, Mapping
 
 GUIDANCE_ITEM_TYPE = "guidance"
@@ -615,6 +616,87 @@ class ValidationError(ValueError):
 
 def _fail(reason: str) -> None:
     raise ValidationError(reason)
+
+
+# The refusal a write gets when text a picker displays holds a control
+# character. ``ask_control_character:<field>`` is its reason; ``<field>``
+# names the payload field (``question_id``, ``options[1].label``).
+ASK_CONTROL_CHARACTER = "ask_control_character"
+
+# Text a picker displays, per kind, as (field, newline allowed). A newline
+# is allowed in the question body only: a long question can run to several
+# lines, and a line feed alone cannot move the cursor back over text. The
+# header is ``ask K``, built from the event id, so no payload field holds it.
+_DISPLAYED_TEXT: dict[str, tuple[tuple[str, bool], ...]] = {
+    "decision.asked": (("question", True), ("question_id", False), ("scope", False)),
+    "decision.elected": (
+        ("question", True),
+        ("question_id", False),
+        ("scope", False),
+        ("chosen", False),
+        ("chosen_description", False),
+    ),
+}
+
+
+def control_character(text: str, *, allow_newline: bool = False) -> str | None:
+    """``U+XXXX`` of the first control character in ``text``, else None.
+
+    A control character is one of C0 (U+0000-U+001F, so ESC and every ANSI
+    escape), DEL (U+007F) or C1 (U+0080-U+009F): Unicode category ``Cc`` and
+    nothing else. ``allow_newline`` lets U+000A pass. This is the one
+    definition for the text an ask displays; it is written as a code point
+    so a message that names it never carries the character itself.
+    """
+    for char in text:
+        if allow_newline and char == "\n":
+            continue
+        if unicodedata.category(char) == "Cc":
+            return f"U+{ord(char):04X}"
+    return None
+
+
+def display_control_character(kind: str, payload: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(field, code point)`` of the first control character in the text a
+    picker displays for a ``decision.asked`` or ``decision.elected`` payload,
+    else None. A value that is not a string is skipped here: the type
+    checks (write time: the schema; read time: ``render_ask_display``) own it.
+    """
+    for name, allow_newline in _DISPLAYED_TEXT.get(kind, ()):
+        value = payload.get(name)
+        if isinstance(value, str):
+            found = control_character(value, allow_newline=allow_newline)
+            if found is not None:
+                return name, found
+    if kind == "decision.asked":
+        options = payload.get("options")
+        for index, option in enumerate(options if isinstance(options, list) else []):
+            if not isinstance(option, dict):
+                continue
+            for name in ("label", "description"):
+                value = option.get(name)
+                if isinstance(value, str):
+                    found = control_character(value)
+                    if found is not None:
+                        return f"options[{index}].{name}", found
+    elif kind == "decision.elected":
+        rejected = payload.get("rejected")
+        for index, value in enumerate(rejected if isinstance(rejected, list) else []):
+            if isinstance(value, str):
+                found = control_character(value)
+                if found is not None:
+                    return f"rejected[{index}]", found
+    return None
+
+
+def refuse_display_control_characters(kind: str, payload: Mapping[str, Any]) -> None:
+    """Write-time rule: refuse an ask or election whose displayed text holds a
+    control character. Not part of ``validate_payload``: verify, export and
+    restore re-validate rows written before this rule, and those must still
+    read; ``render_ask_display`` makes such an ask unpickable instead."""
+    hit = display_control_character(kind, payload)
+    if hit is not None:
+        _fail(f"{ASK_CONTROL_CHARACTER}:{hit[0]}")
 
 
 def known_kinds() -> tuple[str, ...]:
