@@ -15,18 +15,71 @@ ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / "docs" / "agent-contract.md"
 
 
-def _triggers() -> list[str]:
+def _squash(text: str) -> str:
+    return " ".join(text.split())
+
+
+def _page_triggers() -> dict[str, list[str]]:
+    """Each write trigger on the page, with the commands its bullet names.
+
+    A command is a backticked span that starts with ``ledger `` or is the
+    event name ``item.stopped``; line breaks inside a bullet are squashed.
+    """
     text = PAGE.read_text(encoding="utf-8")
     section = text.split("## Write triggers", 1)[1].split("\n## ", 1)[0]
-    return re.findall(r"^- \*\*(.+?)\*\*", section, flags=re.MULTILINE)
+    bullets = re.split(r"^(?=- \*\*)", section, flags=re.MULTILINE)[1:]
+    triggers: dict[str, list[str]] = {}
+    for bullet in bullets:
+        bullet = bullet.split("\n\n", 1)[0]  # a bullet ends at the blank line
+        name = re.match(r"- \*\*(.+?)\*\*", bullet).group(1)
+        spans = [_squash(s) for s in re.findall(r"`([^`]+)`", bullet)]
+        triggers[name] = [
+            s for s in spans if s.startswith("ledger ") or s == "item.stopped"
+        ]
+    return triggers
+
+
+def _short_form_triggers() -> dict[str, str]:
+    """Each trigger line of the short form, with its indented continuations."""
+    triggers: dict[str, str] = {}
+    name = None
+    for line in SHORT_FORM.splitlines():
+        match = re.match(r"- ([^:]+):(.*)$", line)
+        if match:
+            name = match.group(1)
+            triggers[name] = match.group(2)
+        elif name is not None and line.startswith("  "):
+            triggers[name] += " " + line
+        else:
+            name = None
+    return {key: _squash(value) for key, value in triggers.items()}
 
 
 def test_short_form_names_every_trigger_on_the_page() -> None:
-    triggers = _triggers()
-    assert len(triggers) >= 7, triggers
-    lowered = SHORT_FORM.lower()
-    for trigger in triggers:
-        assert trigger.lower() in lowered, f"short form lacks write trigger: {trigger}"
+    page = _page_triggers()
+    short = _short_form_triggers()
+    assert len(page) >= 9, page
+    assert set(short) == set(page), (sorted(short), sorted(page))
+
+
+def test_short_form_gives_each_trigger_the_pages_commands() -> None:
+    page = _page_triggers()
+    short = _short_form_triggers()
+    for trigger, commands in page.items():
+        assert commands, f"page trigger names no command: {trigger}"
+        for command in commands:
+            assert command in short[trigger], (
+                f"short form trigger {trigger!r} lacks the page's {command!r}: "
+                f"{short[trigger]!r}"
+            )
+
+
+def test_follow_up_trigger_files_and_links_as_a_child() -> None:
+    page = _page_triggers()["follow-up filed"]
+    assert page == [
+        "ledger new --type TYPE --title TITLE --source SRC",
+        "ledger link NEW --rel child-of --target PARENT",
+    ]
 
 
 def test_concepts_state_the_database_first_creation_window() -> None:

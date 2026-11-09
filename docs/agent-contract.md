@@ -15,6 +15,8 @@ person should never have to remind you; asking first is the failure this page
 exists to prevent.
 
 - **item opened** — a new piece of work starts: `ledger new --type TYPE --title TITLE`.
+- **item picked up** — you start work on an item that already exists:
+  `ledger claim ITEM`.
 - **item closed** — the work is done or dropped: `ledger state ITEM --status closed`.
 - **decision made** — a choice was settled in the work and the reason should
   outlive the session: `ledger note ITEM --text "decided: ... because ..."`.
@@ -24,6 +26,16 @@ exists to prevent.
   an election, not a note: ask for it through the picker and `ledger pick`
   the answer. Link the brief itself by path with
   `ledger link ITEM --rel url --target PATH`.
+- **follow-up filed** — work in a session turns up something to do later (a
+  hardening finding, a flake, a deferred piece of your own work): make a
+  source `SRC` from the parent's id, a colon and a short slug of the
+  follow-up (`it-1a2b3c4d5e6f:flaky-retry`), create the follow-up with
+  `ledger new --type TYPE --title TITLE --source SRC`, then link it to the
+  item it came from with
+  `ledger link NEW --rel child-of --target PARENT`.
+  If you are interrupted between the two, run both again unchanged, even
+  from a later session: the same source reaches the same child, and a link
+  it already has to that parent writes nothing, so one link remains.
 - **thread parked** — work pauses with more to do: write `item.stopped`.
 - **thread stopped** — a session ends mid-item: write `item.stopped`.
 

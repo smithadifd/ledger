@@ -34,21 +34,31 @@ from ledger.verbs import (
 NO_OPEN_ITEMS = "no open items"
 
 # The contract's short form. Every write trigger on the contract page (in the
-# ledger repository's docs folder) appears in it by the page's own words; a
-# repository test reads both so the two cannot drift. Keep it under 40 lines.
+# ledger repository's docs folder) appears in it by the page's own words and
+# with the page's own commands, one line per trigger (a second line only for a
+# second command); a repository test reads both so the two cannot drift. Keep
+# it under 40 lines.
 SHORT_FORM = """\
 LEDGER AGENT CONTRACT (short form; the full page is the agent contract in the ledger repo's docs folder)
 The ledger holds this work's state. Write to it without asking.
 Write triggers:
 - item opened: ledger new --type TYPE --title TITLE
+- item picked up: ledger claim ITEM
 - item closed: ledger state ITEM --status closed
 - decision made: ledger note ITEM --text "decided: ... because ..."
-- decision elected: ledger elect, quoting the person's captured words
-- brief ratified: an election, not a note; link the brief by path:
-  ledger link ITEM --rel url --target PATH
+- decision elected: ask through the question picker, then ledger pick ITEM --ask K
+- brief ratified: an election, not a note: ask the same way, then ledger pick ITEM --ask K;
+  link the brief by path: ledger link ITEM --rel url --target PATH
+- follow-up filed: SRC is PARENT:SLUG (the parent's id, a colon, a short slug of the follow-up);
+  ledger new --type TYPE --title TITLE --source SRC, then link it to its source:
+  ledger link NEW --rel child-of --target PARENT
+  (interrupted between the two? run both again unchanged: one child, one link)
 - thread parked: write item.stopped (see the close rule)
 - thread stopped: write item.stopped (see the close rule)
-Use the verbs note, link and elect. Never hand-write an append script.
+Use the verbs note, link, ask-display, pick and elect. Never hand-write an append script.
+Two events have no verb of their own, decision.asked (the question you put to the person)
+and item.stopped; write each with one plain ledger append. The harness captures the
+person's words; never write them yourself.
 Reading order: ledger resume, ledger card ITEM, then ledger export-item ITEM
 when the card shows a cut.
 Actor stamps: LEDGER_OPERATOR (the person), LEDGER_AGENT (this seat),
