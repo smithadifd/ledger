@@ -201,6 +201,36 @@ def test_short_form_stop_example_appends_and_resume_shows_it(tmp_path, monkeypat
     assert "skills: review" in out
 
 
+def test_brief_prints_the_follow_up_line_and_its_commands_run(
+    tmp_path, monkeypatch
+) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-parent")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
+    assert code == 0, err
+    lines = out.splitlines()
+    [at] = [i for i, ln in enumerate(lines) if ln.startswith("- follow-up filed:")]
+    new_line, link_line = lines[at], lines[at + 1]
+    assert "ledger new --type TYPE --title TITLE" in new_line
+    assert link_line.strip() == "ledger link NEW --rel child-of --target PARENT"
+
+    # The printed commands run: file the follow-up, then link it to its source.
+    new_text = new_line.split(": ", 1)[1].split(", then")[0]
+    new_cmd = shlex.split(
+        new_text.replace("TYPE", "ticket").replace("TITLE", "'flaky test found later'")
+    )
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, *new_cmd[1:]])
+    assert code == 0, err
+    new_id = json.loads(out)["data"]["item_id"]
+    link_cmd = shlex.split(link_line.replace("NEW", new_id).replace("PARENT", "it-parent"))
+    code, _out, err = invoke(monkeypatch, ["--db", db, *link_cmd[1:]])
+    assert code == 0, err
+    with open_ledger(db, create=False) as lg:
+        [link] = list(lg.events(item_id=new_id, kind="item.linked"))
+    assert link.payload["rel"] == "child-of"
+    assert link.payload["target"] == "it-parent"
+
+
 def test_short_form_phase_list_equals_the_schema_phases() -> None:
     match = re.search(r"phase is one of ([a-z, ]+)\.", SHORT_FORM)
     assert match, "short form does not list the phases"
