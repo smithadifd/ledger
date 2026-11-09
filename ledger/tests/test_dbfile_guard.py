@@ -7,6 +7,7 @@ Kinds: C = read-write create, E = read-write existing, R = read-only
 """
 from __future__ import annotations
 
+import ctypes
 import io
 import json
 import os
@@ -1694,7 +1695,10 @@ def test_main_anchor_failure_refuses_without_reading_the_descriptor(
         reads.append(address)
         return real_int(address)
 
-    monkeypatch.setattr(_sqlite_handle, "_OFF_ZPATH", 6 * _sqlite_handle._P)
+    # Read zPath from the pointer slot before it: another pointer, never dereferenced.
+    monkeypatch.setattr(
+        _sqlite_handle, "_OFF_ZPATH", _sqlite_handle._UnixFile.pPreallocatedUnused.offset
+    )
     monkeypatch.setattr(_sqlite_handle, "_int", recording_int)
     refusal = _refuse_kind(db, kind)
     assert str(refusal).startswith(
@@ -1757,7 +1761,7 @@ def test_shm_anchor_failure_refuses_without_reading_the_shm_descriptor(
             in_shm.active = False
 
     # Read the main pInode from the pVfs slot: another pointer, never dereferenced.
-    monkeypatch.setattr(_sqlite_handle, "_OFF_PINODE", 1 * _sqlite_handle._P)
+    monkeypatch.setattr(_sqlite_handle, "_OFF_PINODE", _sqlite_handle._UnixFile.pVfs.offset)
     monkeypatch.setattr(_sqlite_handle, "_int", recording_int)
     monkeypatch.setattr(_sqlite_handle, "shm_fd", tracked_shm_fd)
     refusal = _refuse_kind(db, "R")
@@ -1765,6 +1769,101 @@ def test_shm_anchor_failure_refuses_without_reading_the_shm_descriptor(
         "db_fd_unattributable: -shm node does not belong to the connection's database file:"
     ), refusal
     assert shm_reads == [], "hShm must not be read before the pInode anchor holds"
+
+
+_LAYOUT_NAMES = (
+    "_OFF_PINODE",
+    "_OFF_H",
+    "_OFF_ZPATH",
+    "_OFF_PSHM",
+    "_SHM_NODE",
+    "_NODE_PINODE",
+    "_NODE_HSHM",
+    "_MIN_OS_FILE",
+)
+
+
+def _layout_with_pointer_width(width: int) -> dict[str, int]:
+    """The module's os_unix.c offsets when every pointer is ``width`` bytes.
+
+    A fresh interpreter replaces ``ctypes.c_void_p`` with an unsigned integer
+    of that width before importing the module, so the module computes its
+    offsets for that pointer size; the host's int and short sizes stay.
+    """
+    program = (
+        "import ctypes, json, sys\n"
+        "ctypes.c_void_p = {4: ctypes.c_uint32, 8: ctypes.c_uint64}[int(sys.argv[1])]\n"
+        "import ledger._sqlite_handle as h\n"
+        "print(json.dumps({n: getattr(h, n) for n in sys.argv[2:]}))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(width), *_LAYOUT_NAMES],
+        cwd=ROOT, text=True, capture_output=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def test_unix_file_offsets_follow_the_32_bit_abi() -> None:
+    # os_unix.c on a 4-byte-pointer ABI: h at 12, eFileLock 16, ctrlFlags 18,
+    # lastErrno 20, lockingContext 24, pPreallocatedUnused 28, zPath 32, pShm 36.
+    assert _layout_with_pointer_width(4) == {
+        "_OFF_PINODE": 8,
+        "_OFF_H": 12,
+        "_OFF_ZPATH": 32,
+        "_OFF_PSHM": 36,
+        "_SHM_NODE": 0,
+        "_NODE_PINODE": 0,
+        "_NODE_HSHM": 12,
+        "_MIN_OS_FILE": 40,
+    }
+
+
+def test_unix_file_offsets_on_64_bit_are_unchanged() -> None:
+    # On 64-bit the struct-derived offsets equal the pointer multiples read before.
+    expected = {
+        "_OFF_PINODE": 2 * 8,
+        "_OFF_H": 3 * 8,
+        "_OFF_ZPATH": 7 * 8,
+        "_OFF_PSHM": 8 * 8,
+        "_SHM_NODE": 0,
+        "_NODE_PINODE": 0,
+        "_NODE_HSHM": 3 * 8,
+        "_MIN_OS_FILE": 9 * 8,
+    }
+    assert _layout_with_pointer_width(8) == expected
+    native = {name: getattr(_sqlite_handle, name) for name in _LAYOUT_NAMES}
+    assert native == _layout_with_pointer_width(ctypes.sizeof(ctypes.c_void_p))
+
+
+def test_exit_handler_registered_before_the_first_open_can_open_the_ledger(
+    tmp_path: Path,
+) -> None:
+    db = tmp_path / "ledger.db"
+    program = (
+        "import atexit, sys\n"
+        "from pathlib import Path\n"
+        "from ledger import open_ledger\n"
+        "def at_exit():\n"
+        "    try:\n"
+        "        open_ledger(Path(sys.argv[1])).close()\n"
+        "    except BaseException as exc:\n"
+        "        print(f'exit open refused: {exc}', flush=True)\n"
+        "    else:\n"
+        "        print('exit open accepted', flush=True)\n"
+        "atexit.register(at_exit)\n"
+        "open_ledger(Path(sys.argv[1])).close()\n"
+        "print('first open accepted', flush=True)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(db)],
+        cwd=ROOT, text=True, capture_output=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == [
+        "first open accepted",
+        "exit open accepted",
+    ], result.stdout
 
 
 def test_anchors_hold_for_threaded_connects(tmp_path: Path) -> None:

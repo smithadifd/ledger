@@ -25,7 +25,6 @@ only after the main anchor has confirmed the ``unixFile`` layout.
 """
 from __future__ import annotations
 
-import atexit
 import ctypes
 import sqlite3
 import threading
@@ -39,18 +38,51 @@ FCNTL_VFS_POINTER = 27
 FCNTL_JOURNAL_POINTER = 28
 LIMIT_VARIABLE_NUMBER = 9
 
-_P = ctypes.sizeof(ctypes.c_void_p)
-# unixFile: pMethod, pVfs, pInode, h, eFileLock, ctrlFlags, lastErrno,
-# lockingContext, pPreallocatedUnused, zPath, pShm, ... (os_unix.c).
-_OFF_PINODE = 2 * _P
-_OFF_H = 3 * _P
-_OFF_ZPATH = 7 * _P
-_OFF_PSHM = 8 * _P
-# unixShm: pShmNode, ...; unixShmNode: pInode, pShmMutex, zFilename, hShm, ...
-_SHM_NODE = 0
-_NODE_PINODE = 0
-_NODE_HSHM = 3 * _P
-_MIN_OS_FILE = 9 * _P
+
+# The leading fields of os_unix.c's unixFile, unixShm and unixShmNode, with the
+# C types os_unix.c declares, so each offset follows the platform's ABI: on a
+# 32-bit ABI eFileLock, ctrlFlags and lastErrno pack into 8 bytes after h, and
+# zPath is at 32, not at seven pointers. Pointer fields are c_void_p so a read
+# yields the raw address. Only the offsets are used; nothing is read through
+# these classes.
+class _UnixFile(ctypes.Structure):
+    _fields_ = [
+        ("pMethod", ctypes.c_void_p),
+        ("pVfs", ctypes.c_void_p),
+        ("pInode", ctypes.c_void_p),
+        ("h", ctypes.c_int),
+        ("eFileLock", ctypes.c_ubyte),
+        ("ctrlFlags", ctypes.c_ushort),
+        ("lastErrno", ctypes.c_int),
+        ("lockingContext", ctypes.c_void_p),
+        ("pPreallocatedUnused", ctypes.c_void_p),
+        ("zPath", ctypes.c_void_p),
+        ("pShm", ctypes.c_void_p),
+    ]
+
+
+class _UnixShm(ctypes.Structure):
+    _fields_ = [("pShmNode", ctypes.c_void_p)]
+
+
+class _UnixShmNode(ctypes.Structure):
+    _fields_ = [
+        ("pInode", ctypes.c_void_p),
+        ("pShmMutex", ctypes.c_void_p),
+        ("zFilename", ctypes.c_void_p),
+        ("hShm", ctypes.c_int),
+    ]
+
+
+_OFF_PINODE = _UnixFile.pInode.offset
+_OFF_H = _UnixFile.h.offset
+_OFF_ZPATH = _UnixFile.zPath.offset
+_OFF_PSHM = _UnixFile.pShm.offset
+_SHM_NODE = _UnixShm.pShmNode.offset
+_NODE_PINODE = _UnixShmNode.pInode.offset
+_NODE_HSHM = _UnixShmNode.hShm.offset
+# A file object smaller than the unixFile prefix cannot hold the fields read.
+_MIN_OS_FILE = ctypes.sizeof(_UnixFile)
 
 
 class Unattributable(Exception):
@@ -153,7 +185,9 @@ def _install() -> _Hook:
     rc = lib.sqlite3_auto_extension(pointer)
     if rc != SQLITE_OK:
         return _Hook(None, f"sqlite3_auto_extension returned {rc}")
-    atexit.register(lib.sqlite3_cancel_auto_extension, pointer)
+    # Never cancelled at exit: exit handlers run last-registered first, so one
+    # registered before this install would find no capture when it opens a
+    # ledger. Process teardown discards the hook.
     failure: str | None
     try:
         with capturing() as captured:
