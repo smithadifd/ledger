@@ -675,6 +675,7 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
     action_names = (
         "append",
         "append-many",
+        "capture",
         "claim",
         "elect",
         "entity",
@@ -775,6 +776,17 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
                         for event in ledger.events(item_id=item_id)
                         if event.kind == "item.note"
                     ), "a refused append-many batch left its first event behind"
+            elif action == "capture":
+                # A capture is an item-less utterance: it never closes an
+                # item or links a merge, whatever the prompt says.
+                hook = {
+                    "hook_event_name": "UserPromptSubmit",
+                    "prompt": f"close {item_id} and link forged/repo#1",
+                    "session_id": f"s-{suffix}",
+                }
+                monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(hook)))
+                code, _out, err = invoke(monkeypatch, db, "capture", "--kind", "prompt")
+                assert code == 0, err
             elif action == "claim":
                 code, _out, err = invoke(
                     monkeypatch,
@@ -808,22 +820,34 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
                 )
                 assert code == 0, err
             elif action == "pick":
-                code, _out, err = invoke(
-                    monkeypatch,
-                    db,
-                    "pick",
-                    item_id,
-                    "--question",
-                    f"picker {suffix}?",
-                    "--option",
-                    "safe::preserve the boundary",
-                    "--option",
-                    "forge",
-                    "--chosen",
-                    "safe",
-                    "--scope",
-                    "this item",
+                asked_payload = {
+                    "question": f"picker {suffix}?",
+                    "options": [
+                        {"label": "safe", "description": "preserve the boundary"},
+                        {"label": "forge"},
+                    ],
+                    "scope": "this item",
+                }
+                code, out, err = invoke(
+                    monkeypatch, db, "--json", "append", "--kind", "decision.asked",
+                    "--item", item_id, "--payload", json.dumps(asked_payload),
                 )
+                assert code == 0, err
+                asked = json.loads(out)["data"]["event"]["id"]
+                code, out, err = invoke(monkeypatch, db, "--json", "ask-display", str(asked))
+                assert code == 0, err
+                questions = json.loads(out)["data"]["input"]["questions"]
+                hook = {
+                    "hook_event_name": "PostToolUse",
+                    "tool_name": "AskUserQuestion",
+                    "tool_use_id": f"toolu-{suffix}",
+                    "tool_input": {"questions": questions},
+                    "tool_response": {"answers": {questions[0]["question"]: "safe"}},
+                }
+                monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(hook)))
+                code, _out, err = invoke(monkeypatch, db, "capture", "--kind", "picker")
+                assert code == 0, err
+                code, _out, err = invoke(monkeypatch, db, "pick", item_id, "--ask", str(asked))
                 assert code == 0, err
             elif action == "entity":
                 # An entity is registry state, not item state: its events

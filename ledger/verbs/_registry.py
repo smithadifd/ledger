@@ -13,7 +13,9 @@ from __future__ import annotations
 
 from ledger.verbs import append
 from ledger.verbs import append_many
+from ledger.verbs import ask_display
 from ledger.verbs import backup
+from ledger.verbs import capture
 from ledger.verbs import card
 from ledger.verbs import claim
 from ledger.verbs import context
@@ -46,7 +48,9 @@ from ledger.verbs import verify
 MODULES = (
     append,
     append_many,
+    ask_display,
     backup,
+    capture,
     card,
     claim,
     context,

@@ -51,7 +51,9 @@ from ledger.schema import (
     known_kinds,
 )
 from ledger.verbs import CliError
-from ledger.verbs.pick import TOOL_ANSWER, record_picker_answer
+from ledger.answers import bound_answer, render_ask_display
+from ledger.verbs.capture import TOOL_ANSWER, write_capture
+from ledger.verbs.pick import record_pick
 
 FIXTURE = Path(__file__).parent / "fixtures" / "decisions" / "ticket.json"
 ITEM = "TK-100"
@@ -655,81 +657,81 @@ PICKER_OPTIONS = [
     {"label": "The work ledger (Recommended)", "description": "One store per system"},
     {"label": "Markdown in the shared repo"},
 ]
+PICKER_SCOPE = "decision record location"
+
+
+def _ask_store(lg, key: str = "ask-store") -> int:
+    return lg.append(
+        kind="decision.asked",
+        payload={"question": "Where does the record live?", "options": PICKER_OPTIONS,
+                 "scope": PICKER_SCOPE},
+        item_id=ITEM, idempotency_key=key,
+    ).id
+
+
+def _owner_picks(lg, asked: int, label: str):
+    """The harness's capture of the owner choosing ``label`` in ask K's picker."""
+    question = render_ask_display(asked, lg.events(after_id=asked - 1, limit=1)[0].payload)
+    hook = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "AskUserQuestion",
+        "tool_use_id": f"toolu-{asked}-{label}",
+        "tool_input": {"questions": question},
+        "tool_response": {"answers": {question[0]["question"]: label}},
+    }
+    return write_capture(lg, "picker", hook, harness="pytest")
+
+
+def _pick(lg, asked: int, key: str = "pick-retry"):
+    return record_pick(lg, item_id=ITEM, asked_event_id=asked, idempotency_key=key,
+                       harness="pytest")
 
 
 def test_picker_answer_lands_as_an_election(ledger, ticket) -> None:
-    asked = ledger.append(
-        kind="decision.asked",
-        payload={"question": "Where does the record live?",
-                 "options": [{"label": option["label"]} for option in PICKER_OPTIONS]},
-        item_id=ITEM, idempotency_key="ask-store",
-    )
-    utterance, election = record_picker_answer(
-        ledger,
-        item_id=ITEM,
-        question="Where does the record live?",
-        options=PICKER_OPTIONS,
-        chosen="The work ledger (Recommended)",
-        scope="decision record location",
-        asked_event_id=asked.id,
-        idempotency_key="pick-1",
-    )
+    asked = _ask_store(ledger)
+    capture = _owner_picks(ledger, asked, "The work ledger (Recommended)")
+    utterance, election = _pick(ledger, asked)
+    assert utterance.id == capture.id
     assert utterance.kind == "utterance.captured"
-    assert utterance.channel == TOOL_ANSWER
+    assert utterance.channel == "hook:picker"
     assert utterance.provenance_class == TOOL_ANSWER
     assert "The work ledger (Recommended)" in utterance.payload["text"]
     assert election.kind == "decision.elected"
     assert election.payload["chosen"] == "The work ledger (Recommended)"
     assert election.payload["chosen_description"] == "One store per system"
     assert election.payload["rejected"] == ["Markdown in the shared repo"]
+    assert election.payload["scope"] == PICKER_SCOPE
     assert election.payload["quote_ref"] == utterance.id
-    assert election.payload["asked_event_id"] == asked.id
-    assert not [row for row in ledger.open_decisions() if row["asked_event_id"] == asked.id]
+    assert election.payload["asked_event_id"] == asked
+    assert election.payload["chosen_position"] == 1
+    assert not [row for row in ledger.open_decisions() if row["asked_event_id"] == asked]
+    assert bound_answer(ledger, asked).election.id == election.id
     # An election from a picker can settle a lean decision.
     decision = _lean_decision(ledger, "lean-picked")
     _settle(ledger, decision, "settle-picked", source_event_id=election.id)
     assert _record(ledger, decision)["standing"] == "settled"
 
 
-def test_typed_picker_answer_rejects_every_offered_option(ledger, ticket) -> None:
-    _utterance, election = record_picker_answer(
-        ledger, item_id=ITEM, question="Which store?", options=PICKER_OPTIONS,
-        chosen="Neither, ask the team first", free_text="Neither, ask the team first",
-        scope="store", idempotency_key="pick-typed",
-    )
-    assert election.payload["rejected"] == [option["label"] for option in PICKER_OPTIONS]
-
-
-def test_refused_picker_answer_captures_nothing(ledger, ticket) -> None:
+def test_typed_picker_answer_is_refused_and_writes_nothing(ledger, ticket) -> None:
+    asked = _ask_store(ledger)
+    _owner_picks(ledger, asked, "Neither, ask the team first")
     before = len(ledger.events())
-    with pytest.raises(CliError, match="not an open decision.asked"):
-        record_picker_answer(
-            ledger, item_id=ITEM, question="q?", options=PICKER_OPTIONS,
-            chosen="Markdown in the shared repo", scope="s",
-            asked_event_id=ticket["reply"], idempotency_key="pick-bad",
-        )
+    with pytest.raises(CliError) as refused:
+        _pick(ledger, asked, "pick-typed")
+    assert refused.value.code == "picker_typed"
     assert len(ledger.events()) == before
 
 
-def _ask_store(lg) -> int:
-    return lg.append(
-        kind="decision.asked",
-        payload={"question": "Where does the record live?",
-                 "options": [{"label": option["label"]} for option in PICKER_OPTIONS]},
-        item_id=ITEM, idempotency_key="ask-store",
-    ).id
+def test_refused_picker_answer_writes_nothing(ledger, ticket) -> None:
+    before = len(ledger.events())
+    with pytest.raises(CliError, match="not an open decision.asked"):
+        _pick(ledger, ticket["reply"], "pick-bad")
+    assert len(ledger.events()) == before
 
 
-def _pick(lg, asked: int, chosen: str = "The work ledger (Recommended)"):
-    return record_picker_answer(
-        lg, item_id=ITEM, question="Where does the record live?", options=PICKER_OPTIONS,
-        chosen=chosen, scope="decision record location", asked_event_id=asked,
-        idempotency_key="pick-retry",
-    )
-
-
-def test_identical_picker_retry_returns_the_recorded_pair(ledger, ticket) -> None:
+def test_identical_picker_retry_returns_the_recorded_election(ledger, ticket) -> None:
     asked = _ask_store(ledger)
+    _owner_picks(ledger, asked, "The work ledger (Recommended)")
     first = _pick(ledger, asked)
     before = len(ledger.events())
     again = _pick(ledger, asked)
@@ -739,40 +741,45 @@ def test_identical_picker_retry_returns_the_recorded_pair(ledger, ticket) -> Non
 
 def test_conflicting_picker_retry_is_refused(ledger, ticket) -> None:
     asked = _ask_store(ledger)
+    _owner_picks(ledger, asked, "The work ledger (Recommended)")
     first = _pick(ledger, asked)
+    other = _ask_store(ledger, "ask-store-2")
+    _owner_picks(ledger, other, "Markdown in the shared repo")
     before = len(ledger.events())
     with pytest.raises(IdempotencyConflict):
-        _pick(ledger, asked, chosen="Markdown in the shared repo")
+        _pick(ledger, other)
     assert len(ledger.events()) == before
-    assert ledger.event_by_key("pick-retry:election").id == first[1].id
+    assert ledger.event_by_key("pick-retry").id == first[1].id
 
 
-def test_picker_writes_both_events_or_neither(ledger, ticket, monkeypatch) -> None:
+def test_picker_writes_the_election_or_nothing(ledger, ticket, monkeypatch) -> None:
     import ledger.verbs.pick as pick
 
     def refuse(*_args, **_kwargs):
-        raise CliError("refused after the utterance", code="refused", exit_code=3)
+        raise CliError("refused at the write", code="refused", exit_code=3)
 
     monkeypatch.setattr(pick, "record_election", refuse)
+    asked = _ask_store(ledger)
+    _owner_picks(ledger, asked, "The work ledger (Recommended)")
     before = len(ledger.events())
-    with pytest.raises(CliError, match="refused after the utterance"):
-        _pick(ledger, _ask_store(ledger))
-    assert len(ledger.events()) == before + 1, "only the ask should remain"
-    assert ledger.event_by_key("pick-retry:utterance") is None
+    with pytest.raises(CliError, match="refused at the write"):
+        _pick(ledger, asked)
+    assert len(ledger.events()) == before
+    assert ledger.event_by_key("pick-retry") is None
 
 
-def test_cli_pick_records_utterance_and_election(ledger, ticket, monkeypatch) -> None:
+def test_cli_pick_records_the_election_from_the_capture(ledger, ticket, monkeypatch) -> None:
     db = str(ledger.path)
-    code, out, err = invoke(monkeypatch, [
-        "--json", "--db", db, "pick", ITEM, "--question", "Ship it?",
-        "--option", "Yes::ship today", "--option", "No", "--chosen", "Yes",
-        "--scope", "release",
-    ])
+    asked = _ask_store(ledger)
+    capture = _owner_picks(ledger, asked, "Markdown in the shared repo")
+    argv = ["--json", "--db", db, "pick", ITEM, "--ask", str(asked)]
+    code, out, err = invoke(monkeypatch, argv)
     assert code == 0, err
     data = json.loads(out)["data"]
-    assert data["utterance"]["channel"] == TOOL_ANSWER
-    assert data["election"]["payload"]["quote_ref"] == data["utterance"]["id"]
-    assert data["election"]["payload"]["rejected"] == ["No"]
+    assert data["utterance"]["id"] == capture.id
+    assert data["election"]["payload"]["quote_ref"] == capture.id
+    assert data["election"]["payload"]["rejected"] == ["The work ledger (Recommended)"]
+    assert data["election"]["payload"]["chosen_description"] == "Markdown in the shared repo"
 
 
 # --- read verbs ---------------------------------------------------------------

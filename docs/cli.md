@@ -160,14 +160,18 @@ ledger revision (the newest event id) it was rendered from.
 **`append --kind KIND --payload JSON [--item ID] [--idempotency-key K] [--channel C] [--provenance-class P] [--payload-version N] [--expect-revision ID]`**
 Append one validated event of any kind that is not reserved (`loop.*`,
 `ledger.system` and `item.spec` are reserved). Retrying with the same key and
-content returns the stored event.
+content returns the stored event. A `--channel` that starts with `hook:` is
+reserved for `capture` and refused (`reserved-capture-channel`), here and in
+`append-many` and the library; a `picker` field in an `utterance.captured`
+payload is refused on any channel but `hook:picker`.
 
 **Retrying with a key.** `append`, `pick`, `note`, `link` and `elect` take
 `--idempotency-key K`. Without it every call writes a fresh event. With it:
 no earlier event under `K` means the call writes; an earlier event with the
 same content is returned (exit 0, the first event's id) and nothing is
 written; an earlier event with different content is refused as a `conflict`
-(exit 3). `note`, `elect` and a plain `link` write one event under `K` itself.
+(exit 3). `note`, `elect`, `pick` and a plain `link` write one event under `K`
+itself.
 `link --rel duplicate-of` writes two events in one transaction, under
 `K` (the link, the same slot a plain `link` uses) and `K:close` (the close), so
 a retry returns both and writes none, and a plain `link` and a `duplicate-of`
@@ -187,12 +191,44 @@ and `--quote` are repeatable: give `--rejected` once for each alternative that
 was not chosen. Every `--quote` must be a byte-exact substring of the
 text of the `utterance.captured` event named by `--quote-ref`. `--ask`
 closes exactly that open question. `ledger elect --help` has a worked
-example.
+example. An election `elect` writes is evidence: no gate opens on it (see
+"Answers that open a gate" in [concepts.md](concepts.md)).
 
-**`pick ITEM --question Q --option LABEL[::DESCRIPTION]... --chosen LABEL [--free-text T] --scope S [--ask EVENT] [--idempotency-key K]`**
-Record a question-picker answer: an utterance holding the question, the
-chosen label and any typed text, plus an election quoting it. A chosen label
-outside the offered options is recorded as a typed answer.
+**`ask-display EVENT`** Print the AskUserQuestion input for the ask: a
+`questions` array with one question, `[ask K] <question> (scope: <scope>)`
+(`[ask K] <question> (scope: <scope>; question id: <question_id>)` when the
+ask has a question id, so a grant id is on what the owner sees),
+header `ask K`, the ask's options in order as `{label, description}` (a
+missing description shows the label) and `multiSelect` false, then a line
+`display_sha256 <hex>`, the SHA-256 of that array's canonical JSON. `--json`
+carries `{asked_event_id, item_id, input, display_sha256}`. An ask with no
+`scope`, with fewer than two or more than four options, with a repeated
+label, or whose header would pass 12 characters is refused with
+`ask_not_pickable` (exit 3); an id that is no ask exits 1 (`ask_not_found`).
+
+**`pick ITEM --ask EVENT [--idempotency-key K]`** Record the owner's picker
+answer to an open ask as an election. The answer is the earliest
+`hook:picker` capture tagged for the ask; the election takes the capture's
+fingerprint and option position and every other field from the ask at that
+position, and is checked as a gate would check it before it is written.
+Refusals (exit 3): `unresolvable_ask`, `capture_missing`, and the reasons of
+"Answers that open a gate" in [concepts.md](concepts.md), such as
+`capture_conflict`, `display_differs`, `picker_typed` and `picker_annotated`.
+The old `--question/--option/--chosen` form is refused with `pick_needs_ask`;
+any of those flags or `--scope` beside `--ask` is a usage error.
+
+**`capture --kind prompt|picker`** The harness's hooks record what they saw;
+an agent never runs this. Stdin is one hook JSON object. `prompt` takes the
+UserPromptSubmit input and writes the prompt on channel `hook:prompt`
+(provenance `submitted-prompt`; a prompt over 64 KiB is stored as a pointer
+with its size and SHA-256). `picker` takes the PostToolUse input for
+AskUserQuestion and writes one event per call on channel `hook:picker`
+(provenance `tool-answer`) whose `picker` object holds the displayed
+`questions` array verbatim, its fingerprint, the answers map, any
+annotations, the chosen option position of a one-question picker, and the
+ask an `[ask K]` tag at the start of the first question names. Refusals
+(exit 3): `capture_not_prompt`, `capture_not_picker`, `capture_bad_input`.
+A retry of one tool call returns the stored event.
 
 **`lint-quotes [--item ITEM]`** Re-check every election's quotes.
 
@@ -261,9 +297,10 @@ card stays the per-item view.
 `rung:` is a grant, keyed by that id across items; the newest election per id
 decides. `granted` is `STANDING` when it verifies and `UNVERIFIED` when it
 does not; any other `chosen` (`withdrawn`) is `WITHDRAWN` without verifying.
-Verified means the `quote_ref` is an `utterance.captured` a person wrote
-(`submitted-prompt` or `tool-answer`) and every quote is a byte-exact
-substring of it. The table prints one row per grant, sorted by grant id,
+Verified means the election answers an ask whose `question_id` is the grant
+id (else the reason is `grant_unasked`) and is that ask's bound answer: the
+owner's picker answer, recorded with `pick --ask` (else the reason is the
+gate's, or `not_first_answer`). The table prints one row per grant, sorted by grant id,
 under a line naming the ledger revision; `--json` prints the same rows.
 `--check` exits 0 when the grant is `STANDING`, else 3 with `grant_withdrawn`,
 `grant_unverified` or `grant_unknown`. It reports; no gate reads it.
