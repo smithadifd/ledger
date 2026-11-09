@@ -14,13 +14,17 @@ that is not verified is UNVERIFIED, never standing. The asymmetry is
 deliberate: a withdrawal only removes authority, so it takes effect without
 verification and fails closed; a grant adds authority, so it must verify.
 
-Verified. The election's ``quote_ref`` resolves to an ``utterance.captured``
-event whose provenance class says a person wrote it (``REPLY_PROVENANCE``:
-a submitted prompt or a question-picker answer), and every entry in
-``quotes`` is a byte-exact substring of that utterance's text. The quote rule
-is ``ledger elect``'s own (``validate_quote_provenance``), called here
-unchanged: a raw ``ledger append`` of a ``decision.elected`` skips that
-check at write time, so the reader checks again.
+Verified. The election answers an ask: its ``asked_event_id`` names a
+``decision.asked`` whose ``question_id`` is the same grant id (else the
+reason is ``grant_unasked``), and ``ledger.answers.bound_answer`` on that
+ask returns this election: the owner's picker answer, captured by the
+harness, bound to the ask, with every field derived from it (else the
+reason is ``bound_answer``'s, or ``not_first_answer`` when the ask's first
+election is another one). A grant is raised as an ask with the grant id as
+its ``question_id`` and recorded with ``ledger pick --ask``.
+``unverified_reason`` stays as the quote-only audit check: it reports
+whether the quotes are verbatim spans of a reply-class utterance, and no
+standing reads it.
 
 Grantor and date. ``grantor`` is the operator stamped on the quoted
 utterance (the text before the first ``/`` of its actor, as ``v_events``
@@ -45,6 +49,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from ledger.answers import bound_answer
 from ledger.decisions import REPLY_PROVENANCE
 from ledger.store import Ledger
 from ledger.verbs import EXIT_REFUSED, CliError, Context, Result, Verb, open_db
@@ -56,6 +61,11 @@ WITHDRAWN_LABEL = "withdrawn"
 STANDING = "STANDING"
 WITHDRAWN = "WITHDRAWN"
 UNVERIFIED = "UNVERIFIED"
+# Why a granted election stands on no ask carrying its grant id.
+GRANT_UNASKED = "grant_unasked"
+# Why a granted election is not the ask's first election.
+NOT_FIRST_ANSWER = "not_first_answer"
+_MAX_EVENT_ID = 2**63 - 1  # SQLite integer ceiling
 # The standing grant for review rounds past the cap. A review-round grant
 # line that names a standing grant points at this record.
 REVIEW_ROUND_GRANT_ID = "grant:review-round-past-cap"
@@ -119,7 +129,8 @@ def _utterance(conn, quote_ref: Any) -> Mapping[str, Any] | None:
 
 
 def unverified_reason(lg: Ledger, payload: Mapping[str, Any]) -> str | None:
-    """None when the election verifies; otherwise why it does not."""
+    """The quote-only audit check: None when the quotes are verbatim spans of a
+    reply-class utterance; otherwise why not. No standing reads it."""
     quote_ref = payload.get("quote_ref")
     quotes = payload.get("quotes")
     try:
@@ -134,6 +145,29 @@ def unverified_reason(lg: Ledger, payload: Mapping[str, Any]) -> str | None:
     return None
 
 
+def standing_reason(
+    lg: Ledger, grant_id: str, event_id: int, payload: Mapping[str, Any]
+) -> str | None:
+    """None when a ``granted`` election is the bound answer to an ask that
+    carries its grant id; otherwise why it is not."""
+    asked = payload.get("asked_event_id")
+    if type(asked) is not int or not 1 <= asked <= _MAX_EVENT_ID:
+        return GRANT_UNASKED
+    row = lg._conn.execute(
+        "SELECT kind, payload FROM events WHERE id = ?", (asked,)
+    ).fetchone()
+    if row is None or row["kind"] != "decision.asked":
+        return GRANT_UNASKED
+    if json.loads(row["payload"]).get("question_id") != grant_id:
+        return GRANT_UNASKED
+    answer = bound_answer(lg, asked)
+    if answer.reason is not None:
+        return answer.reason
+    if answer.election.id != event_id:
+        return NOT_FIRST_ANSWER
+    return None
+
+
 def _grant(lg: Ledger, grant_id: str, event_id: int, payload: Mapping[str, Any]) -> Grant:
     quote_ref = payload.get("quote_ref")
     utterance = _utterance(lg._conn, quote_ref)
@@ -141,7 +175,7 @@ def _grant(lg: Ledger, grant_id: str, event_id: int, payload: Mapping[str, Any])
     if payload.get("chosen") != GRANTED:
         status = WITHDRAWN
     else:
-        reason = unverified_reason(lg, payload)
+        reason = standing_reason(lg, grant_id, event_id, payload)
         status = STANDING if reason is None else UNVERIFIED
     grantor = NONE_CELL
     date = NONE_CELL

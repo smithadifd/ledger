@@ -18,19 +18,20 @@ exists to prevent.
 - **item closed** — the work is done or dropped: `ledger state ITEM --status closed`.
 - **decision made** — a choice was settled in the work and the reason should
   outlive the session: `ledger note ITEM --text "decided: ... because ..."`.
-- **decision elected** — the person chose between options: `ledger elect`,
-  quoting the words they typed (see below).
+- **decision elected** — the person chose between options: ask through the
+  question picker, then `ledger pick ITEM --ask K` (see below).
 - **brief ratified** — the person approved a brief or plan. A ratification is
-  an election, not a note: capture their words, then `ledger elect` quoting
-  them. Link the brief itself by path with
+  an election, not a note: ask for it through the picker and `ledger pick`
+  the answer. Link the brief itself by path with
   `ledger link ITEM --rel url --target PATH`.
 - **thread parked** — work pauses with more to do: write `item.stopped`.
 - **thread stopped** — a session ends mid-item: write `item.stopped`.
 
-Use the verbs `note`, `link` and `elect`. Never write a hand-made append
-script. Two events have no verb of their own and go through one plain
-`ledger append` command each: `utterance.captured` (the person's words, the
-evidence an election quotes) and `item.stopped` (see the close rule).
+Use the verbs `note`, `link`, `ask-display`, `pick` and `elect`. Never write
+a hand-made append script. Two events have no verb of their own and go
+through one plain `ledger append` command each: `decision.asked` (the
+question you put to the person) and `item.stopped` (see the close rule).
+Never write the person's words yourself: the harness captures them.
 
 ## Reading order
 
@@ -48,14 +49,30 @@ When you start, or come back to an item:
 ## Electing a ratification
 
 A ratification, a choice between options, or any "yes, do it that way" from
-the person is a decision, and a decision is an election.
+the person is a decision, and a decision is an election. A gate counts it
+only when the person answered in the question picker and the harness
+captured that answer for this question.
 
-1. Capture the person's words as an utterance:
-   `ledger append --item ITEM --kind utterance.captured --channel terminal --provenance-class submitted-prompt --payload '{"text": "...", "origin": "person"}'`.
-   The output names the event id.
-2. Elect, quoting that text byte for byte:
-   `ledger elect ITEM --question Q --chosen LABEL --chosen-description D --rejected LABEL --scope S --quote-ref EVENT --quote "words they typed"`.
+1. Record the question as an ask, with two to four options and the scope
+   the answer covers:
+   `ledger append --item ITEM --kind decision.asked --payload '{"question": "...", "options": [{"label": "apply", "description": "..."}, {"label": "hold", "description": "..."}], "scope": "..."}'`.
+   The output names the event id, K.
+2. `ledger ask-display K` prints the picker input. Send it as your
+   AskUserQuestion call exactly as printed; never write the picker yourself.
+3. Once the person has answered, the harness has recorded the answer. Record
+   the election from it: `ledger pick ITEM --ask K`.
 
+`pick` takes nothing else: the chosen option, the rejected ones, the
+question, the scope and the quote all come from the ask and the captured
+answer. It refuses when no answer was captured (`capture_missing`), when two
+answers disagree (`capture_conflict`), when the person typed an answer or
+added a note (`picker_typed`, `picker_annotated`), or when the picker shown
+was not the one `ask-display` printed (`display_differs`). Ask again with a
+fresh ask; never work around a refusal.
+
+A typed answer in the chat can still be recorded as evidence with
+`ledger elect`, quoting the harness's capture of that prompt, but no gate
+opens on it. Never run `ledger capture`: it belongs to the harness's hooks.
 Never record only a note such as "approved by the person". A note carries no
 quoted evidence, and `ledger lint-quotes` can only check an election.
 

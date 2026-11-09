@@ -225,7 +225,10 @@ label and description, every rejected option, and the scope) plus a
 must be a byte-exact substring of that utterance's text: no case folding and
 no whitespace normalisation. `ledger lint-quotes` re-checks every election.
 A captured utterance is evidence of what text was submitted, not proof of who
-wrote it.
+wrote it. An election is evidence; a gate opens only on the owner's picker
+answer, captured by the harness and bound to its ask (`ledger ask-display`,
+then `ledger pick --ask`; see "Answers that open a gate" in
+[docs/concepts.md](docs/concepts.md)).
 
 ```sh
 python3 -m ledger append --item demo-1 --kind utterance.captured \
@@ -254,7 +257,9 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `spec` | `set`, `show` or `diff` an item's versioned spec | `set` |
 | `entity` | `register` an automation, project, machine or model, or `set` its state fields | yes |
 | `elect` | record an election with quote provenance | yes |
-| `pick` | record a question-picker answer as an utterance plus an election | yes |
+| `pick` | record the owner's picker answer to an ask (`--ask`) as an election | yes |
+| `ask-display` | print the one-question picker input a seat sends for an ask | no |
+| `capture` | record a harness hook's prompt or picker answer (run by hooks only) | yes |
 | `guidance` | `set`, `list` or `withdraw` a dated burn-or-protect note for a resource pool | `set`, `withdraw` |
 | `query` | list current items, with filters and a row cap | no |
 | `ready` | list open items with no open blocker | no |

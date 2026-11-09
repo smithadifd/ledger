@@ -440,26 +440,44 @@ def test_reclaim_at_the_current_version_clears_the_moved_line(db, monkeypatch) -
     assert "spec moved" not in card_text(monkeypatch, db)
 
 
+def picked(monkeypatch, db: str, question: str):
+    """Raise an ask, capture the owner choosing yes in its picker, then pick."""
+    payload = {"question": question, "options": [{"label": "yes"}, {"label": "no"}],
+               "scope": "this item"}
+    code, asked, err = cli_json(monkeypatch, db, "append", "--kind", "decision.asked",
+                                "--item", ITEM, "--payload", json.dumps(payload))
+    assert code == 0, err
+    asked_id = asked["data"]["event"]["id"]
+    code, shown, err = cli_json(monkeypatch, db, "ask-display", str(asked_id))
+    assert code == 0, err
+    questions = shown["data"]["input"]["questions"]
+    hook = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "AskUserQuestion",
+        "tool_use_id": f"toolu-{asked_id}",
+        "tool_input": {"questions": questions},
+        "tool_response": {"answers": {questions[0]["question"]: "yes"}},
+    }
+    monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(hook)))
+    code, _out, err = cli(monkeypatch, db, "capture", "--kind", "picker")
+    assert code == 0, err
+    return cli(monkeypatch, db, "pick", ITEM, "--ask", str(asked_id))
+
+
 def test_pick_prints_the_moved_line(db, monkeypatch) -> None:
     assert set_body(monkeypatch, db, BODY_ONE)[0] == 0
     assert cli(monkeypatch, db, "claim", ITEM)[0] == 0
-    pick = ("pick", ITEM, "--question", "go?", "--option", "yes", "--option", "no",
-            "--chosen", "yes", "--scope", "this item")
-    code, out, err = cli(monkeypatch, db, *pick)
+    code, out, err = picked(monkeypatch, db, "go?")
     assert code == 0, err
     assert "spec moved" not in out
     assert set_body(monkeypatch, db, BODY_TWO)[0] == 0
-    code, out, err = cli(monkeypatch, db, *pick[:3], "again?", *pick[4:])
+    code, out, err = picked(monkeypatch, db, "again?")
     assert code == 0, err
     assert out.splitlines()[-1] == "spec moved: v1 → v2"
 
 
-PICK = ("pick", ITEM, "--question", "go?", "--option", "yes", "--option", "no",
-        "--chosen", "yes", "--scope", "this item")
-
-
 def pick_out(monkeypatch, db: str, n: int) -> str:
-    code, out, err = cli(monkeypatch, db, *PICK[:3], f"go {n}?", *PICK[4:])
+    code, out, err = picked(monkeypatch, db, f"go {n}?")
     assert code == 0, err
     return out
 

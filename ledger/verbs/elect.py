@@ -19,12 +19,18 @@ messages.
 event it answers. The election then closes exactly that ask and no other;
 without ``--ask`` it closes no ask. A chosen label outside the ask's
 offered options is allowed: asks accept free-text answers.
+
+An election this verb writes is evidence, never a gate: a gate counts an
+answer only when it is the harness's picker capture bound to its ask
+(``ledger pick --ask``, read through ``ledger.answers.bound_answer``). An
+election quoting a typed prompt reads ``typed_answer`` there, and one
+quoting any utterance written before captures existed reads ``pre_binding``.
 """
 from __future__ import annotations
 
 import argparse
 import json
-from typing import Any
+from typing import Any, Mapping
 
 from ledger.verbs import (
     EXIT_REFUSED,
@@ -183,12 +189,17 @@ def record_election(
     quotes: list[str],
     asked_event_id: int | None,
     idempotency_key: str,
+    answer: Mapping[str, Any] | None = None,
     actor: str | None = None,
     harness: str | None = None,
     model: str | None = None,
     session: str | None = None,
 ):
-    """Apply the same field, quote, and open-ask checks for every election writer."""
+    """Apply the same field, quote, and open-ask checks for every election writer.
+
+    ``answer`` carries the picker answer ``ledger pick`` records
+    (``display_sha256`` and ``chosen_position``); ``ledger elect`` passes none.
+    """
     validate_election_fields(question, chosen, chosen_description, rejected, scope)
     require_item(lg, item_id)
     validate_quote_provenance(lg, quote_ref, quotes)
@@ -232,6 +243,9 @@ def record_election(
         payload["asked_event_id"] = asked_event_id
         if ask_payload.get("question_id") is not None:
             payload["question_id"] = ask_payload["question_id"]
+    for key in ("display_sha256", "chosen_position"):
+        if answer is not None and key in answer:
+            payload[key] = answer[key]
     return lg.append(
         kind="decision.elected",
         payload=payload,
