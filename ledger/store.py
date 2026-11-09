@@ -43,6 +43,7 @@ from .schema import (
     SPEC_KIND,
     SYSTEM_CLAIM_KIND,
     ValidationError,
+    refuse_display_control_characters,
     validate_item_id,
     validate_payload,
 )
@@ -864,6 +865,7 @@ class Ledger:
         if type(payload_version) is not int:
             raise ValidationError("bad-type:payload_version")
         payload_obj = validate_payload(kind, dict(payload), payload_version)
+        refuse_display_control_characters(kind, payload_obj)
         item = validate_item_id(kind, item_id, payload_version)
         if not internal and kind == "item.note":
             normalized_note = _normalized_note_prefix(payload_obj["text"])
