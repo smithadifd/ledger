@@ -398,6 +398,52 @@ def test_rename_away_and_back_with_reused_descriptor_refuses(
         original.close()
 
 
+def test_swap_to_already_open_database_with_reused_descriptor_refuses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    replacement = tmp_path / "replacement.db"
+    _seed(db).close()
+    _seed(replacement).close()
+    held_replacement = sqlite3.connect(replacement)
+    held_replacement.execute("SELECT 1 FROM events").fetchone()
+    held_original = sqlite3.connect(db)
+    held_original.execute("BEGIN")
+    held_original.execute("SELECT count(*) FROM events").fetchone()
+    recycled = sqlite3.connect(db)
+    recycled.execute("SELECT 1").fetchone()
+    recycled.close()
+    fired = False
+    returned: list[sqlite3.Connection] = []
+
+    def swap_after_connect(stage: str, path: Path) -> None:
+        nonlocal fired
+        if stage == "after_connect" and path == db:
+            os.replace(replacement, db)
+            fired = True
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", swap_after_connect)
+    try:
+        with pytest.raises(UnsafeDatabaseFile) as exc_info:
+            conn, _mode = dbfile.checked_connect(
+                db,
+                lambda: sqlite3.connect(
+                    f"{db.as_uri()}?mode=rw", uri=True, isolation_level=None
+                ),
+            )
+            returned.append(conn)
+        assert exc_info.value.code == "db_fd_unknown"
+        assert "connect opened 0 descriptors, expected 1" in str(exc_info.value)
+        assert fired
+        assert returned == [], "a refused connect must never return its connection"
+    finally:
+        for conn in returned:
+            conn.close()
+        held_original.rollback()
+        held_original.close()
+        held_replacement.close()
+
+
 def test_zero_new_descriptor_refuses_when_name_points_to_another_file(
     tmp_path: Path,
 ) -> None:
