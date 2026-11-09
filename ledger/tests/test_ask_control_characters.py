@@ -310,6 +310,25 @@ def test_an_ask_whose_displayed_text_is_not_text_is_not_pickable(ask_fields) -> 
         render_ask_display(5, stored)
 
 
+def test_an_exact_retry_of_a_stored_keyed_ask_returns_it_and_a_new_key_is_refused(
+        db, monkeypatch) -> None:
+    """The rule guards a new append, after the idempotency lookup: a retry of
+    an ask stored before the rule returns the stored event."""
+    kwargs = dict(kind="decision.asked", item_id=ITEM, harness="pytest",
+                  payload=ask_payload(question_id=HIDDEN_ID))
+    with open_ledger(db) as lg:
+        with monkeypatch.context() as patch:
+            patch.setattr("ledger.store.refuse_display_control_characters",
+                          lambda kind, payload: None)
+            stored = lg.append(idempotency_key="k-legacy", **kwargs)
+        before = len(lg.events())
+        retried = lg.append(idempotency_key="k-legacy", **kwargs)
+        assert retried.id == stored.id and retried.hash == stored.hash
+        with pytest.raises(Exception, match="ask_control_character:question_id"):
+            lg.append(idempotency_key="k-new", **kwargs)
+        assert len(lg.events()) == before
+
+
 # --- unchanged behaviour ------------------------------------------------------
 
 

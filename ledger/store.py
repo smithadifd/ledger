@@ -865,7 +865,6 @@ class Ledger:
         if type(payload_version) is not int:
             raise ValidationError("bad-type:payload_version")
         payload_obj = validate_payload(kind, dict(payload), payload_version)
-        refuse_display_control_characters(kind, payload_obj)
         item = validate_item_id(kind, item_id, payload_version)
         if not internal and kind == "item.note":
             normalized_note = _normalized_note_prefix(payload_obj["text"])
@@ -912,6 +911,10 @@ class Ledger:
         caller_precondition = precondition
 
         def checked_precondition(conn: sqlite3.Connection) -> None:
+            # Runs for a new append only, after the idempotency lookup: an
+            # exact retry of a keyed ask stored before this rule returns the
+            # stored event; the same text under a new key is refused.
+            refuse_display_control_characters(kind, payload_obj)
             if expect_revision is not None:
                 _check_expected_revision(conn, item, expect_revision)
             if not internal and item is not None:
