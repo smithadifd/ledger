@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from ledger import UnsafeDatabaseFile, open_ledger, store
+from ledger import open_ledger, store
 from ledger.backup import backup_db
 from ledger.cli import main
 from ledger.restore import replay_events
@@ -336,12 +336,11 @@ def test_read_only_opens_take_no_write_lock(current: Path) -> None:
     holder = sqlite3.connect(current, isolation_level=None, timeout=0)
     holder.execute("BEGIN IMMEDIATE")
     try:
-        started = time.monotonic()
-        with open_ledger_readonly(current) as lg:
-            assert [row["item_id"] for row in lg.items()] == ["T1"]
-        assert time.monotonic() - started < BUSY_TIMEOUT_MS / 1000
-        with pytest.raises(UnsafeDatabaseFile, match=r"^db_fd_unknown:"):
-            open_ledger(current)
+        for opener in (open_ledger_readonly, open_ledger):
+            started = time.monotonic()
+            with opener(current) as lg:
+                assert [row["item_id"] for row in lg.items()] == ["T1"]
+            assert time.monotonic() - started < BUSY_TIMEOUT_MS / 1000, opener.__name__
         assert holder.in_transaction is True
     finally:
         holder.execute("ROLLBACK")

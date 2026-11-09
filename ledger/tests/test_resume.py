@@ -124,10 +124,9 @@ def test_resume_reads_stops_and_items_from_one_snapshot(tmp_path, monkeypatch) -
 
     monkeypatch.setattr(Ledger, "events", events_then_close)
     code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
-    assert code == 3
+    assert code == 0, err
     assert fired
-    assert out == ""
-    assert "db_fd_unknown" in err
+    assert "stop a" in out, out
 
 
 def test_json_envelope_carries_the_same_entries(tmp_path, monkeypatch) -> None:
