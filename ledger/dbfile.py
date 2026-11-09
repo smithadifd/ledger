@@ -140,29 +140,16 @@ def _main_after_connect(path: Path) -> os.stat_result:
 def _verify_main(path: Path, before: Snapshot) -> tuple[int, Identity]:
     after = snapshot(path)
     new = _changed(before, after)
-    named: os.stat_result | None = None
-    if len(new) == 1:
-        fd, identity = next(iter(new.items()))
-    elif not new:
-        named = _main_after_connect(path)
-        matches = [
-            (fd, identity)
-            for fd, identity in before.items()
-            if identity == _identity(named)
-        ]
-        if not matches:
-            _unsafe("db_fd_unknown", "connect opened 0 descriptors, expected 1", path)
-        fd, identity = matches[0]
-    else:
+    if len(new) != 1:
         _unsafe("db_fd_unknown", f"connect opened {len(new)} descriptors, expected 1", path)
+    fd, identity = next(iter(new.items()))
     try:
         opened = os.fstat(fd)
     except OSError as exc:
         _unsafe("db_stat_failed", f"fstat({fd}): {exc}", path, exc)
     if not stat.S_ISREG(opened.st_mode):
         _unsafe("db_not_regular", "opened descriptor is not a regular file", path)
-    if named is None:
-        named = _main_after_connect(path)
+    named = _main_after_connect(path)
     if _identity(opened) != _identity(named) or identity != _identity(opened):
         _unsafe("db_swapped", "opened descriptor is not the file at the database path", path)
     if opened.st_nlink != 1:

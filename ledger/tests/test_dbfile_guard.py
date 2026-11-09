@@ -343,6 +343,61 @@ def _set_rollback_mode(path: Path) -> None:
         conn.close()
 
 
+def test_rename_away_and_back_with_reused_descriptor_refuses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    replacement = tmp_path / "replacement.db"
+    held = tmp_path / "ledger.held"
+
+    def make_database(path: Path, value: str) -> None:
+        conn = sqlite3.connect(path)
+        try:
+            conn.execute("PRAGMA journal_mode = DELETE")
+            conn.execute("CREATE TABLE identity_value (value TEXT NOT NULL)")
+            conn.execute("INSERT INTO identity_value VALUES (?)", (value,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    make_database(db, "database-at-path")
+    make_database(replacement, "replacement-database")
+    original = sqlite3.connect(db)
+    original.execute("SELECT * FROM identity_value").fetchall()
+    first_replacement = sqlite3.connect(replacement)
+    first_replacement.execute("SELECT 1").fetchall()
+    locked_replacement = sqlite3.connect(replacement, isolation_level=None)
+    locked_replacement.execute("BEGIN")
+    locked_replacement.execute("SELECT * FROM identity_value").fetchall()
+    first_replacement.close()
+    stages: list[str] = []
+    returned: list[sqlite3.Connection] = []
+
+    def swap_at_connect(stage: str, path: Path) -> None:
+        assert path == db
+        stages.append(stage)
+        if stage == "before_connect":
+            os.rename(db, held)
+            os.rename(replacement, db)
+        elif stage == "after_connect":
+            os.rename(db, replacement)
+            os.rename(held, db)
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", swap_at_connect)
+    try:
+        with pytest.raises(UnsafeDatabaseFile) as exc_info:
+            conn, _mode = dbfile.checked_connect(db, lambda: sqlite3.connect(db))
+            returned.append(conn)
+        assert exc_info.value.code == "db_fd_unknown"
+        assert stages == ["before_connect", "after_connect"]
+        assert returned == [], "a refused connect must never return its connection"
+    finally:
+        for conn in returned:
+            conn.close()
+        locked_replacement.close()
+        original.close()
+
+
 def test_zero_new_descriptor_refuses_when_name_points_to_another_file(
     tmp_path: Path,
 ) -> None:

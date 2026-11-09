@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from ledger import guidance, open_ledger, store
+from ledger import UnsafeDatabaseFile, guidance, open_ledger, store
 from ledger.store import open_ledger_readonly
 
 SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
@@ -112,18 +112,25 @@ def test_read_only_dir_open_with_a_live_writer_in_a_writable_dir_reads_wal_conte
         writer.close()
 
 
-def test_read_and_write_reopens_while_writer_holds_database_open(at_rest):
+def test_read_and_write_reopens_refuse_reused_descriptor_while_writer_is_open(at_rest):
     writer = _seed(at_rest, "third", "T3")  # committed, still in the -wal, writer open
+    expected = [("T1", "first"), ("T2", "second"), ("T3", "third")]
     try:
         assert (at_rest.parent / f"{at_rest.name}-wal").stat().st_size > 0
-        expected = [("T1", "first"), ("T2", "second"), ("T3", "third")]
-        for _ in range(3):
-            with open_ledger_readonly(at_rest) as reader:
-                assert _titles(reader) == expected
-            with open_ledger(at_rest) as reopened_writer:
-                assert _titles(reopened_writer) == expected
+        with open_ledger_readonly(at_rest) as reader:
+            assert _titles(reader) == expected
+        writer.append(kind="item.created", item_id="T4",
+                      payload={"type": "ticket", "title": "fourth"},
+                      idempotency_key="k-T4", harness="fixture")
+        expected.append(("T4", "fourth"))
+        for opener in (open_ledger_readonly, open_ledger):
+            with pytest.raises(UnsafeDatabaseFile, match=r"^db_fd_unknown:"):
+                opener(at_rest)
     finally:
         writer.close()
+    for opener in (open_ledger_readonly, open_ledger):
+        with opener(at_rest) as reopened:
+            assert _titles(reopened) == expected
 
 
 @pytest.mark.parametrize("leftover, message", [

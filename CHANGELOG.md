@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **Database opens are bound to the files at their names.** The ledger now refuses a database path whose final component is a symbolic link, a non-regular file such as a FIFO, or a file with another hard link. It also checks that SQLite opened exactly that database and safely accounts for the `-wal`, `-shm` and `-journal` files before returning a connection. Point configurations that use a symbolic link at the database name at the real file instead. See "Opening the database file" in `docs/concepts.md` for the accepted first-creation window.
+- **Database opens are bound to the files at their names.** The ledger now refuses a database path whose final component is a symbolic link, a non-regular file such as a FIFO, or a file with another hard link. It also checks that SQLite opened exactly that database and safely accounts for the `-wal`, `-shm` and `-journal` files before returning a connection. Point configurations that use a symbolic link at the database name at the real file instead. A process that holds a ledger connection open cannot reopen the same database until the first connection closes: SQLite may reuse its descriptor, so the guard refuses the reopen with `db_fd_unknown`. See "Opening the database file" in `docs/concepts.md` for this limit and the accepted first-creation window.
 
 ## 0.1.13 — 2026-11-08
 
