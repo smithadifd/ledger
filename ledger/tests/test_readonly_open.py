@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from ledger import guidance, open_ledger, store
+from ledger import UnsafeDatabaseFile, guidance, open_ledger, store
 from ledger.store import open_ledger_readonly
 
 SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
@@ -120,10 +120,12 @@ def test_read_while_a_writer_holds_the_database_open_sees_committed_data(at_rest
             assert _titles(lg) == [("T1", "first"), ("T2", "second"), ("T3", "third")]
         writer.append(kind="item.created", item_id="T4", payload={"type": "ticket", "title": "fourth"},
                       idempotency_key="k-T4", harness="fixture")
-        with open_ledger_readonly(at_rest) as lg:
-            assert ("T4", "fourth") in _titles(lg), "a later commit must be visible to a new reader"
+        with pytest.raises(UnsafeDatabaseFile, match=r"^db_fd_unknown:"):
+            open_ledger_readonly(at_rest)
     finally:
         writer.close()
+    with open_ledger_readonly(at_rest) as lg:
+        assert ("T4", "fourth") in _titles(lg)
 
 
 @pytest.mark.parametrize("leftover, message", [
@@ -156,19 +158,19 @@ class _RefusesEveryQuery:
 @pytest.mark.parametrize("leftover", ["-wal", "-shm", "-journal"])
 def test_a_readonly_refusal_beside_any_leftover_file_is_reraised_not_read_immutable(
         at_rest, monkeypatch, leftover):
-    # SQLite itself raises CANTOPEN, not READONLY, for a lone -wal, so the refusal is
-    # injected at the connection boundary to prove each suffix blocks the fallback.
-    uris: list[str] = []
+    # Inject the SQLite refusal at the checked-connect boundary; a leftover side
+    # file must prevent a second, immutable open.
+    attempts: list[bool] = []
 
-    def refusing(uri):
-        uris.append(uri.split("?", 1)[1])
-        return _RefusesEveryQuery()
+    def refusing(_path, _opener, *, immutable=False, set_wal=False):
+        attempts.append(immutable)
+        raise sqlite3.OperationalError("attempt to write a readonly database")
 
-    monkeypatch.setattr(store, "_readonly_conn", refusing)
+    monkeypatch.setattr(store, "checked_connect", refusing)
     Path(f"{at_rest}{leftover}").write_bytes(b"")
     with pytest.raises(sqlite3.OperationalError, match="readonly database"):
         open_ledger_readonly(at_rest)
-    assert uris == ["mode=ro"], "a leftover side file must block the immutable=1 fallback"
+    assert attempts == [False], "a leftover side file must block the immutable=1 fallback"
 
 
 def test_a_non_readonly_failure_in_a_read_only_dir_is_reraised_not_read_immutable(

@@ -77,12 +77,13 @@ places (`ledger/paths.py`, `ledger/store.py`):
 
 - **Before anything is opened.** A tool that configures several systems
   resolves them with `ledger.resolve_system_paths({"work": ..., "home": ...})`,
-  which expands `~`, resolves symlinks, and refuses two systems that land on
-  one file (`SharedDatabaseError`).
+  which expands `~`, resolves parent folders, refuses a symbolic link at the
+  database name, and refuses two systems that land on one file
+  (`SharedDatabaseError`).
 - **In the file itself.** The first `ledger.system` event binds the database
-  to one system. Because the claim is an event, every path to the file (a
-  symlink, a hard link, another spelling) sees it, and the export and restore
-  carry it. Claiming a database again for the system it already belongs to
+  to one system. Because the claim is an event, every accepted spelling of
+  the file sees it, and the export and restore carry it. Symbolic and hard
+  links are refused. Claiming a database again for the system it already belongs to
   writes nothing; claiming it for another system is refused
   (`SharedDatabaseError`). A log that carries a second `ledger.system` event,
   for another system or the same one, is refused on every write, replay and
@@ -145,6 +146,24 @@ passes the same validation, the same guards and the same attribution:
 Writes use WAL mode, a busy timeout, one short transaction per append, and a
 bounded retry with jitter, so several processes can write one database on
 one host.
+
+## Opening the database file
+
+The ledger opens its database only when the path names a regular file directly:
+not a symbolic link, FIFO, device or folder, and not a file with a second hard
+link. After SQLite opens the file, the ledger checks that the file SQLite holds
+is the one the path names, and refuses before running any statement if it is
+not. SQLite's `-wal`, `-shm` and `-journal` files beside the database get the
+same checks before the first statement, and their open copies are checked again
+before the first write.
+
+One first-creation window remains: SQLite opens or creates those side files by
+name, so a process that can write the database's folder can put a hard link
+there between the check and SQLite's open. The ledger then refuses before
+writing any ledger data, but SQLite may already have written into the linked
+file. A read-only open of a database path swapped to a FIFO in that window
+waits until something opens the FIFO for writing. Keep the database in a folder
+only you can write.
 
 ## Claims and leases
 

@@ -11,8 +11,9 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from .dbfile import checked_connect, precheck_files
 from .paths import resolve_db_path
-from .store import BUSY_TIMEOUT_MS, LedgerError
+from .store import BUSY_TIMEOUT_MS, LedgerError, _connect_readonly
 from .store import (
     _recorded_versions,
     _refuse_newer_schema_before_connect,
@@ -31,8 +32,8 @@ class BackupResult:
 
 def integrity_check(path: Path) -> str:
     """Run ``PRAGMA integrity_check`` on ``path``; return the joined verdict."""
-    uri = Path(path).resolve().as_uri() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
+    resolved = resolve_db_path(path)
+    conn = _connect_readonly(resolved)
     try:
         rows = conn.execute("PRAGMA integrity_check").fetchall()
     finally:
@@ -47,8 +48,8 @@ def _refuse_newer_schema_in_copy(path: Path) -> None:
     the copy starts, so a newer migration committed in between reaches the
     copy. Reading the copy checks exactly what would be published.
     """
-    uri = Path(path).resolve().as_uri() + "?mode=ro"
-    conn = sqlite3.connect(uri, uri=True)
+    resolved = resolve_db_path(path)
+    conn = _connect_readonly(resolved)
     try:
         versions = _recorded_versions(conn)
     finally:
@@ -59,7 +60,7 @@ def _refuse_newer_schema_in_copy(path: Path) -> None:
 def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
     """Snapshot ``db_path`` into ``dest`` via the online backup API."""
     source_path = resolve_db_path(db_path)
-    if not source_path.is_file():
+    if not precheck_files(source_path):
         raise LedgerError(f"database does not exist: {source_path}")
     dest_path = resolve_db_path(dest)
     live_files = (
@@ -75,13 +76,21 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
     partial = dest_path.with_name(dest_path.name + ".partial")
     partial.unlink(missing_ok=True)
     try:
-        source = sqlite3.connect(
-            str(source_path),
-            timeout=BUSY_TIMEOUT_MS / 1000,
+        source, _source_mode = checked_connect(
+            source_path,
+            lambda: sqlite3.connect(
+                str(source_path),
+                timeout=BUSY_TIMEOUT_MS / 1000,
+            ),
         )
         try:
             source.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-            target = sqlite3.connect(str(partial), timeout=BUSY_TIMEOUT_MS / 1000)
+            target, _target_mode = checked_connect(
+                partial,
+                lambda: sqlite3.connect(
+                    str(partial), timeout=BUSY_TIMEOUT_MS / 1000
+                ),
+            )
             try:
                 target.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
                 source.backup(target, pages=BACKUP_PAGES_PER_STEP)

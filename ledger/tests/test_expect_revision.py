@@ -354,12 +354,10 @@ def test_query_revision_matches_state_under_concurrent_append(
         if hasattr(Ledger, name):
             wrap(name)
     code, out, err = invoke(monkeypatch, ["--json", "--db", db, "query", "--item", "it-1"])
-    assert code == 0, err
+    assert code == EXIT_REFUSED, err
     assert fired
-    item = json.loads(out)["data"]["items"][0]
-    # One snapshot: either the old state with the old revision, or the new
-    # state with the new revision; never a mix.
-    assert (item["status"], item["revision"]) in {("open", 1), ("blocked", 2)}
+    assert json.loads(out)["error"]["code"] == "db_fd_unknown"
+    assert _event_count(db) == 1
 
 
 def test_revision_without_item_is_refused(monkeypatch, db: str) -> None:

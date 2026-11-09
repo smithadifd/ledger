@@ -13,9 +13,15 @@ import sqlite3
 from pathlib import Path
 
 from ledger import lease, search
+from ledger.dbfile import UnsafeDatabaseFile
 from ledger.export import read_watermark, resolve_export_dir
 from ledger.paths import resolve_db_path
-from ledger.store import _recorded_versions, _refuse_unknown_versions, load_migrations
+from ledger.store import (
+    _connect_readonly,
+    _recorded_versions,
+    _refuse_unknown_versions,
+    load_migrations,
+)
 from ledger.verbs import EXIT_NOT_FOUND, EXIT_REFUSED, CliError, Context, Result, Verb
 
 
@@ -24,9 +30,8 @@ def add_arguments(parser) -> None:
 
 
 def _schema_version(path: Path) -> int:
-    uri = f"file:{path}?mode=ro"
     try:
-        conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+        conn = _connect_readonly(path)
     except sqlite3.Error as exc:
         raise CliError(
             f"unusable database: {exc}",
@@ -75,13 +80,14 @@ def _search_status(resolved: Path, ctx: Context) -> dict:
 def _expired_claims(resolved: Path) -> dict:
     """Expired claims; any failure reads as ``unknown``, never an error."""
     try:
-        uri = f"file:{resolved}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+        conn = _connect_readonly(resolved)
         conn.row_factory = sqlite3.Row
         try:
             return {"status": "ok", "items": lease.expired_leases(conn)}
         finally:
             conn.close()
+    except UnsafeDatabaseFile:
+        raise
     except Exception as exc:  # an unmigrated or unreadable file is not a doctor failure
         return {"status": "unknown", "items": [], "reason": f"{type(exc).__name__}: {exc}"}
 
@@ -117,8 +123,7 @@ def _export_part(conn: sqlite3.Connection, export_dir: str | Path) -> dict:
 
 
 def _summary_snapshot(resolved: Path) -> dict:
-    uri = f"file:{resolved}?mode=ro"
-    conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+    conn = _connect_readonly(resolved)
     try:
         conn.execute("BEGIN")
         events_total, last_event_at = conn.execute(
@@ -152,6 +157,8 @@ def _summary(resolved: Path) -> dict:
     """Store counts; any failure reads as ``unknown``, never an error."""
     try:
         return _summary_snapshot(resolved)
+    except UnsafeDatabaseFile:
+        raise
     except Exception as exc:  # doctor never fails on the summary
         return {"status": "unknown", "reason": f"{type(exc).__name__}: {exc}"}
 

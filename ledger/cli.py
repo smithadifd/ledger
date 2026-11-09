@@ -17,6 +17,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping
 
+from ledger.dbfile import UnsafeDatabaseFile
 from ledger.paths import SharedDatabaseError
 from ledger.schema import ValidationError
 from ledger.store import (
@@ -218,6 +219,8 @@ def main(
         return _fail(json_mode, exc.code, str(exc), EXIT_USAGE)
     except CliError as exc:
         return _fail(json_mode, exc.code, str(exc), exc.exit_code)
+    except UnsafeDatabaseFile as exc:
+        return _fail(json_mode, exc.code, str(exc), EXIT_REFUSED)
     except SyncPathError as exc:
         return _fail(json_mode, "synced_path", str(exc), EXIT_REFUSED)
     except SharedDatabaseError as exc:

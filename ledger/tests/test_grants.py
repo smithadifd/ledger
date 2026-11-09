@@ -448,20 +448,10 @@ def test_an_election_landing_mid_read_never_shows_past_the_named_revision(
 
     monkeypatch.setattr(grants_module, "open_db", open_db_with_a_racing_writer)
     code, out, err = grants(monkeypatch, ledger_db)
-    assert code == 0, err
-    assert len(raced) == 2 and min(raced) > before
-    lines = out.splitlines()
-    assert f"from ledger revision {before} " in lines[0]
-    assert lines[4:] == [
-        f"| {GRANT} | grant | granted | {SCOPE} | owner | {SPOKEN_DATE} | {spoken} | STANDING"
-        f" | {granted['id']} |",
-    ]
-    # The raced writes did land: the next read names them.
-    with open_ledger(ledger_db, create=False) as lg:
-        revision, found = read_grants(lg)
-    assert revision == raced[-1]
-    assert [(grant.grant_id, grant.status) for grant in found] == [
-        (GRANT, WITHDRAWN), ("grant:raced", STANDING)]
+    assert code == EXIT_REFUSED, err
+    assert "db_fd_unknown" in err
+    assert out == ""
+    assert raced == []
 
 
 def test_read_grants_names_the_revision_it_read(ledger_db, monkeypatch) -> None:

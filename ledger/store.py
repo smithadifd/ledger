@@ -30,6 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
+from .dbfile import checked_connect, precheck_files
 from .decisions import check_event as check_decision_event
 from .decisions import decision_records
 from .paths import SharedDatabaseError, SyncPathError, SyncPathWarning, resolve_db_path
@@ -255,10 +256,17 @@ def _refuse_newer_schema_before_connect(path: Path) -> None:
     The one change SQLite itself may still make is its standard recovery of a
     crashed writer's hot journal, which restores the last committed state.
     """
-    if not path.exists():
+    if not precheck_files(path):
         return
-    conn = sqlite3.connect(f"{path.as_uri()}?mode=rw", uri=True, isolation_level=None,
-                           timeout=BUSY_TIMEOUT_MS / 1000)
+    conn, _mode = checked_connect(
+        path,
+        lambda: sqlite3.connect(
+            f"{path.as_uri()}?mode=rw",
+            uri=True,
+            isolation_level=None,
+            timeout=BUSY_TIMEOUT_MS / 1000,
+        ),
+    )
     try:
         versions = _recorded_versions(conn)
     finally:
@@ -359,17 +367,22 @@ def connect(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     last_error: BaseException | None = None
     for attempt in range(APPEND_RETRIES):
-        conn = sqlite3.connect(str(path), isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000)
-        conn.row_factory = sqlite3.Row
+        conn: sqlite3.Connection | None = None
         try:
-            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
-            if str(mode).lower() != "wal":
-                conn.execute("PRAGMA journal_mode = WAL")
+            conn, _mode = checked_connect(
+                path,
+                lambda: sqlite3.connect(
+                    str(path), isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000
+                ),
+                set_wal=True,
+            )
+            conn.row_factory = sqlite3.Row
             conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA foreign_keys = ON")
             return conn
         except sqlite3.OperationalError as exc:
-            conn.close()
+            if conn is not None:
+                conn.close()
             last_error = exc
             if not _is_busy(exc) or attempt >= APPEND_RETRIES - 1:
                 raise
@@ -1056,8 +1069,8 @@ class Ledger:
         """Bind this database to ``system``, or refuse another system's.
 
         The claim is a ``ledger.system`` event, so it lives in the database
-        file itself: every path that reaches the file (a link, a hard link,
-        another spelling) sees it, and an export or restore carries it. The
+        file itself: every accepted spelling of the file sees it, and an
+        export or restore carries it. Symbolic and hard links are refused. The
         check and the write share one ``BEGIN IMMEDIATE`` transaction, so an
         interrupted claim leaves the database unclaimed. An unclaimed
         database, including one from before claims existed, is claimed by
@@ -1294,17 +1307,22 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     cannot open the ledger at all.
     """
     uri = path.as_uri()
-    conn = _readonly_conn(f"{uri}?mode=ro")
     try:
-        conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        conn, _mode = checked_connect(
+            path, lambda: _readonly_conn(f"{uri}?mode=ro")
+        )
         return conn
     except BaseException as exc:
-        conn.close()
         refused = (isinstance(exc, sqlite3.OperationalError)
                    and _is_readonly_refusal(exc))
         if not refused or _side_files_present(path):
             raise
-    return _readonly_conn(f"{uri}?immutable=1")
+    conn, _mode = checked_connect(
+        path,
+        lambda: _readonly_conn(f"{uri}?immutable=1"),
+        immutable=True,
+    )
+    return conn
 
 
 def open_ledger_readonly(path: Path | str) -> Ledger:
