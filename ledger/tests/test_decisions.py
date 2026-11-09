@@ -7,6 +7,7 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
 import sys
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
@@ -1149,18 +1150,36 @@ def test_busy_claim_checkpoint_is_reported(tmp_path: Path) -> None:
     with open_ledger(db) as lg:
         lg.append(kind="item.created", payload={"type": "ticket", "title": "t"},
                   item_id="W-1", idempotency_key="w1")
-    # A real second connection holding a read transaction keeps the
-    # checkpoint from truncating the WAL.
-    reader = sqlite3.connect(str(db), isolation_level=None)
+    # A reader in another process holding a transaction keeps the
+    # checkpoint from truncating the WAL without sharing SQLite descriptors.
+    reader = """
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1], isolation_level=None)
+conn.execute("BEGIN")
+conn.execute("SELECT count(*) FROM events").fetchone()
+print("held", flush=True)
+sys.stdin.readline()
+conn.close()
+"""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", reader, str(db)],
+        cwd=Path(__file__).resolve().parents[2],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None
+    assert proc.stdout.readline().strip() == "held"
     try:
-        reader.execute("BEGIN")
-        reader.execute("SELECT count(*) FROM events").fetchone()
-        with pytest.raises(UnsafeDatabaseFile, match=r"^db_fd_unknown:"):
+        with pytest.raises(SharedDatabaseError, match=r"checkpoint of .* is busy"):
             claim_database(db, "work")
     finally:
-        reader.close()
-    assert _claims(db) == []
-    claim_database(db, "work")
+        assert proc.stdin is not None
+        proc.stdin.write("\n")
+        proc.stdin.flush()
+        _out, err = proc.communicate(timeout=30)
+        assert proc.returncode == 0, err
     assert _claims(db) == [{"system": "work"}]
 
 

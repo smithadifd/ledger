@@ -158,8 +158,8 @@ same checks before the first statement, and their open copies are checked again
 before the first write.
 
 A process that holds a ledger connection open and opens the same database again
-is refused with `db_fd_unknown` until the first connection closes. SQLite may
-reuse an existing descriptor, and the guard cannot prove which file that
+may be refused with `db_fd_unknown` until the first connection closes. SQLite
+may reuse an existing descriptor, and the guard cannot prove which file that
 descriptor belongs to.
 
 One first-creation window remains: SQLite opens or creates those side files by

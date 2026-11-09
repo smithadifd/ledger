@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import json
-import threading
+import subprocess
+import sys
 import time
 from datetime import date
 from pathlib import Path
@@ -11,7 +12,6 @@ import pytest
 
 from ledger import (
     IdempotencyConflict,
-    UnsafeDatabaseFile,
     ValidationError,
     guidance,
     open_ledger,
@@ -267,37 +267,45 @@ def test_a_withdraw_racing_a_set_never_leaves_the_set_closed(tmp_path):
     lg.close()
     item_id = guidance.item_id_for("xai-grok", "burn")
 
-    opened = threading.Event()
-    outcome: dict = {}
-
-    def setter():
-        try:
-            setter_lg = open_ledger(db)
-            opened.set()
-            try:
-                _record(setter_lg, reason="after the race", starts="2000-01-01", expires="2999-01-01")
-            finally:
-                setter_lg.close()
-        except BaseException as exc:  # reported below, never swallowed
-            outcome["error"] = exc
-        finally:
-            opened.set()
+    setter = """
+import sys
+from ledger import guidance, open_ledger
+lg = open_ledger(sys.argv[1], create=False)
+print("opened", flush=True)
+try:
+    guidance.record_guidance(
+        lg,
+        harness="pytest",
+        actor="tester",
+        pool="xai-grok",
+        direction="burn",
+        reason="after the race",
+        starts="2000-01-01",
+        expires="2999-01-01",
+    )
+finally:
+    lg.close()
+"""
 
     withdrawer = open_ledger(db)
     with withdrawer.transaction():
         withdrawer.append(kind="item.state", payload={"status": "closed"}, item_id=item_id,
                           idempotency_key="withdraw-during-set", harness="pytest", actor="tester")
-        thread = threading.Thread(target=setter)
-        thread.start()
-        assert opened.wait(10)
+        proc = subprocess.Popen(
+            [sys.executable, "-c", setter, str(db)],
+            cwd=Path(__file__).resolve().parents[2],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        assert proc.stdout is not None
+        assert proc.stdout.readline().strip() == "opened"
         # Let the setter reach the lock (and, if it read the status outside
         # the transaction, read it as still open) before the withdraw commits.
         time.sleep(0.5)
-    thread.join(30)
-    assert not thread.is_alive()
-    assert isinstance(outcome.get("error"), UnsafeDatabaseFile)
-    assert outcome["error"].code == "db_fd_unknown"
+    _out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
     item = withdrawer.item(item_id)
     reasons = [g.reason for g in guidance.in_force(withdrawer, TODAY)]
     withdrawer.close()
-    assert (item["status"], reasons) == ("closed", [])
+    assert (item["status"], reasons) == ("open", ["after the race"])

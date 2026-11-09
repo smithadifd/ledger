@@ -14,6 +14,7 @@ import hashlib
 import io
 import json
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -386,16 +387,34 @@ def test_claim_refuses_when_the_spec_moves_mid_claim(db, monkeypatch) -> None:
         # this again inside the transaction, where a second writer would wait.)
         if not landed:
             landed.append(True)
-            with open_ledger(db) as other:
-                set_spec(other, ITEM, {"title": "Spec title", "body_md": BODY_TWO},
-                         harness="pytest")
+            done = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys\n"
+                    "from ledger import open_ledger\n"
+                    "from ledger.verbs.spec import set_spec\n"
+                    "with open_ledger(sys.argv[1], create=False) as other:\n"
+                    "    set_spec(other, sys.argv[2], "
+                    "{'title': 'Spec title', 'body_md': sys.argv[3]}, harness='pytest')\n",
+                    db,
+                    ITEM,
+                    BODY_TWO,
+                ],
+                cwd=Path(__file__).resolve().parents[2],
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            assert done.returncode == 0, done.stderr
         return real(*args, **kwargs)
 
     monkeypatch.setattr(lease, "takeover_holder", spec_lands_meanwhile)
     code, body, _err = cli_json(monkeypatch, db, "claim", ITEM)
-    assert code == 3, body
     assert landed
-    assert body["error"]["code"] == "db_fd_unknown"
+    assert code == 3, body
+    assert body["error"]["code"] == "claim_changed"
+    assert "the spec changed while this claim was being recorded" in body["error"]["message"]
     with open_ledger(db, create=False) as lg:
         assert lg.events(item_id=ITEM, kind="item.state") == []
 
