@@ -156,13 +156,16 @@ def test_install_and_upgrade_use_pipx_never_a_bare_pip() -> None:
         flat = _flat(page)
         assert tag_install in flat, page.name
         # The whole page, flattened, so prose wrapped across two lines is seen
-        # as one. Allowed: the virtual environment's own pip (`.venv` starting
-        # the path: at the start of the text, or after whitespace or a
-        # backtick), and the sentence that tells the reader not to run a bare
-        # `pip install`; nothing else. Covers pip, pip3 and pip3.NN.
-        text = re.sub(r"(?<![^\s`])\.venv/bin/python -m pip install", "", flat)
+        # as one; a shell line continuation (a backslash at the end of a line)
+        # is joined first. Allowed: the virtual environment's own pip (`.venv`,
+        # with an optional leading `./`, starting the path: at the start of the
+        # text, or after whitespace or a backtick), and the sentence that tells
+        # the reader not to run a bare `pip install`; nothing else. Covers pip,
+        # pip3 and pip3.NN, with any dash-prefixed options before `install`.
+        joined = _squash(re.sub(r"\\\r?\n", " ", page.read_text(encoding="utf-8")))
+        text = re.sub(r"(?<![^\s`])(?:\./)?\.venv/bin/python -m pip install", "", joined)
         text = re.sub(r"Do not (?:run|use) a bare `pip install`", "", text)
-        bare = re.search(r"\bpip(?:3(?:\.\d+)?)?\s+install\b", text)
+        bare = re.search(r"\bpip(?:3(?:\.\d+)?)?(?:\s+-\S*)*\s+install\b", text)
         assert bare is None, (
             page.name,
             text[max(0, bare.start() - 40) : bare.end() + 40],
@@ -199,11 +202,23 @@ def test_every_page_spells_the_database_home_as_paths_py_does() -> None:
 
 
 def test_start_here_export_line_points_under_the_database_home() -> None:
-    # The value is the first word after the `=`: a trailing `# comment` is not
-    # part of it, and such a line is still checked.
-    exports = re.findall(r"^\s*export LEDGER_DB=(\S+)", START.read_text(encoding="utf-8"), re.M)
-    assert exports, "docs/start-here.md has no `export LEDGER_DB=` line"
-    for value in exports:
+    # Every such line is checked whole: after the value (up to whitespace or a
+    # shell separator `;`, `&`, `|`) only whitespace and an optional `# comment`
+    # may follow, so a second assignment or command on the line fails.
+    lines = [
+        line
+        for line in START.read_text(encoding="utf-8").splitlines()
+        if re.match(r"\s*export LEDGER_DB=", line)
+    ]
+    assert lines, "docs/start-here.md has no `export LEDGER_DB=` line"
+    for line in lines:
+        whole = re.fullmatch(r"\s*export LEDGER_DB=([^\s;&|]+)(?:\s+#.*)?\s*", line)
+        assert whole is not None, (
+            f"start-here's export line {line!r} has something after the value "
+            "(only whitespace and a # comment may follow)"
+        )
+        value = whole.group(1)
+        assert "$" not in value, f"start-here's export line {value!r} uses a shell variable ($)"
         assert ".." not in value.split("/"), (
             f"start-here's export line {value!r} has a parent-directory (..) segment"
         )
