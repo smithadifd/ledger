@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -18,6 +19,9 @@ NEVER_READY = "import time; time.sleep(600)"
 # A child that prints the ready line and then outlives any test.
 READY_THEN_SLEEP = "print('held', flush=True); import time; time.sleep(600)"
 DEADLINE = 2.0
+# Well above DEADLINE: only a read that has lost its deadline gets this far.
+HANG_GUARD = 20
+HUNG = f"the ready-line read did not return within {HANG_GUARD}s: the deadline is gone"
 
 
 def _start(code: str):
@@ -51,11 +55,29 @@ def test_the_ready_line_is_returned_when_the_child_prints_it():
 
 
 def test_a_child_that_never_prints_fails_within_the_deadline_and_is_reaped():
-    started = time.monotonic()
-    with pytest.raises(pytest.fail.Exception, match=r"no 'held' line within 2s"):
-        with _start(NEVER_READY) as proc:
-            read_ready_line(proc, "held", timeout=DEADLINE)
-    elapsed = time.monotonic() - started
+    # If the helper ever blocks without a deadline, an alarm fails this test
+    # by name instead of letting it hang the run.
+    hung: list[int] = []
+
+    def on_alarm(signum, _frame):
+        hung.append(signum)
+        pytest.fail(HUNG)
+
+    previous = signal.signal(signal.SIGALRM, on_alarm)
+    signal.alarm(HANG_GUARD)
+    try:
+        started = time.monotonic()
+        with pytest.raises(pytest.fail.Exception, match=r"no 'held' line within 2s"):
+            with _start(NEVER_READY) as proc:
+                read_ready_line(proc, "held", timeout=DEADLINE)
+        elapsed = time.monotonic() - started
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+        if hung:
+            # The alarm's failure lands inside pytest.raises above, which
+            # reports it as a regex mismatch; report it by its own name.
+            pytest.fail(HUNG)
     _assert_reaped(proc)
     assert DEADLINE <= elapsed < DEADLINE + 10, elapsed
 
