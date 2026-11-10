@@ -258,13 +258,15 @@ def test_start_here_runs_in_order_and_names_the_environment_the_code_reads() -> 
     assert "https://github.com/smithadifd/skills" in flat
 
 
-def test_changelog_newest_section_names_the_pipx_docs_and_the_start_here_page() -> None:
+def test_changelog_0_1_16_names_the_pipx_docs_and_the_start_here_page() -> None:
     text = CHANGELOG.read_text(encoding="utf-8")
     sections = re.split(r"^## ", text, flags=re.MULTILINE)[1:]
     assert sections, "CHANGELOG.md has no second-level heading"
-    heading, _, body = sections[0].partition("\n")
+    heading = sections[0].partition("\n")[0]
     assert re.fullmatch(r"Unreleased|\d+\.\d+\.\d+ \u2014 \d{4}-\d{2}-\d{2}", heading), (
         f"newest CHANGELOG heading is neither Unreleased nor a dated version: {heading!r}"
     )
-    newest = _squash(body)
-    assert "pipx" in newest and "docs/start-here.md" in newest
+    added = [s for s in sections if s.startswith("0.1.16 ")]
+    assert len(added) == 1, "CHANGELOG.md must keep exactly one 0.1.16 section"
+    body = _squash(added[0].partition("\n")[2])
+    assert "pipx" in body and "docs/start-here.md" in body

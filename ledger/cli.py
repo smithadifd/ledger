@@ -9,7 +9,6 @@ revision (``--expect-revision`` no longer matches the item's newest event).
 from __future__ import annotations
 
 import argparse
-import importlib.metadata
 import json
 import os
 import sqlite3
@@ -17,6 +16,8 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping
+
+from ledger import __version__
 
 from ledger.dbfile import UnsafeDatabaseFile
 from ledger.paths import SharedDatabaseError
@@ -59,13 +60,6 @@ def _env(name: str) -> str | None:
     return value
 
 
-def _package_version() -> str:
-    try:
-        return importlib.metadata.version("ledger")
-    except importlib.metadata.PackageNotFoundError:
-        return "unknown"
-
-
 def _program_name() -> str:
     configured = _env("LEDGER_PROG")
     if configured and not any(char in configured for char in "\r\n"):
@@ -98,7 +92,7 @@ def build_parser(table: dict[str, Verb]) -> LedgerParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"ledger {_package_version()}",
+        version=f"ledger {__version__}",
     )
     parser.add_argument(
         "--json",

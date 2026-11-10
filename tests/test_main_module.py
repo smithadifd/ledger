@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
+import ledger
 from ledger.store import load_migrations
 
 REPO = Path(__file__).resolve().parents[1]
@@ -59,3 +61,18 @@ def test_exit_code_passes_through(tmp_path: Path) -> None:
         "LEDGER_HARNESS is required for writes; set it, e.g. "
         "LEDGER_HARNESS=claude-code"
     )
+
+
+def test_version_flag_prints_the_package_version_constant() -> None:
+    result = _run("--version", env=_env())
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"ledger {ledger.__version__}\n"
+    assert result.stderr == ""
+
+
+def test_version_constant_equals_the_pyproject_version() -> None:
+    text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+    project = text.split("\n[project]\n", 1)[1].split("\n[", 1)[0]
+    matches = re.findall(r'^version = "([^"]+)"$', project, flags=re.MULTILINE)
+    assert len(matches) == 1, f"pyproject.toml [project] version lines: {matches!r}"
+    assert ledger.__version__ == matches[0]
