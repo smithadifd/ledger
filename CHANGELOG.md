@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.18 — 2026-11-10
+
+The SQLite-not-found refusal now names its usual cause and the remedy.
+
+- **When no library exposes SQLite's C API, the refusal names the usual cause and the remedy.** The usual cause is a Python build from python-build-standalone (which uv-managed Python uses), which links SQLite statically; the remedy is a Python whose `sqlite3` module links a shared `libsqlite3`, such as a distro or python.org build. CI also runs the suite on the runner's distro `python3`.
+
+Upgrade with `@v0.1.18`.
+
 ## 0.1.17 — 2026-11-10
 
 `ledger --version` reads the package's own version constant.
