@@ -24,6 +24,13 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Install pytest
         run: python -m pip install pytest
+      # TEMPORARY (LEDGER-PBS-MESSAGE-NOTES1): read this step's log, then remove
+      # the step and correct the test-distro comment below. Not part of the suite.
+      - name: TEMPORARY ldd of _sqlite3 (LEDGER-PBS-MESSAGE-NOTES1)
+        run: |
+          so="$(python -c 'import _sqlite3; print(_sqlite3.__file__)')"
+          echo "_sqlite3 file: $so"
+          ldd "$so"
       - name: Test suite
         run: python -m pytest -q -p no:cacheprovider
       - name: Verb registry is current
