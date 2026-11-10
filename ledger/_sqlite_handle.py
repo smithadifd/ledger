@@ -145,6 +145,15 @@ _install_lock = threading.Lock()
 _hook: _Hook | None = None
 
 
+# The usual cause of a failed load, and the remedy, appended to the refusal text.
+_NOT_FOUND_HINT = (
+    "The usual cause is a Python build from python-build-standalone (used by "
+    "uv-managed Python and some other installer Pythons), which links SQLite "
+    "statically and hides its C functions. Use a Python whose sqlite3 module "
+    "links a shared libsqlite3, such as a distro or python.org build."
+)
+
+
 def _library_names() -> Iterator[str | None]:
     import _sqlite3
 
@@ -168,7 +177,7 @@ def _load_library() -> ctypes.CDLL:
             errors.append(f"{name or 'process'}: {exc}")
             continue
         return lib
-    raise OSError("SQLite C API not found (" + "; ".join(errors) + ")")
+    raise OSError("SQLite C API not found (" + "; ".join(errors) + "). " + _NOT_FOUND_HINT)
 
 
 def _install() -> _Hook:
