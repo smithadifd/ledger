@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from ledger.schema import ValidationError, schema_for
+from ledger.schema import ValidationError, schema_for, strip_directory_ref_slash
 from ledger.verbs import (
     Context,
     Result,
@@ -38,6 +38,7 @@ def run(args, ctx: Context) -> Result:
         raise UsageError(f"payload is not JSON: {exc}") from exc
     if type(payload) is not dict:
         raise UsageError("payload must be a JSON object")
+    payload = strip_directory_ref_slash(args.kind, payload, args.payload_version)
     lg = open_db(ctx, write=True)
     try:
         if args.item_id and args.kind != "item.created":

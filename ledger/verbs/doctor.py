@@ -1,7 +1,9 @@
 """Print the resolved DB path and schema version; non-zero if unusable.
 
 It also reports whether the derived search index is missing, stale,
-behind (only newer events) or current. That report never changes the exit code.
+behind (only newer events) or current, with a severity (``ok``, ``info``, or
+``warn`` when the index cannot be built). That report never changes the exit
+code.
 
 It also lists claims whose lease has expired, with holder and age, so a dead
 seat's claim is noticed. That list never changes the exit code either.
@@ -74,6 +76,7 @@ def _search_status(resolved: Path, ctx: Context) -> dict:
             "path": str(resolved.parent / search.SEARCH_DB_NAME),
             "status": "unknown",
             "reasons": [f"{type(exc).__name__}: {exc}"],
+            "severity": search.severity_for("unknown"),
         }
 
 
