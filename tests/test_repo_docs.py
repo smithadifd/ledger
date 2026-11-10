@@ -304,6 +304,30 @@ def test_changelog_0_1_16_names_the_pipx_docs_and_the_start_here_page() -> None:
     assert "pipx" in body and "docs/start-here.md" in body
 
 
+DATED_HEADING = re.compile(r"(\d+\.\d+\.\d+) \u2014 \d{4}-\d{2}-\d{2}")
+
+
+def test_newest_changelog_heading_names_the_package_version() -> None:
+    # Headings are the `## ` lines. `Unreleased` is skipped; the first other
+    # heading must be a dated version (`X.Y.Z`, an em dash, `YYYY-MM-DD`)
+    # and name pyproject.toml's version. A CHANGELOG with no dated heading, or
+    # whose newest heading is not of that form, fails: it never falls through
+    # to an older heading.
+    headings = re.findall(r"^## (.+?)[ \t]*$", CHANGELOG.read_text(encoding="utf-8"), re.MULTILINE)
+    dated = [heading for heading in headings if heading != "Unreleased"]
+    assert dated, f"CHANGELOG.md has no dated heading: {headings!r}"
+    newest = DATED_HEADING.fullmatch(dated[0])
+    assert newest is not None, (
+        f"newest CHANGELOG heading is not a dated version (X.Y.Z \u2014 YYYY-MM-DD): {dated[0]!r}"
+    )
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+    version = project["project"]["version"]
+    assert newest.group(1) == version, (
+        f"newest CHANGELOG heading names {newest.group(1)!r}, "
+        f"but pyproject.toml's version is {version!r}"
+    )
+
+
 def test_concepts_documents_note_search_and_severity() -> None:
     text = (ROOT / "docs" / "concepts.md").read_text(encoding="utf-8")
     section = text.split("## The search index", 1)[1].split("\n## ", 1)[0]
