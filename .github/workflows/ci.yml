@@ -36,3 +36,27 @@ jobs:
           python -m ledger --db "$db" new --type ticket --title "CI smoke item"
           python -m ledger --db "$db" doctor
           python -m ledger --db "$db" verify
+
+  # The same suite on the runner's distro python3, whose sqlite3 module links a
+  # shared libsqlite3 (the setup-python builds above do not take this path).
+  test-distro:
+    name: test (distro python3)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install distro python3
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3 python3-venv python3-pip
+      - name: Create a virtual environment from the distro python3
+        run: |
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/python" -m pip install pytest
+      - name: sqlite3 links a shared libsqlite3
+        run: |
+          so="$("$RUNNER_TEMP/venv/bin/python" -c 'import _sqlite3; print(_sqlite3.__file__)')"
+          ldd "$so" | grep libsqlite3
+      - name: Test suite
+        run: '"$RUNNER_TEMP/venv/bin/python" -m pytest -q -p no:cacheprovider'
+      - name: Verb registry is current
+        run: '"$RUNNER_TEMP/venv/bin/python" -m ledger.gen_verb_registry --check'

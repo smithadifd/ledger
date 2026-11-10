@@ -1637,6 +1637,47 @@ def test_unavailable_capture_hook_refuses_every_kind(
         assert not db.exists(), "a refused create must not create the database"
 
 
+def _failing_library_names(tmp_path: Path):
+    """Two candidates that cannot load: nothing real is touched."""
+    names = [str(tmp_path / "missing-one.so"), str(tmp_path / "missing-two.so")]
+
+    def candidates():
+        yield from names
+
+    return candidates, names
+
+
+def test_no_sqlite_c_api_message_names_the_cause_and_the_remedy(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidates, names = _failing_library_names(tmp_path)
+    monkeypatch.setattr(_sqlite_handle, "_library_names", candidates)
+    with pytest.raises(OSError) as info:
+        _sqlite_handle._load_library()
+    message = str(info.value)
+    assert message.startswith("SQLite C API not found ("), message
+    for name in names:
+        assert name in message, message  # every candidate's error is kept
+    assert "python-build-standalone" in message, message
+    assert "uv-managed" in message, message
+    assert "shared libsqlite3" in message, message
+
+
+def test_no_sqlite_c_api_message_reaches_the_connect_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    candidates, _names = _failing_library_names(tmp_path)
+    db = tmp_path / "ledger.db"
+    monkeypatch.setattr(_sqlite_handle, "_hook", None)
+    monkeypatch.setattr(_sqlite_handle, "_library_names", candidates)
+    refusal = _refuse_kind(db, "C")
+    assert refusal.code == "db_fd_unattributable"
+    assert "SQLite C API not found" in str(refusal), refusal
+    assert "python-build-standalone" in str(refusal), refusal
+    assert "shared libsqlite3" in str(refusal), refusal
+    assert not db.exists(), "a refused create must not create the database"
+
+
 def test_capture_hook_from_another_sqlite_build_refuses(
     tmp_path: Path, monkeypatch
 ) -> None:
