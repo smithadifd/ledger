@@ -51,6 +51,12 @@ added, deleted or newly linked source is noticed; ``search`` rebuilds a stale
 index before it reads, filtered or not. The only ranker is BM25 (``RANKER``);
 it is named in the manifest so a second ranker can be added later and an
 index built by another, or by a version that named none, reads as stale.
+
+The index is opened only when ``lstat`` shows a regular file at its path. A
+FIFO, socket, device, directory or symlink there is never opened (a read-only
+SQLite open blocks on a FIFO): ``index_status`` calls it ``missing`` and names
+it, and a rebuild renames the new index over it, or refuses by name when the
+rename cannot replace it (a directory).
 """
 from __future__ import annotations
 
@@ -58,6 +64,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import tempfile
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -119,6 +126,13 @@ _STOPWORDS = frozenset(
 
 class SearchError(Exception):
     """The index cannot be built or read; the message says why."""
+
+
+class IndexUnavailable(SearchError):
+    """Nothing at the index path can be opened: it is absent, or it is not a
+    regular file and so is never opened. ``index_status`` reads this as
+    ``missing``, so the next search or ``ledger index`` builds a fresh index
+    in its place; the message names what is there."""
 
 
 @dataclass(frozen=True)
@@ -582,8 +596,58 @@ def current_manifest(db: Path | str, fallback_root: FallbackRoot | None = None) 
     return _manifest(resolved, last, events, roots, collect_sources(roots, linked_refs(events)))
 
 
+# lstat file kinds other than a regular file, in the words the refusals use.
+_NOT_REGULAR_KINDS = (
+    (stat.S_ISLNK, "symbolic link"),
+    (stat.S_ISDIR, "directory"),
+    (stat.S_ISFIFO, "FIFO"),
+    (stat.S_ISSOCK, "socket"),
+    (stat.S_ISCHR, "character device"),
+    (stat.S_ISBLK, "block device"),
+)
+
+
+def _not_regular_kind(mode: int) -> str | None:
+    """``None`` for a regular file, else the kind of file ``mode`` describes."""
+    if stat.S_ISREG(mode):
+        return None
+    for test, kind in _NOT_REGULAR_KINDS:
+        if test(mode):
+            return kind
+    return "non-regular file"
+
+
+def _lstat_index(index: Path) -> os.stat_result | None:
+    """The index path's own ``lstat`` (a symlink is not followed), or ``None``
+    when nothing is there. Any other ``lstat`` failure refuses by name."""
+    try:
+        return os.lstat(index)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise SearchError(f"cannot stat the search index {index}: {exc}") from exc
+
+
+def _open_index(index: Path) -> sqlite3.Connection:
+    """Open the index read-only, and only when its path is a regular file.
+
+    A ``mode=ro`` open blocks on a FIFO instead of failing, so the path is
+    checked with ``lstat`` first and anything but a regular file (a FIFO,
+    socket, device, directory, or a symlink, which is not followed) is never
+    opened. The index is derived and decides nothing, so a name check is
+    enough; there is no descriptor identity check.
+    """
+    found = _lstat_index(index)
+    if found is None:
+        raise IndexUnavailable(f"no {SEARCH_DB_NAME}")
+    kind = _not_regular_kind(found.st_mode)
+    if kind is not None:
+        raise IndexUnavailable(f"{SEARCH_DB_NAME} is a {kind}, not a regular file: {index}")
+    return sqlite3.connect(index.as_uri() + "?mode=ro", uri=True)
+
+
 def stored_manifest(index: Path) -> dict:
-    conn = sqlite3.connect(index.as_uri() + "?mode=ro", uri=True)
+    conn = _open_index(index)
     try:
         row = conn.execute("SELECT value FROM manifest WHERE key = 'manifest'").fetchone()
     finally:
@@ -646,10 +710,11 @@ def index_status(db: Path | str, fallback_root: FallbackRoot | None = None) -> d
     """
     resolved = resolve_db_path(db)
     index = search_db_path(resolved)
-    if not index.exists():
-        return {"path": str(index), "status": "missing", "reasons": ["no search.db"]}
     try:
         stored = stored_manifest(index)
+    except IndexUnavailable as exc:
+        # Absent, or not a regular file (never opened): a rebuild replaces it.
+        return {"path": str(index), "status": "missing", "reasons": [str(exc)]}
     except (sqlite3.Error, ValueError, SearchError) as exc:
         return {"path": str(index), "status": "stale", "reasons": [f"unreadable index: {exc}"]}
     roots, _note = resolve_roots(load_config(resolved), fallback_root)
@@ -727,7 +792,19 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
             conn.commit()
         finally:
             conn.close()
-        os.replace(tmp, index)
+        try:
+            # A rename replaces a FIFO, socket or symlink at the index path
+            # (the link itself, never its target); it cannot replace a
+            # directory, which is refused by name.
+            os.replace(tmp, index)
+        except OSError as exc:
+            found = _lstat_index(index)
+            kind = None if found is None else _not_regular_kind(found.st_mode)
+            if kind is None:
+                raise
+            raise SearchError(
+                f"cannot replace the {kind} at the search index path {index}: {exc}"
+            ) from exc
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -873,7 +950,7 @@ def search(
         filters["until"] = _iso(until.astimezone(UTC))
     sql += " ORDER BY rank LIMIT ?"
     params.append(limit + 1)
-    conn = sqlite3.connect(index.as_uri() + "?mode=ro", uri=True)
+    conn = _open_index(index)
     try:
         rows = conn.execute(sql, params).fetchall()
     except sqlite3.OperationalError as exc:
