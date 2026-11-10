@@ -7,6 +7,11 @@ files it reads) and the literal commands that continue: ``resume --item`` and
 form of the agent contract (the full page is in the ledger repository's
 docs folder) so a session-start hook can print both into context.
 
+The JSON data always carries ``open_without_stop``: how many open items have
+no stop recorded (0 when there are none, and 0 with ``--item``). Those items
+are not listed in ``items``, so the count is what tells an empty ledger from one
+whose open items were never stopped.
+
 The verb never writes: the database is opened read-only. A database that does
 not exist yet is not an error: the output says there are no open items and the
 exit status is 0 (an unknown ``--item`` is ``not_found``, exit 1). Every
@@ -239,7 +244,7 @@ def run(args, ctx: Context) -> Result:
         )
     else:
         body = NO_OPEN_ITEMS
-    data: dict[str, Any] = {"items": entries}
+    data: dict[str, Any] = {"items": entries, "open_without_stop": open_without_stop}
     text = body
     if args.brief:
         data["contract"] = SHORT_FORM

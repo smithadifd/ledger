@@ -172,8 +172,8 @@ and a failed check refuses with `db_fd_unattributable`. When the Python build hi
 ledger cannot install its connection capture, every open is refused with
 `db_fd_unattributable`; the ledger never falls back to an unchecked open.
 The common case is a python-build-standalone build, which uv-managed Python and some other installer Pythons
-use: it links SQLite statically. Use a Python whose sqlite3 module links a shared libsqlite3, such as a distro or
-python.org build.
+use: it links SQLite statically. Use a Python whose sqlite3 module links a shared libsqlite3, such as a distro
+build.
 
 One first-creation window remains: SQLite opens or creates those side files by
 name, so a process that can write the database's folder can put a hard link

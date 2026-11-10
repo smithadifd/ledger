@@ -38,8 +38,12 @@ jobs:
           python -m ledger --db "$db" doctor
           python -m ledger --db "$db" verify
 
-  # The same suite on the runner's distro python3, whose sqlite3 module links a
-  # shared libsqlite3 (the setup-python builds above do not take this path).
+  # The same suite on the distro's own packaged python3, in a virtual
+  # environment. The setup-python builds above also link the runner's shared
+  # libsqlite3 (an ldd of the 3.11 build's _sqlite3 showed it), so this job does
+  # not add a different SQLite linkage; it tests the distro's own Python
+  # packaging and its sqlite3 module, which the step below checks links a
+  # shared libsqlite3.
   test-distro:
     name: test (distro python3)
     runs-on: ubuntu-latest
