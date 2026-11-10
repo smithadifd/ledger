@@ -1661,6 +1661,8 @@ def test_no_sqlite_c_api_message_names_the_cause_and_the_remedy(
     assert "python-build-standalone" in message, message
     assert "uv-managed" in message, message
     assert "shared libsqlite3" in message, message
+    assert "python.org" not in message, message  # python.org builds are not shown to link a shared libsqlite3
+    assert not message.endswith("."), message  # the refusal appends ": <path>" after it
 
 
 def test_no_sqlite_c_api_message_reaches_the_connect_refusal(
@@ -1675,6 +1677,8 @@ def test_no_sqlite_c_api_message_reaches_the_connect_refusal(
     assert "SQLite C API not found" in str(refusal), refusal
     assert "python-build-standalone" in str(refusal), refusal
     assert "shared libsqlite3" in str(refusal), refusal
+    assert ".:" not in str(refusal), refusal  # the detail ends clean before the path
+    assert str(refusal).endswith(f": {db}"), refusal
     assert not db.exists(), "a refused create must not create the database"
 
 
