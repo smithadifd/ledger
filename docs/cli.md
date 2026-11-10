@@ -262,9 +262,23 @@ recorded time with the same date forms and the same refusals as `query`.
 Exit 1 when nothing matches. `--json` carries
 `{events, limit, truncated}`; each event is
 `{id, kind, item_id, actor, harness, model, session, recorded_at, payload}`.
+The text form is one event per line: recorded time, kind, item, actor and a
+payload summary, tab-separated. An empty column prints `-`, and a tab, newline
+or other non-printable character in a column prints escaped (`\t`, `\n`), so
+an event never spans two lines.
+
+**`events --id N [--id N ...]`** Exactly the events with those ids, in id
+order (oldest first), each once however often it is named. `N` is a positive
+integer; anything else is a usage error (exit 2). `--id` reads by id alone: with
+`--since`, `--until`, `--kind`, `--item`, `--actor` or `--limit` it is a usage
+error naming the flag. An id no event has is refused (`not_found`, exit 1,
+`event not found: <ids>`, naming every missing id) and nothing is printed.
+`--json` carries the same `{events, limit, truncated}` with `limit` `null` and
+`truncated` `false`.
 
 ```sh
 ledger events --kind item.note --limit 20
+ledger events --id 42 --id 17
 ```
 
 **`questions [--item ID] [--type TYPE] [--since DATE] [--until DATE] [--limit N]`**
