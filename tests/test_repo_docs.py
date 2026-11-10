@@ -302,3 +302,11 @@ def test_changelog_0_1_16_names_the_pipx_docs_and_the_start_here_page() -> None:
     assert len(added) == 1, "CHANGELOG.md must keep exactly one 0.1.16 section"
     body = _squash(added[0].partition("\n")[2])
     assert "pipx" in body and "docs/start-here.md" in body
+
+
+def test_concepts_documents_note_search_and_severity() -> None:
+    text = (ROOT / "docs" / "concepts.md").read_text(encoding="utf-8")
+    section = text.split("## The search index", 1)[1].split("\n## ", 1)[0]
+    assert "A note is searched as part of its item, not as its own document" in _squash(section)
+    for severity in ("`ok`", "`info`", "`warn`"):
+        assert f"| {severity} |" in section

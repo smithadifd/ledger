@@ -19,8 +19,6 @@ from ledger.verbs import EXIT_OK, EXIT_REFUSED
 
 from test_search import _append, _rewrite_stored_manifest, db, invoke, root, run_json  # noqa: F401
 
-CONCEPTS = Path(__file__).resolve().parents[2] / "docs" / "concepts.md"
-
 
 def _index(db: Path) -> Path:
     return db.parent / "search.db"
@@ -233,6 +231,21 @@ def test_a_build_error_reads_warn(db, monkeypatch):
     assert body["error"]["code"] == "search"
 
 
+def test_unusable_search_roots_with_an_index_reads_warn_not_a_raise(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    (db.parent / "config.json").write_text(json.dumps({"search_roots": "not-a-list"}))
+    status = search_mod.index_status(db)
+    assert status["status"] == "unknown"
+    assert status["severity"] == "warn"
+    assert status["reasons"] == ["search_roots must be a list of absolute paths"]
+    found = _doctor_search(monkeypatch, db)
+    assert (found["status"], found["severity"]) == ("unknown", "warn")
+    assert found["reasons"] == ["search_roots must be a list of absolute paths"]
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_REFUSED
+    assert body["error"]["code"] == "search"
+
+
 def test_an_unreadable_config_with_an_index_reads_unknown_warn_in_doctor(db, monkeypatch):
     run_json(monkeypatch, db, "index")
     (db.parent / "config.json").write_text("{not json")
@@ -275,14 +288,3 @@ def test_an_index_without_roots_says_only_the_ledger_is_indexed_and_exits_0(db, 
         f"absolute paths in {config}"
     )
     assert "no markdown roots" not in out
-
-
-# --- docs --------------------------------------------------------------------
-
-
-def test_concepts_documents_note_search_and_severity():
-    text = CONCEPTS.read_text(encoding="utf-8")
-    section = text.split("## The search index", 1)[1]
-    assert "A note is searched as part of its item, not\nas its own document" in section
-    for severity in ("`ok`", "`info`", "`warn`"):
-        assert f"| {severity} |" in section

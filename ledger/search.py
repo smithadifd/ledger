@@ -756,11 +756,16 @@ def index_status(db: Path | str, fallback_root: FallbackRoot | None = None) -> d
     events exist; ``stale`` is a real mismatch (format, ranker, database, roots,
     source files, or an event log that no longer matches what was indexed).
     ``severity`` is ``severity_for(status)``, or ``warn`` when a rebuild would
-    refuse, with that reason in ``reasons`` (added unless already there).
+    refuse, with that reason in ``reasons`` (added unless already there). An
+    index whose state cannot be computed because the configuration is unusable
+    reads ``unknown`` (so ``warn``) with the reason, instead of raising.
     """
     resolved = resolve_db_path(db)
     index = search_db_path(resolved)
-    result = _index_state(resolved, index, fallback_root)
+    try:
+        result = _index_state(resolved, index, fallback_root)
+    except SearchError as exc:
+        result = {"path": str(index), "status": "unknown", "reasons": [str(exc)]}
     blocker = _build_blocker(resolved, index, fallback_root)
     if blocker is None:
         result["severity"] = severity_for(result["status"])
