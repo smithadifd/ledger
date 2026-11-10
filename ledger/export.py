@@ -350,9 +350,37 @@ def decayed(event: Event, boundary: float) -> bool:
     return is_ephemeral(event.kind) and event.id < boundary
 
 
-_TICKET_HEADING = re.compile(r"^###\s+Ticket:", re.IGNORECASE)
-_HEADING3 = re.compile(r"^###\s+")
-_HEADING_AT_MOST_3 = re.compile(r"^#{1,3}\s+")
+# The roadmap importer's ticket-heading grammar (its ``_classify_heading`` and
+# ``scan_roadmap``), mirrored exactly so a ticket the importer reads is one
+# this view can show, and nothing else is. A heading is an ATX line ``#`` to
+# ``######``, whitespace, then text (stripped) outside any code fence. A
+# level-3 heading is a ticket heading in two forms:
+#
+# - prefixed: the text starts ``Ticket:`` (any case). After it, stripped, an
+#   optional single lead word (a ``[tag]`` with no ``]`` inside, or a
+#   lowercase slug such as ``bridge`` or ``ledger-repo``) and whitespace, then
+#   the id, then end of text or a separator (``: `` or a spaced em dash, en
+#   dash or hyphen) and a title. The id may carry no digit. A prefixed heading
+#   whose tail is not that shape is still a ticket heading, with no id.
+# - bare: inside a ``## Tickets`` section (the nearest heading of level two or
+#   less above it is exactly ``## Tickets``), the text is the id, then end of
+#   text or a separator and a title. The id needs a digit; no lead word.
+#
+# An id is uppercase-led segments joined by single hyphens, each segment
+# optionally ending in one lowercase letter (``SL12a``, ``CSF3-9-H1``); an
+# ``RM-`` id is reserved and is never a ticket id. Any other heading is not a
+# ticket heading.
+_ID_PATTERN = r"[A-Z][A-Z0-9]*[a-z]?(?:-[A-Z0-9]+[a-z]?)*"
+_ROADMAP_ID = re.compile(rf"^{_ID_PATTERN}$")
+_ID_SEPARATOR = r"(?::\s+|\s+[\u2014\u2013-]\s+)"
+_LEAD_WORD = r"(?:\[[^\]]+\]|[a-z]+(?:-[a-z]+)*)\s+"
+_BARE_FORM = re.compile(rf"^(?P<id>{_ID_PATTERN})(?:{_ID_SEPARATOR}(?P<title>\S.*))?$")
+_LEAD_FORM = re.compile(
+    rf"^(?P<lead>{_LEAD_WORD})?(?P<id>{_ID_PATTERN})(?:{_ID_SEPARATOR}(?P<title>\S.*))?$"
+)
+_TICKET_PREFIX = re.compile(r"^ticket:(?P<tail>.*)$", re.IGNORECASE)
+_ATX_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+_TICKETS_SECTION = "Tickets"
 # Mirrors search.py ``_FENCE``: up to three spaces of indent, a run of three
 # or more backticks or tildes, then the rest of the line (an info string on
 # an opener; a closer must have nothing but whitespace there).
@@ -364,6 +392,79 @@ def _opens_fence(run: str, rest: str) -> bool:
     fence's info string holds no backtick: such a line is ordinary text and
     opens nothing. A tilde opener may carry a backtick."""
     return not (run[0] == "`" and "`" in rest)
+
+
+def _accept_ticket_id(value: str, *, prefixed: bool) -> bool:
+    """Whether ``value`` is a ticket id: the id pattern, not ``RM-``, and,
+    for a bare heading, at least one digit."""
+    if _ROADMAP_ID.fullmatch(value) is None or value.startswith("RM-"):
+        return False
+    return prefixed or any(char.isdigit() for char in value)
+
+
+def ticket_heading(text: str, *, in_tickets: bool) -> tuple[bool, str]:
+    """Classify the text of a level-3 heading as the importer does.
+
+    Returns ``(is_ticket, ticket_id)``: ``is_ticket`` is True for a prefixed
+    heading of any tail and for a bare heading inside ``## Tickets`` with an
+    accepted id; ``ticket_id`` is the heading's id, or ``""`` when it has none.
+    """
+    prefix = _TICKET_PREFIX.match(text)
+    if prefix is not None:
+        match = _LEAD_FORM.fullmatch(prefix.group("tail").strip())
+        if match is not None and _accept_ticket_id(match.group("id"), prefixed=True):
+            return True, match.group("id")
+        return True, ""
+    if not in_tickets:
+        return False, ""
+    bare = _BARE_FORM.fullmatch(text)
+    if bare is not None and _accept_ticket_id(bare.group("id"), prefixed=False):
+        return True, bare.group("id")
+    return False, ""
+
+
+def _headings(lines: Sequence[str]) -> list[tuple[int, str, bool] | None]:
+    """Per line, ``(level, text, in_tickets)`` for a heading outside any code
+    fence, else None. ``in_tickets`` is whether the nearest heading of level
+    two or less at or above the line is exactly ``## Tickets``.
+
+    A fence closes only on the same marker character, at least as long as the
+    opening run, with nothing but whitespace after it (CommonMark); a fence
+    line and every line inside a fence is never a heading.
+    """
+    out: list[tuple[int, str, bool] | None] = []
+    open_fence = None
+    inside = False
+    for raw in lines:
+        line = raw.split("\n", 1)[0].rstrip("\r")
+        fence = _FENCE.match(line)
+        if fence:
+            run, rest = fence.group(1), fence.group(2)
+            if open_fence is None:
+                if _opens_fence(run, rest):
+                    open_fence = run
+            elif (
+                run[0] == open_fence[0]
+                and len(run) >= len(open_fence)
+                and not rest.strip()
+            ):
+                open_fence = None
+            out.append(None)
+            continue
+        if open_fence is not None:
+            out.append(None)
+            continue
+        match = _ATX_HEADING.match(line)
+        if match is None:
+            out.append(None)
+            continue
+        level, heading = len(match.group(1)), match.group(2).strip()
+        if level <= 2:
+            inside = level == 2 and heading == _TICKETS_SECTION
+        out.append((level, heading, inside))
+    return out
+
+
 # A recorded commit is a git object name (7 to 64 lowercase hex digits; 64
 # covers SHA-256 repositories and the file digest a non-git source records),
 # optionally marked ``+dirty``, or the literal ``untracked``. Anything else
@@ -413,48 +514,36 @@ def split_source_locator(source: str) -> tuple[str, int, str]:
 
 
 def ticket_section(text: str, line: int) -> str:
-    """Return the ``### Ticket:`` section that contains 1-indexed ``line``.
+    """Return the ticket section that contains 1-indexed ``line``.
 
-    Bounded to that heading through the line before the next heading of
-    level three or less. Lines inside a ``` or ~~~ fence never end the
-    section. Per CommonMark, a fence closes only on the same marker
-    character, at least as long as the opening run, with nothing but
-    whitespace after it; an opening fence may carry an info string.
+    The section starts at the nearest heading of level three or less at or
+    above ``line``, which must be a ticket heading (``ticket_heading``): a
+    ``### Ticket:`` heading, or a bare ``### <ID>`` heading inside a
+    ``## Tickets`` section. It runs through the line before the next heading
+    of level three or less. A line inside a ``` or ~~~ fence is never a
+    heading, so it neither starts nor ends the section; an opening fence may
+    carry an info string.
     """
     lines = text.splitlines(keepends=True)
     if line < 1:
         raise ValueError("ticket section not found")
+    headings = _headings(lines)
     start = None
     last = min(line, len(lines)) - 1
     for i in range(last, -1, -1):
-        heading = lines[i].split("\n", 1)[0].rstrip("\r")
-        if _TICKET_HEADING.match(heading):
+        heading = headings[i]
+        if heading is None or heading[0] > 3:
+            continue
+        level, heading_text, in_tickets = heading
+        if level == 3 and ticket_heading(heading_text, in_tickets=in_tickets)[0]:
             start = i
-            break
-        if _HEADING3.match(heading):
-            break
+        break
     if start is None:
         raise ValueError("ticket section not found")
     end = len(lines)
-    open_fence = None
     for j in range(start + 1, len(lines)):
-        heading = lines[j].split("\n", 1)[0].rstrip("\r")
-        fence = _FENCE.match(heading)
-        if fence:
-            run, rest = fence.group(1), fence.group(2)
-            if open_fence is None:
-                if _opens_fence(run, rest):
-                    open_fence = run
-            elif (
-                run[0] == open_fence[0]
-                and len(run) >= len(open_fence)
-                and not rest.strip()
-            ):
-                open_fence = None
-            continue
-        if open_fence is not None:
-            continue
-        if _HEADING_AT_MOST_3.match(heading):
+        heading = headings[j]
+        if heading is not None and heading[0] <= 3:
             end = j
             break
     section = "".join(lines[start:end])
@@ -510,16 +599,12 @@ def read_source_blob(source: str, *, cwd: Path | None = None) -> str:
 # ``row-item.sh ensure`` write in an ``also at`` note: a repo-relative path, a
 # ``#`` and a ticket id (a letter, then letters, digits, ``_`` or ``-``). It
 # names no line or commit, so it is read from the committed ``HEAD`` of the
-# repository the locator form uses, and the section is the one whose heading is
-# exactly ``### Ticket: <ID>`` (then end of line, ``: title`` or `` - title``
-# with a hyphen, en dash or em dash). A bare ``### <ID>`` heading or a table row
-# is not found here.
+# repository the locator form uses, and the section is the one whose ticket
+# heading (``ticket_heading``) carries exactly that id: a ``### Ticket:``
+# heading, with or without a lead ``[tag]`` or slug, or a bare ``### <ID>``
+# heading inside a ``## Tickets`` section. A bare heading outside that section,
+# a fenced heading or a table row is not found here.
 _TICKET_ID = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
-_ANCHOR_HEADING = re.compile(
-    r"^###\s+Ticket:\s+(?P<id>[A-Za-z][A-Za-z0-9_-]*)"
-    r"(?:(?::\s+|\s+[\u2014\u2013-]\s+)\S.*)?\s*$",
-    re.IGNORECASE,
-)
 
 
 def split_anchor_locator(locator: str) -> tuple[str, str]:
@@ -560,34 +645,20 @@ def read_anchor_blob(locator: str, *, cwd: Path | None = None) -> str:
 
 
 def anchor_ticket_line(text: str, ticket_id: str) -> int | None:
-    """The 1-indexed line of the one ``### Ticket: <ticket_id>`` heading in
-    ``text``, outside any code fence; None when there is none. More than one
-    is a ValueError: the section is never guessed."""
+    """The 1-indexed line of the one ticket heading (``ticket_heading``) in
+    ``text`` whose id is ``ticket_id``, outside any code fence; None when there
+    is none. More than one is a ValueError: the section is never guessed."""
     found: list[int] = []
-    open_fence = None
-    for number, raw in enumerate(text.splitlines(), start=1):
-        heading = raw.rstrip("\r")
-        fence = _FENCE.match(heading)
-        if fence:
-            run, rest = fence.group(1), fence.group(2)
-            if open_fence is None:
-                if _opens_fence(run, rest):
-                    open_fence = run
-            elif (
-                run[0] == open_fence[0]
-                and len(run) >= len(open_fence)
-                and not rest.strip()
-            ):
-                open_fence = None
+    for number, heading in enumerate(_headings(text.splitlines(keepends=True)), start=1):
+        if heading is None or heading[0] != 3:
             continue
-        if open_fence is not None:
-            continue
-        match = _ANCHOR_HEADING.match(heading)
-        if match is not None and match.group("id") == ticket_id:
+        _level, heading_text, in_tickets = heading
+        is_ticket, heading_id = ticket_heading(heading_text, in_tickets=in_tickets)
+        if is_ticket and heading_id and heading_id == ticket_id:
             found.append(number)
     if len(found) > 1:
         raise ValueError(
-            f"row_source_anchor_ambiguous: {len(found)} '### Ticket: {ticket_id}' headings"
+            f"row_source_anchor_ambiguous: {len(found)} ticket headings for {ticket_id}"
         )
     return found[0] if found else None
 
@@ -643,12 +714,12 @@ def newest_also_at_locator(events: Sequence[Event]) -> str | None:
 
 
 def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> str:
-    """The recorded ``### Ticket:`` section for one imported item.
+    """The recorded ticket section for one imported item (``ticket_section``).
 
     A source that is a locator is read as it is. A source that is a row key
     ``row:<ID>`` reads the locator of the item's newest valid ``also at`` note,
     either ``rel:line@commit`` or the anchor form ``rel#ID`` (the committed
-    ``HEAD`` copy of ``rel``, the ``### Ticket: ID`` section); an item with
+    ``HEAD`` copy of ``rel``, the section of the ticket heading for ``ID``); an item with
     none, or an anchor that is absent or repeated, is refused by name, and no
     section is guessed.
     """
@@ -677,8 +748,8 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
             line = anchor_ticket_line(blob, ticket_id)
             if line is None:
                 raise ValueError(
-                    f"row_source_anchor_not_found: no '### Ticket: {ticket_id}' "
-                    f"heading in {locator}"
+                    f"row_source_anchor_not_found: no ticket heading for {ticket_id} "
+                    f"in {locator}"
                 )
             return ticket_section(blob, line)
     blob = read_source_blob(locator, cwd=cwd)
