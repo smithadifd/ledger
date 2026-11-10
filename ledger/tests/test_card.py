@@ -2127,6 +2127,66 @@ def test_full_card_shows_every_row_and_no_cut_marker(tmp_path: Path, monkeypatch
     assert data["reviews"][0]["findings_cut"] == 0
 
 
+def test_full_card_header_names_decision_standing_and_result_events(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-d", "ticket")
+    _create(lg, "it-o", "ticket")
+    recorded = {
+        "who": "tester",
+        "who_kind": "person",
+        "standing": "lean",
+        "effect": "synthetic effect",
+        "tags": [{"type": "ticket", "id": "it-d"}],
+        "verbatim": "synthetic words",
+        "phase": "build",
+    }
+    # The source event and the replacing decision live on another item, so
+    # nothing else on this card names them.
+    source = _append(lg, "item.note", {"text": "source"}, "it-o", "src")
+    decision = _append(
+        lg, "decision.recorded", {**recorded, "source_event_id": source.id}, "it-d", "dec"
+    )
+    replacement = _append(
+        lg, "decision.recorded", {**recorded, "tags": [{"type": "ticket", "id": "it-o"}]},
+        "it-o", "dec-2",
+    )
+    _append(
+        lg, "decision.standing",
+        {"decision_event_id": decision.id, "standing": "lean", "source_event_id": source.id},
+        "it-d", "st-0",
+    )
+    result = _append(
+        lg, "decision.result", {"decision_event_id": decision.id, "result": "shipped"},
+        "it-d", "res",
+    )
+    standing = _append(
+        lg, "decision.standing",
+        {
+            "decision_event_id": decision.id,
+            "standing": "superseded",
+            "superseded_by": replacement.id,
+            "source_event_id": source.id,
+        },
+        "it-d", "st-1",
+    )
+    lg.close()
+    code, text, err = invoke(monkeypatch, ["--db", db, "card", "--full", "--", "it-d"])
+    assert code == 0, err
+    header = {int(part) for part in text.splitlines()[2].split(": ", 1)[1].split(", ")}
+    assert {source.id, standing.id, result.id, replacement.id} <= header
+    assert decision.id in header
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "card", "--full", "it-d"])
+    assert code == 0, err
+    [row] = json.loads(out)["data"]["decision_records"]
+    assert row["standing_event_id"] == standing.id
+    assert row["result_event_id"] == result.id
+    assert row["superseded_by"] == replacement.id
+    assert row["source_event_id"] == source.id
+
+
 def test_full_card_keeps_every_pointer_unclipped(tmp_path: Path) -> None:
     lg = open_ledger(_db(tmp_path))
     _create(lg, "it-p", "ticket")

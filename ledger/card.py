@@ -930,6 +930,19 @@ def format_card(card: Card) -> str:
     return "\n".join(parts) + "\n"
 
 
+def _record_ref_ids(card: Card) -> set[int]:
+    """The events behind each decision record's standing and result: the
+    latest standing event, the latest result event, the standing's source
+    event and the decision that superseded it. The full card names them."""
+    ids: set[int] = set()
+    for row in card.decision_records:
+        for key in ("standing_event_id", "result_event_id", "source_event_id", "superseded_by"):
+            value = row.get(key)
+            if value is not None:
+                ids.add(int(value))
+    return ids
+
+
 def _content_ids(card: Card) -> set[int]:
     ids: set[int] = set()
     for row in card.decisions:
@@ -1347,6 +1360,8 @@ def _record_row(record: Mapping[str, Any], full: bool = False) -> dict[str, Any]
         "standing": record["standing"],
         "source_event_id": record["source_event_id"],
         "superseded_by": record["superseded_by"],
+        "standing_event_id": record.get("standing_event_id"),
+        "result_event_id": record.get("result_event_id"),
         "effect": _row_text(record["effect"], event_id, words),
         "tags": [dict(tag) for tag in record["tags"]],
         "verbatim": _row_text(record["verbatim"], event_id, words),
@@ -1653,8 +1668,10 @@ def project_item(
         program=program,
     )
     if full:
-        # The full card names every event it was projected from.
-        return replace(card, source_event_ids=tuple(sorted(base | _content_ids(card))))
+        # The full card names every event it was projected from, including
+        # each decision record's standing, result, source and superseding events.
+        ids = base | _content_ids(card) | _record_ref_ids(card)
+        return replace(card, source_event_ids=tuple(sorted(ids)))
     # The creation, state and current spec events are always named; past SOURCE_ID_LIMIT
     # the header keeps them, the newest open ask and the latest election,
     # then the newest of the rest.
