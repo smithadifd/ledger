@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.1.17 — 2026-11-10
+
+`ledger --version` reads the package's own version constant.
+
+- **`ledger --version` prints `ledger.__version__`, a string constant in `ledger/__init__.py`.** The CLI no longer imports `importlib.metadata`, and no module under `ledger/` does. The constant is bumped with `pyproject.toml` at each release; a test fails when the two differ.
+
+Upgrade with `@v0.1.17`.
+
 ## 0.1.16 — 2026-11-09
 
 First-write and first-resume output now names the action a new user needs.

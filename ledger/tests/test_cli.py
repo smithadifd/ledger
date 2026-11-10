@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import io
-import importlib.metadata
 import json
 import os
 import sqlite3
@@ -11,6 +10,7 @@ import sys
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+from ledger import __version__
 from ledger.cli import main
 from ledger.verbs import (
     DEFAULT_LIMIT,
@@ -308,12 +308,8 @@ def test_write_refused_without_harness(tmp_path: Path, monkeypatch) -> None:
 def test_version_needs_no_database(monkeypatch) -> None:
     monkeypatch.delenv("LEDGER_DB", raising=False)
     code, out, err = invoke(monkeypatch, ["--version"])
-    try:
-        version = importlib.metadata.version("ledger")
-    except importlib.metadata.PackageNotFoundError:
-        version = "unknown"
     assert code == 0
-    assert out == f"ledger {version}\n"
+    assert out == f"ledger {__version__}\n"
     assert err == ""
 
 
