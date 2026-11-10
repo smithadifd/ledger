@@ -104,7 +104,16 @@ the header always names every row the card shows. Owner, claim and title
 are then trimmed to what the cap needs, never below FIELD_MIN_WORDS words,
 each marked "(+K words cut; ledger export-item --json -- <item>)".
 
-Truncation drops Links, then Notes, then shortens ask fields (ask texts,
+Links show the newest LINK_LIMIT links (by event id) and end with a count
+of the rest; the count's marker names the command that prints them (see
+above). Under the word limit the oldest shown link is capped next, one at a
+time, before anything else.
+
+``project_card(..., full=True)`` (``ledger card --full``) is the same shape
+unbounded: every row, every word of every row and every source id, with no
+cap, no clip and no cut marker; it can run past WORD_LIMIT.
+
+Truncation caps Links, then drops Notes, then shortens ask fields (ask texts,
 then option descriptions, then the other fields; each down to
 ASK_MIN_WORDS words, marked "… (+K words cut; full text in event <id>; ledger
 export-item <item> --json)"),
@@ -137,7 +146,10 @@ from .store import Ledger
 
 WORD_LIMIT = 400
 FOOTER = "This card is a projection; the events are the authority"
+# Links are capped oldest first in this stage, never dropped whole at once.
 DROP_ORDER = ("links", "notes")
+# A bounded card shows at most this many links, the newest, then a count.
+LINK_LIMIT = 8
 CAP_ORDER = ("decisions", "blockers", "open_questions")
 # Rows that show an event id, capped oldest first when the header ids
 # would not otherwise fit.
@@ -282,10 +294,11 @@ def _card_word_count(card: Card, source: Card | None = None) -> int:
     return len(format_card(replace(card, **changes)).split())
 
 
-def _clip(text: str, limit: int) -> str:
-    """At most ``limit`` words of ``text``, then "…" when any were cut."""
+def _clip(text: str, limit: int | None) -> str:
+    """At most ``limit`` words of ``text`` (every word for None), then "…"
+    when any were cut."""
     words = text.split()
-    if len(words) <= limit:
+    if limit is None or len(words) <= limit:
         return " ".join(words)
     return " ".join(words[:limit]) + " …"
 
@@ -301,6 +314,7 @@ def derive_next_step(
     chosen: str | None = None,
     item_id: str = "",
     program: str = "ledger",
+    full: bool = False,
 ) -> str:
     """Project a next step from current status, blockers, and open questions.
 
@@ -317,16 +331,18 @@ def derive_next_step(
     is clipped to a fixed number of words, so the step stays bounded and is
     never trimmed in a way that loses its structure: the omitted-blocker
     count and "; then answer open questions" always survive.
+
+    ``full`` (the unbounded card) names every blocker and clips no name.
     """
+    name_words = None if full else STEP_NAME_WORDS
     if status == "closed":
         return "None — item is closed."
     clear = "Clear blockers."
     if blockers:
-        named = ", ".join(
-            _clip(name, STEP_NAME_WORDS) for name in blockers[:NEXT_STEP_BLOCKERS]
-        )
-        if len(blockers) > NEXT_STEP_BLOCKERS:
-            named += f" {_cut_count(len(blockers) - NEXT_STEP_BLOCKERS, item_id, program)}"
+        shown = blockers if full else blockers[:NEXT_STEP_BLOCKERS]
+        named = ", ".join(_clip(name, name_words) for name in shown)
+        if len(blockers) > len(shown):
+            named += f" {_cut_count(len(blockers) - len(shown), item_id, program)}"
         clear = f"Clear blockers: {named}."
     if open_questions:
         if blockers:
@@ -336,11 +352,12 @@ def derive_next_step(
         return clear
     claimed = None
     if status == "claimed":
-        who = _clip(claim or owner or "", STEP_NAME_WORDS)
+        who = _clip(claim or owner or "", name_words)
         claimed = f"Continue claimed work ({who})." if who else "Continue claimed work."
     if item_type == "decision":
         if chosen is not None:
-            head = f"Decided: {_clip(chosen.strip().rstrip('.'), STEP_CHOSEN_WORDS)}."
+            chosen_words = None if full else STEP_CHOSEN_WORDS
+            head = f"Decided: {_clip(chosen.strip().rstrip('.'), chosen_words)}."
             if status == "blocked" or blockers:
                 return f"{head} {clear}"
             return f"{head} {claimed or 'Nothing left to answer.'}"
@@ -1067,8 +1084,11 @@ def bound_card(card: Card) -> Card:
        so the header always names each row the card shows.
     2. Trim owner, claim and title to what the cap needs, never below
        FIELD_MIN_WORDS words, each with a "(+K words cut)" marker.
-    3. Drop links, then notes; shorten ask fields; cap decisions, blockers,
-       then questions; and as a last resort trim the title and next step.
+    3. Cap links (oldest first), then drop notes; shorten ask fields; cap
+       decisions, blockers, then questions; and as a last resort trim the
+       title and next step.
+
+    Before any of these, links are capped to the newest LINK_LIMIT.
     """
     # Keep naming the events the next step is derived from, even once their
     # rows are capped off the card. The header keeps them first when it has
@@ -1080,8 +1100,6 @@ def bound_card(card: Card) -> Card:
     def ids_over(candidate: Card) -> bool:
         return len(required | _content_ids(candidate)) > SOURCE_ID_LIMIT
 
-    if _card_word_count(card, card) <= WORD_LIMIT and not ids_over(card):
-        return card
     truncated: list[str] = list(card.truncated)
     omitted: dict[str, int] = dict(card.omitted)
     elsewhere: dict[str, int] = dict(card.omitted_elsewhere)
@@ -1135,6 +1153,14 @@ def bound_card(card: Card) -> Card:
         if held:
             elsewhere[section] = elsewhere.get(section, 0) + held
 
+    if len(card.links) > LINK_LIMIT:
+        # The newest links stay, in their listed order; the rest are counted.
+        newest = set(sorted(int(row["event_id"]) for row in card.links)[-LINK_LIMIT:])
+        cut_rows("links", [row for row in card.links if int(row["event_id"]) not in newest])
+        current = apply(links=tuple(row for row in card.links if int(row["event_id"]) in newest))
+    if _card_word_count(current, card) <= WORD_LIMIT and not ids_over(current):
+        return current
+
     for section in RESUME_ID_CAP_ORDER + ID_CAP_ORDER:
         items = list(getattr(current, section))
         while items and ids_over(current):
@@ -1174,6 +1200,15 @@ def bound_card(card: Card) -> Card:
             return current
         items = getattr(current, section)
         if not items:
+            continue
+        if section == "links":
+            # Capped, oldest first, only while the card is over the limit.
+            links = list(items)
+            while links and _card_word_count(current, card) > WORD_LIMIT:
+                row = min(links, key=lambda row: row["event_id"])
+                links.remove(row)
+                cut_rows("links", [row])
+                current = apply(links=tuple(links))
             continue
         cut_rows(section, items)
         current = apply(**{section: ()})
@@ -1291,64 +1326,76 @@ def _note_row(event: Any) -> dict[str, Any]:
     return {"event_id": event.id, "text": event.payload["text"]}
 
 
-def _row_text(text: str, event_id: int, limit: int = ROW_WORDS) -> str:
-    """At most ``limit`` words, then a marker naming the event with the rest."""
+def _row_text(text: str, event_id: int, limit: int | None = ROW_WORDS) -> str:
+    """At most ``limit`` words (every word for None), then a marker naming the
+    event with the rest."""
     words = text.split()
-    if len(words) <= limit:
+    if limit is None or len(words) <= limit:
         return " ".join(words)
     return f"{' '.join(words[:limit])} … (full text in event {event_id})"
 
 
-def _record_row(record: Mapping[str, Any]) -> dict[str, Any]:
+def _record_row(record: Mapping[str, Any], full: bool = False) -> dict[str, Any]:
     event_id = int(record["decision_event_id"])
+    words = None if full else ROW_WORDS
+    name_words = None if full else STEP_NAME_WORDS
     row = {
         "event_id": event_id,
-        "who": _clip(record["who"], STEP_NAME_WORDS),
+        "who": _clip(record["who"], name_words),
         "who_kind": record["who_kind"],
         "relayed_by": record["relayed_by"],
         "standing": record["standing"],
         "source_event_id": record["source_event_id"],
         "superseded_by": record["superseded_by"],
-        "effect": _row_text(record["effect"], event_id),
+        "effect": _row_text(record["effect"], event_id, words),
         "tags": [dict(tag) for tag in record["tags"]],
-        "verbatim": _row_text(record["verbatim"], event_id),
+        "verbatim": _row_text(record["verbatim"], event_id, words),
         "phase": record["phase"],
         "evidence": record["evidence"],
         "result": None,
     }
     if record["relayed_by"]:
-        row["relayed_by"] = _clip(record["relayed_by"], STEP_NAME_WORDS)
+        row["relayed_by"] = _clip(record["relayed_by"], name_words)
     if record["result"]:
-        row["result"] = _row_text(record["result"], int(record["result_event_id"]))
+        row["result"] = _row_text(record["result"], int(record["result_event_id"]), words)
     return row
 
 
-def _tried_row(event: Any) -> dict[str, Any]:
+def _tried_row(event: Any, full: bool = False) -> dict[str, Any]:
     payload = event.payload
+    words = None if full else ROW_WORDS
     return {
         "event_id": event.id,
-        "what": _row_text(payload["what"], event.id),
-        "outcome": _row_text(payload["outcome"], event.id) if payload.get("outcome") else None,
+        "what": _row_text(payload["what"], event.id, words),
+        "outcome": (
+            _row_text(payload["outcome"], event.id, words) if payload.get("outcome") else None
+        ),
     }
 
 
-def _progress_row(event: Any) -> dict[str, Any]:
-    return {"event_id": event.id, "text": _row_text(event.payload["text"], event.id)}
+def _progress_row(event: Any, full: bool = False) -> dict[str, Any]:
+    words = None if full else ROW_WORDS
+    return {"event_id": event.id, "text": _row_text(event.payload["text"], event.id, words)}
 
 
-def _review_row(event: Any) -> dict[str, Any]:
+def _review_row(event: Any, full: bool = False) -> dict[str, Any]:
     findings = list(event.payload.get("findings") or [])
+    shown = findings if full else findings[:REVIEW_FINDINGS]
+    words = None if full else ROW_WORDS
     return {
         "event_id": event.id,
         "round": event.payload["round"],
         "verdict": event.payload["verdict"],
-        "findings": [_row_text(text, event.id) for text in findings[:REVIEW_FINDINGS]],
-        "findings_cut": max(0, len(findings) - REVIEW_FINDINGS),
+        "findings": [_row_text(text, event.id, words) for text in shown],
+        "findings_cut": len(findings) - len(shown),
     }
 
 
-def _pointer_rows(pointers: PointerSource | None, item_id: str) -> tuple[dict[str, Any], ...]:
-    """At most POINTER_LIMIT one-line pointers from an installed sidecar."""
+def _pointer_rows(
+    pointers: PointerSource | None, item_id: str, full: bool = False
+) -> tuple[dict[str, Any], ...]:
+    """At most POINTER_LIMIT one-line pointers from an installed sidecar
+    (every pointer, unclipped, for the full card)."""
     if pointers is None:
         return ()
     rows: list[dict[str, Any]] = []
@@ -1358,10 +1405,10 @@ def _pointer_rows(pointers: PointerSource | None, item_id: str) -> tuple[dict[st
             continue
         note = " ".join(str(entry.get("note") or "").split())
         rows.append({
-            "ref": _clip(ref, REF_WORDS),
-            "note": _clip(note, STEP_CHOSEN_WORDS) if note else None,
+            "ref": _clip(ref, None if full else REF_WORDS),
+            "note": _clip(note, None if full else STEP_CHOSEN_WORDS) if note else None,
         })
-        if len(rows) >= POINTER_LIMIT:
+        if not full and len(rows) >= POINTER_LIMIT:
             break
     return tuple(rows)
 
@@ -1371,6 +1418,7 @@ def _resume_sections(
     item_id: str,
     item_events: list[Any],
     pointers: PointerSource | None,
+    full: bool = False,
 ) -> dict[str, Any]:
     stops = [event for event in item_events if event.kind == "item.stopped"]
     stop: tuple[dict[str, Any], ...] = ()
@@ -1381,21 +1429,28 @@ def _resume_sections(
         stop = ({
             "event_id": latest.id,
             "phase": latest.payload["phase"],
-            "point": _row_text(latest.payload["point"], latest.id, 3 * ROW_WORDS),
+            "point": _row_text(
+                latest.payload["point"], latest.id, None if full else 3 * ROW_WORDS
+            ),
         },)
         skills = tuple(latest.payload.get("skills") or ())
-        refs = tuple(_clip(ref, REF_WORDS) for ref in latest.payload.get("refs") or ())
+        ref_words = None if full else REF_WORDS
+        refs = tuple(_clip(ref, ref_words) for ref in latest.payload.get("refs") or ())
     return {
         "decision_records": tuple(
-            _record_row(record) for record in lg.decision_records(item_id=item_id)
+            _record_row(record, full) for record in lg.decision_records(item_id=item_id)
         ),
-        "tried": tuple(_tried_row(e) for e in item_events if e.kind == "item.tried"),
-        "progress": tuple(_progress_row(e) for e in item_events if e.kind == "item.progress"),
-        "reviews": tuple(_review_row(e) for e in item_events if e.kind == "review.recorded"),
+        "tried": tuple(_tried_row(e, full) for e in item_events if e.kind == "item.tried"),
+        "progress": tuple(
+            _progress_row(e, full) for e in item_events if e.kind == "item.progress"
+        ),
+        "reviews": tuple(
+            _review_row(e, full) for e in item_events if e.kind == "review.recorded"
+        ),
         "stop": stop,
         "skills": skills,
         "refs": refs,
-        "pointers": _pointer_rows(pointers, item_id),
+        "pointers": _pointer_rows(pointers, item_id, full),
     }
 
 
@@ -1444,12 +1499,15 @@ def project_item(
     *,
     pointers: PointerSource | None = None,
     program: str = "ledger",
+    full: bool = False,
 ) -> Card:
     """Build an unbounded card from current views and the item's events.
 
     Ephemeral events recorded before the item's latest close have decayed
     and are left out. ``pointers`` is the conversation-pointer sidecar, when
-    installed.
+    installed. The rows are still clipped to a few dozen words, findings and
+    pointers capped and the header bounded to SOURCE_ID_LIMIT ids, unless
+    ``full``: then nothing is clipped, capped or cut.
     """
     item_id = item["item_id"]
     events = lg.events()
@@ -1553,6 +1611,7 @@ def project_item(
         chosen=_latest_choice(elected),
         item_id=item_id,
         program=program,
+        full=full,
     )
     base: set[int] = set()
     created_id = item.get("created_event_id")
@@ -1586,13 +1645,16 @@ def project_item(
         children_total=len(children),
         inbound_links=tuple(int(row["event_id"]) for row in inbound),
         inbound_blockers=tuple(b for b in blockers if b in linked_only),
-        **_resume_sections(lg, item_id, item_events, pointers),
+        **_resume_sections(lg, item_id, item_events, pointers, full),
         spec_version=None if spec is None else spec.payload.get("version"),
         spec_claim_version=spec_claim,
         spec_hash=None if spec is None else spec.payload.get("content_hash"),
         spec_claim_hash=spec_content_hash(own_events, spec_claim),
         program=program,
     )
+    if full:
+        # The full card names every event it was projected from.
+        return replace(card, source_event_ids=tuple(sorted(base | _content_ids(card))))
     # The creation, state and current spec events are always named; past SOURCE_ID_LIMIT
     # the header keeps them, the newest open ask and the latest election,
     # then the newest of the rest.
@@ -1605,11 +1667,14 @@ def project_card(
     *,
     pointers: PointerSource | None = None,
     program: str = "ledger",
+    full: bool = False,
 ) -> Card:
-    """Project a bounded card for ``item_id``; raise KeyError if missing."""
+    """Project a bounded card for ``item_id`` (unbounded with ``full``);
+    raise KeyError if missing."""
     for row in lg.items():
         if row["item_id"] == item_id:
-            return bound_card(project_item(lg, row, pointers=pointers, program=program))
+            card = project_item(lg, row, pointers=pointers, program=program, full=full)
+            return card if full else bound_card(card)
     raise KeyError(item_id)
 
 
@@ -1619,6 +1684,7 @@ __all__ = [
     "CAP_ORDER",
     "DROP_ORDER",
     "FOOTER",
+    "LINK_LIMIT",
     "footer_line",
     "recover_command",
     "RESUME_SECTIONS",

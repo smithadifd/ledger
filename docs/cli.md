@@ -284,10 +284,14 @@ ledger questions --type ticket
 **`ready [--limit N]`** Open items with no open blocker, including claimed
 items whose lease expired.
 
-**`card ITEM [--md PATH]`** A bounded resume card: header (revision and
+**`card ITEM [--md PATH] [--full]`** A bounded resume card: header (revision and
 source event ids), fields, decisions, open questions with their options, the
 next step, links, blockers, notes and resume sections. `--md` also writes a
-markdown copy. A section a long card cuts ends with `(+K cut; COMMAND)`, where
+markdown copy. `--full` prints the same card unbounded: every row, every word
+of every row and every source event id, with no caps and no cut markers, so it
+can run past the 400-word bound. Links show the newest 8 and a count of the
+rest; past the word bound the oldest shown link goes first. A section a long
+card cuts ends with `(+K cut; COMMAND)`, where
 `COMMAND` prints the rows it cut: `ledger export-item --json -- ITEM` for rows
 the item's own events hold, `ledger query --parent=ITEM --all` for children,
 `ledger query --duplicate-of=ITEM --all` for `duplicated-by` links and
