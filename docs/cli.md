@@ -300,6 +300,28 @@ source event ids), fields, decisions, open questions with their options, the
 next step, links, blockers, notes and resume sections. `--md` also writes a
 markdown copy.
 
+**`links ITEM`** Every link that names the item, in both directions. Outgoing
+rows are the item's own links (`link ITEM ...`); incoming rows are other items'
+links whose target is `ITEM`, of any relation. Each list is in event order,
+oldest first; a link an item holds to itself is in both. Each row names the
+other end (an outgoing link's target, an incoming link's holder) and how it
+resolves: `item` (an item; its title is shown), `unresolved` (it should be an
+item, as for the `item`, `blocks`, `duplicate-of` and `child-of` relations and
+every incoming holder, but no item has that id) or `external` (a `pr`,
+`branch`, `session` or `url` target that is not an item id). An unresolved row
+is printed, never dropped. The text form is one row per line:
+`out|in`, relation, other end, resolution, title (`-` when none) and
+`event=<id>`, tab-separated, outgoing rows first; a tab or newline in a column
+prints escaped. `--json` carries `{item_id, title, outgoing, incoming}`; an
+outgoing row is `{event_id, rel, target, resolution, title}` and an incoming
+row `{event_id, rel, source, resolution, title}`, with `title` `null` unless
+the end resolves. An unknown item exits 1 (`not_found`, `item not found: ID`),
+as `card` does; an item no link names exits 1 with `empty`. It only reads.
+
+```sh
+ledger links it-1a2b3c4d5e6f
+```
+
 **`context ITEM [--budget N]`** A read-only orientation pack for an item or
 an initiative (an item of type `initiative`; its members link to it with
 `link --rel item`). The header names the item, its revision as the card names
