@@ -352,16 +352,35 @@ ephemeral events recorded before its latest close, then one completeness
 line: `completeness: N events returned, M events on the item, K decayed`
 (with `--json`, a `completeness` object in `data` with `events_returned`,
 `events_on_item` and `events_decayed`). `--ticket` instead prints
-the `### Ticket:` section its source locator points at, read with `git show`
-from the current repository. An item whose source is a row key `row:<ID>`
+the ticket section its source locator points at, read with `git show`
+from the current repository: a ticket heading through the line before the next
+heading of level three or less. A ticket heading is a level-3 heading outside
+any code fence, in one of two forms:
+
+- `### Ticket: ID — title`, where one lead word may come before the id (a
+  `[tag]` or a lowercase slug, as in `### Ticket: [tag] ID — title`);
+- a bare `### ID — title` inside a `## Tickets` section (the nearest heading of
+  level two or less above it is exactly `## Tickets`); a bare id needs a digit
+  and takes no lead word.
+
+The title is optional and follows `: ` or a spaced em dash, en dash or hyphen.
+An id is uppercase-led segments joined by single hyphens, each of which may end
+in one lowercase letter (`SL12`, `SL12a`, `CSF3-9-H1`); an `RM-` id is never a
+ticket id. A `path:line@commit` locator shows the section of the nearest
+heading of level three or less at or above that line, and refuses
+(`not_found`) when that heading is not a ticket heading; a `### Ticket:`
+heading whose tail is not that shape still counts there, with no id.
+An item whose source is a row key `row:<ID>`
 is read at the locator of its newest valid `also at <locator>` note (the text
 is exactly `also at ` and a locator, either `path:line@commit` or `path#ID`;
 a note of any other shape is skipped). A `path#ID` locator names no line or
-commit: the section is the one headed `### Ticket: ID` in `path` at the
-current `HEAD` of the repository. With no such note the command refuses with
-`row_source_no_also_at`; a `path#ID` whose heading is absent (a bare `### ID`
-heading and a table row do not count) refuses with `row_source_anchor_not_found`,
-and one repeated, `row_source_anchor_ambiguous` (exit 1), reading nothing.
+commit: the section is the one whose ticket heading, of either form, carries
+the id `ID` in `path` at the current `HEAD` of the repository. With no such
+note the command refuses with `row_source_no_also_at`; a `path#ID` whose
+heading is absent (a bare heading outside `## Tickets`, a fenced heading and a
+table row do not count) refuses with `row_source_anchor_not_found`, and one
+repeated (two ticket headings of either form with that id),
+`row_source_anchor_ambiguous` (exit 1), reading nothing.
 
 **`search WORD... [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
 Full-text search, ranked by BM25; the words may be quoted or separate.
