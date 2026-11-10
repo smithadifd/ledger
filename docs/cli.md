@@ -393,3 +393,11 @@ form of the agent contract ([agent-contract.md](agent-contract.md)), so a
 session-start hook can print both. It never writes. With no items it prints
 `no open items`; when open items exist but none has a stop, it prints
 `N open item(s) with no stop recorded; ledger query lists them`. Both exit 0.
+`--json` carries `items` (one entry per stopped open item, as the text lists
+them) and `open_without_stop`, always present: how many open items have no
+stop recorded and so are not in `items` (0 when there are none, and 0 with
+`--item`). `--brief` adds `contract`. Two open items, neither stopped:
+
+```json
+{"data": {"items": [], "open_without_stop": 2}, "error": null, "ok": true}
+```
