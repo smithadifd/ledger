@@ -54,6 +54,7 @@ from ledger.verbs import CliError
 from ledger.answers import bound_answer, render_ask_display
 from ledger.verbs.capture import TOOL_ANSWER, write_capture
 from ledger.verbs.pick import record_pick
+from ledger.tests._child import read_ready_line, running
 
 FIXTURE = Path(__file__).parent / "fixtures" / "decisions" / "ticket.json"
 ITEM = "TK-100"
@@ -1152,25 +1153,25 @@ print("held", flush=True)
 sys.stdin.readline()
 conn.close()
 """
-    proc = subprocess.Popen(
+    with running(
         [sys.executable, "-c", reader, str(db)],
         cwd=Path(__file__).resolve().parents[2],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-    )
-    assert proc.stdout is not None
-    assert proc.stdout.readline().strip() == "held"
-    try:
-        with pytest.raises(SharedDatabaseError, match=r"checkpoint of .* is busy"):
-            claim_database(db, "work")
-    finally:
-        assert proc.stdin is not None
-        proc.stdin.write("\n")
-        proc.stdin.flush()
-        _out, err = proc.communicate(timeout=30)
-        assert proc.returncode == 0, err
+    ) as proc:
+        assert proc.stdout is not None
+        read_ready_line(proc, "held")
+        try:
+            with pytest.raises(SharedDatabaseError, match=r"checkpoint of .* is busy"):
+                claim_database(db, "work")
+        finally:
+            assert proc.stdin is not None
+            proc.stdin.write("\n")
+            proc.stdin.flush()
+            _out, err = proc.communicate(timeout=30)
+            assert proc.returncode == 0, err
     assert _claims(db) == [{"system": "work"}]
 
 

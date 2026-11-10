@@ -1,6 +1,7 @@
 """Pool guidance: one ledger item type, written once and read from any folder."""
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from ledger import (
     open_ledger,
 )
 from ledger.cli import main as ledger_cli
+from ledger.tests._child import read_ready_line, running
 
 TODAY = date(2026, 10, 19)
 
@@ -288,22 +290,26 @@ finally:
 """
 
     withdrawer = open_ledger(db)
-    with withdrawer.transaction():
-        withdrawer.append(kind="item.state", payload={"status": "closed"}, item_id=item_id,
-                          idempotency_key="withdraw-during-set", harness="pytest", actor="tester")
-        proc = subprocess.Popen(
-            [sys.executable, "-c", setter, str(db)],
-            cwd=Path(__file__).resolve().parents[2],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        assert proc.stdout is not None
-        assert proc.stdout.readline().strip() == "opened"
-        # Let the setter reach the lock (and, if it read the status outside
-        # the transaction, read it as still open) before the withdraw commits.
-        time.sleep(0.5)
-    _out, err = proc.communicate(timeout=30)
+    # The child starts inside the transaction and is waited on after it
+    # commits, so it is reaped when this outer block exits.
+    with contextlib.ExitStack() as children:
+        with withdrawer.transaction():
+            withdrawer.append(kind="item.state", payload={"status": "closed"}, item_id=item_id,
+                              idempotency_key="withdraw-during-set", harness="pytest",
+                              actor="tester")
+            proc = children.enter_context(running(
+                [sys.executable, "-c", setter, str(db)],
+                cwd=Path(__file__).resolve().parents[2],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ))
+            assert proc.stdout is not None
+            read_ready_line(proc, "opened")
+            # Let the setter reach the lock (and, if it read the status outside
+            # the transaction, read it as still open) before the withdraw commits.
+            time.sleep(0.5)
+        _out, err = proc.communicate(timeout=30)
     assert proc.returncode == 0, err
     item = withdrawer.item(item_id)
     reasons = [g.reason for g in guidance.in_force(withdrawer, TODAY)]
