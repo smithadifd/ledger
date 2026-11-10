@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import shlex
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -1834,3 +1835,140 @@ def test_fuzzed_cards_fit_and_keep_the_step(tmp_path: Path, seed: int) -> None:
         assert card.next_step == full.next_step, where
         assert "next_step" not in card.truncated, where
         lg.close()
+
+
+_MARKER = re.compile(r"^\(\+(\d+) cut; (.+)\)$")
+
+
+def _section_markers(text: str, heading: str) -> list[tuple[int, str]]:
+    """The ``(+K cut; COMMAND)`` lines that end one section of a card."""
+    body = text.split(f"\n## {heading}\n", 1)[1].split("\n\n", 1)[0]
+    markers = []
+    for line in body.splitlines():
+        match = _MARKER.match(line)
+        if match:
+            markers.append((int(match.group(1)), match.group(2)))
+    return markers
+
+
+def _run_printed(monkeypatch, command: str, db: str) -> str:
+    """Run a command the card printed, as printed, and return its output."""
+    argv = shlex.split(command)
+    assert argv[:3] == ["ledger", "--db", db]
+    code, out, err = invoke(monkeypatch, argv[1:])
+    assert code == 0, err
+    return out
+
+
+def _queried_ids(out: str) -> set[str]:
+    return {line.split("\t", 1)[0] for line in out.splitlines() if line}
+
+
+def _exported_events(out: str) -> list[dict]:
+    return json.loads(out)["data"]["events"]
+
+
+def _printed_card(monkeypatch, db: str, item_id: str) -> str:
+    code, out, err = invoke(monkeypatch, ["--db", db, "card", "--", item_id])
+    assert code == 0, err
+    return out
+
+
+def test_cut_duplicated_by_links_come_back_from_the_printed_query(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-kept", "ticket")
+    dups = []
+    for index in range(3):
+        dup = f"it-dup-{index}"
+        _create(lg, dup, "ticket")
+        _append(lg, "item.linked", {"rel": "duplicate-of", "target": "it-kept"}, dup, f"d-{index}")
+        dups.append(dup)
+    # A duplicate of another item is not one of this card's rows.
+    _create(lg, "it-elsewhere", "ticket")
+    _create(lg, "it-dup-x", "ticket")
+    _append(
+        lg, "item.linked", {"rel": "duplicate-of", "target": "it-elsewhere"}, "it-dup-x", "d-x"
+    )
+    for index in range(45):
+        _append(
+            lg, "item.linked", {"rel": "pr", "target": f"org/repo#{index}"}, "it-kept", f"pr-{index}"
+        )
+    item = next(row for row in lg.items() if row["item_id"] == "it-kept")
+    full = project_item(lg, item)
+    lg.close()
+    text = _printed_card(monkeypatch, db, "it-kept")
+    shown = {line for line in text.splitlines() if line.startswith("- ")}
+    removed = [
+        row for row in full.links
+        if f"- {row['rel']}: {row['target']} (event={row['event_id']})" not in shown
+    ]
+    removed_inbound = [row for row in removed if row["rel"] == "duplicated-by"]
+    removed_own = [row for row in removed if row["rel"] != "duplicated-by"]
+    assert {row["target"] for row in removed_inbound} == set(dups)
+    assert removed_own
+    prefix = f"ledger --db {shlex.quote(db)}"
+    markers = _section_markers(text, "Links")
+    assert markers == [
+        (len(removed_own), f"{prefix} export-item --json -- it-kept"),
+        (len(dups), f"{prefix} query --duplicate-of=it-kept --all"),
+    ]
+    # Every cut duplicated-by row comes back from the query, and nothing else.
+    assert _queried_ids(_run_printed(monkeypatch, markers[1][1], db)) == set(dups)
+    # Every cut own link comes back from the item's own export.
+    exported = {
+        event["id"] for event in _exported_events(_run_printed(monkeypatch, markers[0][1], db))
+    }
+    assert {row["event_id"] for row in removed_own} <= exported
+    assert word_count(text, command_prefix=prefix) <= WORD_LIMIT
+
+
+def test_cut_blockers_come_back_from_the_printed_commands(tmp_path: Path, monkeypatch) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-x", "ticket")
+    named = [f"own-{index:03d}" for index in range(250)]
+    _append(lg, "item.state", {"status": "blocked", "blocked_by": named}, "it-x", "s-1")
+    linked = []
+    for index in range(60):
+        blocker = f"blk-{index:03d}"
+        _create(lg, blocker, "ticket")
+        _append(lg, "item.linked", {"rel": "blocks", "target": "it-x"}, blocker, f"b-{index}")
+        linked.append(blocker)
+    # A blocks link to another item is not one of this card's rows.
+    _create(lg, "it-y", "ticket")
+    _append(lg, "item.linked", {"rel": "blocks", "target": "it-y"}, "blk-000", "b-y")
+    item = next(row for row in lg.items() if row["item_id"] == "it-x")
+    full = project_item(lg, item)
+    lg.close()
+    text = _printed_card(monkeypatch, db, "it-x")
+    body = text.split("\n## Blockers\n", 1)[1].split("\n\n", 1)[0]
+    shown = {line[2:] for line in body.splitlines() if line.startswith("- ")}
+    removed = [name for name in full.blockers if name not in shown]
+    removed_linked = [name for name in removed if name in linked]
+    removed_named = [name for name in removed if name in named]
+    assert removed_linked and removed_named
+    assert len(removed) == len(removed_linked) + len(removed_named)
+    prefix = f"ledger --db {shlex.quote(db)}"
+    markers = _section_markers(text, "Blockers")
+    assert markers == [
+        (len(removed_named), f"{prefix} export-item --json -- it-x"),
+        (len(removed_linked), f"{prefix} query --blocks=it-x --all"),
+    ]
+    queried = _queried_ids(_run_printed(monkeypatch, markers[1][1], db))
+    assert set(removed_linked) <= queried
+    assert queried == set(linked)
+    held = set()
+    for event in _exported_events(_run_printed(monkeypatch, markers[0][1], db)):
+        held.update(event["payload"].get("blocked_by") or ())
+    assert set(removed_named) <= held
+    assert word_count(text, command_prefix=prefix) <= WORD_LIMIT
+
+
+def test_word_count_counts_the_new_query_prefixes_as_commands() -> None:
+    prefix = "ledger --db '/tmp/a b/ledger.db'"
+    for verb in ("query --duplicate-of=it-1 --all", "query --blocks=it-1 --all"):
+        # The quoted path is one argument: three words for the prefix.
+        assert word_count(f"(+3 cut; {prefix} {verb})", command_prefix=prefix) == 8

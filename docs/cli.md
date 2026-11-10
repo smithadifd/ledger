@@ -243,10 +243,13 @@ List decision records with their current standing.
 
 ## Reading verbs
 
-**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--since DATE] [--until DATE] [--limit N | --all]`**
+**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--duplicate-of ID] [--blocks ID] [--since DATE] [--until DATE] [--limit N | --all]`**
 Current items, at most 50 unless `--limit` says otherwise; `--all` removes the cap
 (with `--limit` it is a usage error, and `limit` in the JSON is then `null`). `--parent ID`
-keeps the children of `ID` (items whose current `child-of` anchor is `ID`). `--since` and
+keeps the children of `ID` (items whose current `child-of` anchor is `ID`).
+`--duplicate-of ID` keeps the other items with a `duplicate-of` link to `ID`
+(the card's `duplicated-by` rows), and `--blocks ID` keeps the items with a
+`blocks` link to `ID`, whatever their status. `--since` and
 `--until` keep the items whose newest event falls in the window, with the
 same date forms and the same refusals as `search`. Exit 1 when nothing
 matches. Each row in `items` carries the item's fields plus `revision`, `parent_id`
@@ -284,7 +287,13 @@ items whose lease expired.
 **`card ITEM [--md PATH]`** A bounded resume card: header (revision and
 source event ids), fields, decisions, open questions with their options, the
 next step, links, blockers, notes and resume sections. `--md` also writes a
-markdown copy.
+markdown copy. A section a long card cuts ends with `(+K cut; COMMAND)`, where
+`COMMAND` prints the rows it cut: `ledger export-item --json -- ITEM` for rows
+the item's own events hold, `ledger query --parent=ITEM --all` for children,
+`ledger query --duplicate-of=ITEM --all` for `duplicated-by` links and
+`ledger query --blocks=ITEM --all` for blockers named only by another item's
+`blocks` link. A section that cut both its own rows and other items' rows has
+one marker for each.
 
 **`context ITEM [--budget N]`** A read-only orientation pack for an item or
 an initiative (an item of type `initiative`; its members link to it with

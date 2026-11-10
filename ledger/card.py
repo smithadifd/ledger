@@ -51,6 +51,16 @@ Links lists the item's own links, then a "duplicated-by: <item>" row for
 each item linked to this one as its duplicate (the duplicate's own card lists
 "duplicate-of: <this item>").
 
+A capped Links or Blockers section names a command for each kind of row it
+cut. Rows held by the item's own events (its links, the blockers its state
+names) end "(+K cut; ledger export-item --json -- <item>)". Rows held by other
+items' events get their own line: inbound duplicated-by rows end "(+K cut;
+ledger query --duplicate-of=<item> --all)", and blockers that come only from
+another item's blocks link end "(+K cut; ledger query --blocks=<item> --all)".
+Each query prints every item that holds such a row when it runs, so every row
+the cut removed comes back. A section whose cut rows are all of one kind has
+one marker.
+
 An anchor's card has a Children section after Links: one line per child
 (id, title, status, holder), a child that blocks another first, then in
 creation order, under a header carrying closed/total over all children. An
@@ -197,8 +207,15 @@ PointerSource = Callable[[str], Iterable[Mapping[str, Any]]]
 
 
 # The verbs of the commands the card prints: the next step's resume command,
-# the recovery command, the footer and the children query.
-_COMMAND_VERBS = ("resume --item=", "export-item ", "query --parent=")
+# the recovery command, the footer, the children query and the queries that
+# list a section's rows held by other items' events.
+_COMMAND_VERBS = (
+    "resume --item=",
+    "export-item ",
+    "query --parent=",
+    "query --duplicate-of=",
+    "query --blocks=",
+)
 
 
 def _prefix_words(prefix: str) -> int:
@@ -381,6 +398,13 @@ class Card:
     children: tuple[dict[str, Any], ...] = ()
     children_closed: int = 0
     children_total: int = 0
+    # Rows held by other items' events: the event ids of inbound
+    # duplicated-by links, and the blockers named only by another item's
+    # blocks link. A cut of these rows names a query, not export-item.
+    inbound_links: tuple[int, ...] = ()
+    inbound_blockers: tuple[str, ...] = ()
+    # Of each section's cut rows (``omitted``), how many are held elsewhere.
+    omitted_elsewhere: tuple[tuple[str, int], ...] = ()
     # Invocation prefix used only to preserve runnable commands while bounding.
     program: str = "ledger"
 
@@ -558,6 +582,23 @@ def children_command(item_id: str, program: str = "ledger") -> str:
     """The command that prints every child ``item_id`` has when it runs."""
     # The --flag=value form keeps an id with a leading hyphen one argument.
     return f"{program} {shlex.join(['query', f'--parent={item_id}', '--all'])}"
+
+
+def duplicates_command(item_id: str, program: str = "ledger") -> str:
+    """The command that prints every item linked to ``item_id`` as its duplicate."""
+    return f"{program} {shlex.join(['query', f'--duplicate-of={item_id}', '--all'])}"
+
+
+def blockers_command(item_id: str, program: str = "ledger") -> str:
+    """The command that prints every item with a blocks link to ``item_id``."""
+    return f"{program} {shlex.join(['query', f'--blocks={item_id}', '--all'])}"
+
+
+# The command that prints a section's rows held by other items' events.
+_ELSEWHERE_COMMANDS: dict[str, Callable[[str, str], str]] = {
+    "links": duplicates_command,
+    "blockers": blockers_command,
+}
 
 
 def _cut_words(count: int, item_id: str, program: str = "ledger") -> str:
@@ -783,11 +824,27 @@ def _omitted_count(card: Card, section: str) -> int:
     return 0
 
 
+def _elsewhere_count(card: Card, section: str) -> int:
+    for name, count in card.omitted_elsewhere:
+        if name == section:
+            return count
+    return 0
+
+
 def _with_marker(body: str, card: Card, section: str) -> str:
     count = _omitted_count(card, section)
     if count <= 0:
         return body
-    marker = _cut_count(count, card.item_id, card.program)
+    elsewhere = _elsewhere_count(card, section) if section in _ELSEWHERE_COMMANDS else 0
+    markers = []
+    if count > elsewhere:
+        # The item's own events hold these rows.
+        markers.append(_cut_count(count - elsewhere, card.item_id, card.program))
+    if elsewhere > 0:
+        # Other items' events hold these: name the query that lists them.
+        command = _ELSEWHERE_COMMANDS[section](card.item_id, card.program)
+        markers.append(f"(+{elsewhere} cut; {command})")
+    marker = "\n".join(markers)
     if body == "(none)":
         return marker
     return f"{body}\n{marker}"
@@ -1027,6 +1084,7 @@ def bound_card(card: Card) -> Card:
         return card
     truncated: list[str] = list(card.truncated)
     omitted: dict[str, int] = dict(card.omitted)
+    elsewhere: dict[str, int] = dict(card.omitted_elsewhere)
     current = card
     keep_newest = {
         "decision_records": True,
@@ -1057,9 +1115,25 @@ def bound_card(card: Card) -> Card:
             current,
             truncated=tuple(truncated),
             omitted=tuple((name, omitted[name]) for name in truncated),
+            omitted_elsewhere=tuple(
+                (name, elsewhere[name]) for name in truncated if name in elsewhere
+            ),
             **changes,
         )
         return _with_source(updated, anchor, required)
+
+    def cut_rows(section: str, rows: Iterable[Any]) -> None:
+        """Count ``rows`` cut from ``section``, and those held elsewhere."""
+        rows = list(rows)
+        _record_omission(truncated, omitted, section, len(rows))
+        if section == "links":
+            held = sum(1 for row in rows if int(row["event_id"]) in card.inbound_links)
+        elif section == "blockers":
+            held = sum(1 for row in rows if row in card.inbound_blockers)
+        else:
+            held = 0
+        if held:
+            elsewhere[section] = elsewhere.get(section, 0) + held
 
     for section in RESUME_ID_CAP_ORDER + ID_CAP_ORDER:
         items = list(getattr(current, section))
@@ -1067,10 +1141,11 @@ def bound_card(card: Card) -> Card:
             if section == "links":
                 # Own links are listed before inbound duplicated-by rows, so
                 # the oldest link is not always first: drop the lowest event id.
-                items.remove(min(items, key=lambda row: row["event_id"]))
+                row = min(items, key=lambda row: row["event_id"])
+                items.remove(row)
             else:
-                items.pop(0)
-            _record_omission(truncated, omitted, section, 1)
+                row = items.pop(0)
+            cut_rows(section, [row])
             current = apply(**{section: tuple(items)})
 
     for field in ("owner", "claim", "title"):
@@ -1100,7 +1175,7 @@ def bound_card(card: Card) -> Card:
         items = getattr(current, section)
         if not items:
             continue
-        _record_omission(truncated, omitted, section, len(items))
+        cut_rows(section, items)
         current = apply(**{section: ()})
 
     # Shorten ask fields before any decision or question is capped. Each cut
@@ -1135,11 +1210,8 @@ def bound_card(card: Card) -> Card:
     for section in ("children", "decision_records") + CAP_ORDER + ("refs",):
         items = list(getattr(current, section))
         while _card_word_count(current, card) > WORD_LIMIT and items:
-            if keep_newest[section]:
-                items.pop(0)
-            else:
-                items.pop()
-            _record_omission(truncated, omitted, section, 1)
+            row = items.pop(0) if keep_newest[section] else items.pop()
+            cut_rows(section, [row])
             current = apply(**{section: tuple(items)})
 
     for field in ("title", "next_step"):
@@ -1422,7 +1494,7 @@ def project_item(
     )
     # A duplicate-of link lives on the duplicate and names the item kept; the
     # kept item's card shows it too, as duplicated-by.
-    links = _projected_links(item_events) + tuple(
+    inbound = tuple(
         {"event_id": event.id, "rel": "duplicated-by", "target": event.item_id}
         for event in events
         if event.kind == "item.linked"
@@ -1430,6 +1502,7 @@ def project_item(
         and event.payload.get("target") == item_id
         and event.item_id != item_id
     )
+    links = _projected_links(item_events) + inbound
     notes = tuple(
         _note_row(event) for event in item_events if event.kind == "item.note"
     )
@@ -1455,6 +1528,7 @@ def project_item(
     rows = lg.items()
     closed = {row["item_id"] for row in rows if row["status"] == "closed"}
     children = children_of(rows, events, item_id)
+    linked_only: set[str] = set()
     for event in events:
         if event.kind != "item.linked":
             continue
@@ -1464,6 +1538,8 @@ def project_item(
             continue
         if event.item_id not in closed and event.item_id not in blocked_by:
             blocked_by.append(event.item_id)
+            # Named only by the blocker's own link event, not by this item's.
+            linked_only.add(event.item_id)
     blockers = tuple(b for b in blocked_by if b not in closed)
     owner = item["owner"]
     claim = item["claim"]
@@ -1508,6 +1584,8 @@ def project_item(
         children=tuple(children),
         children_closed=sum(1 for row in children if row["status"] == "closed"),
         children_total=len(children),
+        inbound_links=tuple(int(row["event_id"]) for row in inbound),
+        inbound_blockers=tuple(b for b in blockers if b in linked_only),
         **_resume_sections(lg, item_id, item_events, pointers),
         spec_version=None if spec is None else spec.payload.get("version"),
         spec_claim_version=spec_claim,
@@ -1547,8 +1625,10 @@ __all__ = [
     "WORD_LIMIT",
     "Card",
     "PointerSource",
+    "blockers_command",
     "bound_card",
     "children_command",
+    "duplicates_command",
     "children_of",
     "claim_spec_version",
     "derive_next_step",
