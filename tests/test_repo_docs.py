@@ -150,6 +150,38 @@ def test_python_versions_the_docs_name_match_their_sources() -> None:
     assert re.findall(r"\d+\.\d+", stated.group(1)) == tested
 
 
+# GitHub's defaults when `pull_request:` names no types; a draft pull request
+# marked ready for review starts a run only if `ready_for_review` is listed too.
+PULL_REQUEST_TYPES = {"opened", "synchronize", "reopened", "ready_for_review"}
+
+
+def test_ci_runs_on_the_draft_to_ready_flip() -> None:
+    # Read without a YAML parser (PyYAML is not a test dependency). Accepted
+    # shape: `pull_request:` two spaces in under the top-level `on:`, with one
+    # `types: [...]` flow list among its children. Any other shape (a bare
+    # trigger, a block list, a second `types:` line) fails here.
+    lines = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8").splitlines()
+    assert "on:" in lines, "ci.yml has no top-level `on:` line"
+    triggers: list[str] = []
+    for line in lines[lines.index("on:") + 1 :]:
+        if line and not line.startswith(" "):
+            break
+        triggers.append(line)
+    assert "  pull_request:" in triggers, triggers
+    children: list[str] = []
+    for line in triggers[triggers.index("  pull_request:") + 1 :]:
+        if line.strip() and not line.startswith("   "):
+            break
+        children.append(line)
+    types = [line for line in children if line.lstrip().startswith("types:")]
+    assert len(types) == 1, f"pull_request needs exactly one `types:` line: {children!r}"
+    match = re.fullmatch(r"    types: \[([^\]]*)\]\s*", types[0])
+    assert match is not None, f"pull_request types are not a flow list: {types[0]!r}"
+    listed = {name.strip() for name in match.group(1).split(",")}
+    missing = sorted(PULL_REQUEST_TYPES - listed)
+    assert not missing, f"ci.yml pull_request types lack {missing}: {types[0]!r}"
+
+
 def test_install_and_upgrade_use_pipx_never_a_bare_pip() -> None:
     tag_install = "pipx install git+https://github.com/smithadifd/ledger@vX.Y.Z"
     for page in (README, START):
