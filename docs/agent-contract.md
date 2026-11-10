@@ -2,7 +2,8 @@
 
 This is the one page an agent needs. If you are an agent working in a project
 that has a ledger, read this once; `ledger resume --brief` prints the short
-form of it at the start of every session.
+form of it at the start of every session, and `ledger contract` prints this
+whole page from the installed package.
 
 The ledger is where this work's state lives: what is open, what was decided,
 where the last session stopped. It is append-only and every write is stamped
@@ -127,7 +128,7 @@ never a prose summary of it.
 
 ```sh
 ledger append --item ITEM --kind item.stopped \
-  --payload '{"point": "what is done and what is next", "phase": "build", "skills": ["review"], "refs": ["docs/plan.md"]}'
+  --payload '{"point": "what is done and what is next", "phase": "build", "skills": ["review"], "refs": ["plan.md"]}'
 ledger resume --item ITEM
 ```
 

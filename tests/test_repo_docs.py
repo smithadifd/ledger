@@ -6,7 +6,11 @@ files are always present, so nothing skips. ``LEDGER_REPO_ROOT`` is not needed.
 """
 from __future__ import annotations
 
+import os
 import re
+import shutil
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -16,6 +20,7 @@ from ledger.verbs.resume import SHORT_FORM
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / "docs" / "agent-contract.md"
+PACKAGED_PAGE = ROOT / "ledger" / "agent_contract.md"
 README = ROOT / "README.md"
 CLI_PAGE = ROOT / "docs" / "cli.md"
 START = ROOT / "docs" / "start-here.md"
@@ -104,6 +109,57 @@ def test_readme_and_contract_page_never_say_pick_up() -> None:
         assert "pick up" not in path.read_text(encoding="utf-8").lower(), path
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/agent-contract.md" in readme and "ledger resume --brief" in readme
+
+
+# ---- the agent contract ships with the package -------------------------------
+
+
+def test_the_packaged_contract_is_the_page_byte_for_byte() -> None:
+    assert PACKAGED_PAGE.read_bytes() == PAGE.read_bytes(), (
+        "ledger/agent_contract.md (what `ledger contract` prints) differs from "
+        "docs/agent-contract.md; after editing the page, copy it over the packaged one"
+    )
+
+
+_BUILD_DEBRIS = shutil.ignore_patterns(
+    ".git", "build", "dist", "*.egg-info", "__pycache__", ".venv", ".pytest_cache"
+)
+
+
+def test_an_installed_wheel_prints_the_contract_page(tmp_path) -> None:
+    # Build from a clean copy so a stale build/ folder in the checkout cannot
+    # supply a file the package data no longer lists. Building needs pip (and,
+    # for the isolated build, the network or a cached setuptools).
+    source = tmp_path / "source"
+    shutil.copytree(ROOT, source, ignore=_BUILD_DEBRIS)
+    wheels = tmp_path / "wheels"
+
+    def run(args, **kwargs):
+        done = subprocess.run(args, capture_output=True, text=True, timeout=600, **kwargs)
+        assert done.returncode == 0, (args, done.stdout[-2000:], done.stderr[-2000:])
+        return done
+
+    run([sys.executable, "-m", "pip", "wheel", str(source), "-w", str(wheels),
+         "--no-deps", "-q"])
+    [wheel] = wheels.glob("ledger-*.whl")
+    venv = tmp_path / "venv"
+    run([sys.executable, "-m", "venv", str(venv)])
+    run([str(venv / "bin" / "python"), "-m", "pip", "install", "--no-deps",
+         "--no-index", "-q", str(wheel)])
+
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "LEDGER_DB")}
+    env["PYTHONIOENCODING"] = "utf-8"
+    where = run([str(venv / "bin" / "python"), "-c", "import ledger; print(ledger.__file__)"],
+                cwd=tmp_path, env=env)
+    assert Path(where.stdout.strip()).resolve().is_relative_to(venv.resolve()), where.stdout
+    db = tmp_path / "never" / "ledger.db"
+    printed = subprocess.run(
+        [str(venv / "bin" / "ledger"), "--db", str(db), "contract"],
+        cwd=tmp_path, env=env, capture_output=True, timeout=120,
+    )
+    assert printed.returncode == 0, printed.stderr
+    assert printed.stdout == PAGE.read_bytes()
+    assert not db.parent.exists()
 
 
 # ---- install, upgrade, first-run and database-home docs ----------------------

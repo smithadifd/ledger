@@ -39,7 +39,7 @@ NO_OPEN_ITEMS = "no open items"
 # second command); a repository test reads both so the two cannot drift. Keep
 # it under 40 lines.
 SHORT_FORM = """\
-LEDGER AGENT CONTRACT (short form; the full page is the agent contract in the ledger repo's docs folder)
+LEDGER AGENT CONTRACT (short form; run ledger contract for the full page)
 The ledger holds this work's state. Write to it without asking.
 Write triggers:
 - item opened: ledger new --type TYPE --title TITLE

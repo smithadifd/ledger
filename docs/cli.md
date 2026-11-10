@@ -393,3 +393,12 @@ form of the agent contract ([agent-contract.md](agent-contract.md)), so a
 session-start hook can print both. It never writes. With no items it prints
 `no open items`; when open items exist but none has a stop, it prints
 `N open item(s) with no stop recorded; ledger query lists them`. Both exit 0.
+
+## Contract
+
+**`contract`** Print the full agent contract
+([agent-contract.md](agent-contract.md)) from the installed package, so an
+agent that has only the package can read the whole page; `resume --brief`
+prints its short form and points here. It never opens the database, though
+`--db` or `LEDGER_DB` is still required, as for every verb. With `--json` the
+page is the `contract` field.
