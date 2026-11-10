@@ -6,6 +6,7 @@ import json
 import os
 import random
 import re
+import shlex
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from ledger.card import (
     _bound_ids,
     _key_step_ids,
     DROP_ORDER,
+    LINK_LIMIT,
     WORD_LIMIT,
     footer_line,
     format_card,
@@ -1834,3 +1836,365 @@ def test_fuzzed_cards_fit_and_keep_the_step(tmp_path: Path, seed: int) -> None:
         assert card.next_step == full.next_step, where
         assert "next_step" not in card.truncated, where
         lg.close()
+
+
+_MARKER = re.compile(r"^\(\+(\d+) cut; (.+)\)$")
+
+
+def _section_markers(text: str, heading: str) -> list[tuple[int, str]]:
+    """The ``(+K cut; COMMAND)`` lines that end one section of a card."""
+    body = text.split(f"\n## {heading}\n", 1)[1].split("\n\n", 1)[0]
+    markers = []
+    for line in body.splitlines():
+        match = _MARKER.match(line)
+        if match:
+            markers.append((int(match.group(1)), match.group(2)))
+    return markers
+
+
+def _run_printed(monkeypatch, command: str, db: str) -> str:
+    """Run a command the card printed, as printed, and return its output."""
+    argv = shlex.split(command)
+    assert argv[:3] == ["ledger", "--db", db]
+    code, out, err = invoke(monkeypatch, argv[1:])
+    assert code == 0, err
+    return out
+
+
+def _queried_ids(out: str) -> set[str]:
+    return {line.split("\t", 1)[0] for line in out.splitlines() if line}
+
+
+def _exported_events(out: str) -> list[dict]:
+    return json.loads(out)["data"]["events"]
+
+
+def _printed_card(monkeypatch, db: str, item_id: str) -> str:
+    code, out, err = invoke(monkeypatch, ["--db", db, "card", "--", item_id])
+    assert code == 0, err
+    return out
+
+
+def test_cut_duplicated_by_links_come_back_from_the_printed_query(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-kept", "ticket")
+    dups = []
+    for index in range(3):
+        dup = f"it-dup-{index}"
+        _create(lg, dup, "ticket")
+        _append(lg, "item.linked", {"rel": "duplicate-of", "target": "it-kept"}, dup, f"d-{index}")
+        dups.append(dup)
+    # A duplicate of another item is not one of this card's rows.
+    _create(lg, "it-elsewhere", "ticket")
+    _create(lg, "it-dup-x", "ticket")
+    _append(
+        lg, "item.linked", {"rel": "duplicate-of", "target": "it-elsewhere"}, "it-dup-x", "d-x"
+    )
+    for index in range(45):
+        _append(
+            lg, "item.linked", {"rel": "pr", "target": f"org/repo#{index}"}, "it-kept", f"pr-{index}"
+        )
+    item = next(row for row in lg.items() if row["item_id"] == "it-kept")
+    full = project_item(lg, item)
+    lg.close()
+    text = _printed_card(monkeypatch, db, "it-kept")
+    shown = {line for line in text.splitlines() if line.startswith("- ")}
+    removed = [
+        row for row in full.links
+        if f"- {row['rel']}: {row['target']} (event={row['event_id']})" not in shown
+    ]
+    removed_inbound = [row for row in removed if row["rel"] == "duplicated-by"]
+    removed_own = [row for row in removed if row["rel"] != "duplicated-by"]
+    assert {row["target"] for row in removed_inbound} == set(dups)
+    assert removed_own
+    prefix = f"ledger --db {shlex.quote(db)}"
+    markers = _section_markers(text, "Links")
+    assert markers == [
+        (len(removed_own), f"{prefix} export-item --json -- it-kept"),
+        (len(dups), f"{prefix} query --duplicate-of=it-kept --all"),
+    ]
+    # Every cut duplicated-by row comes back from the query, and nothing else.
+    assert _queried_ids(_run_printed(monkeypatch, markers[1][1], db)) == set(dups)
+    # Every cut own link comes back from the item's own export.
+    exported = {
+        event["id"] for event in _exported_events(_run_printed(monkeypatch, markers[0][1], db))
+    }
+    assert {row["event_id"] for row in removed_own} <= exported
+    assert word_count(text, command_prefix=prefix) <= WORD_LIMIT
+
+
+def test_cut_blockers_come_back_from_the_printed_commands(tmp_path: Path, monkeypatch) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-x", "ticket")
+    named = [f"own-{index:03d}" for index in range(250)]
+    _append(lg, "item.state", {"status": "blocked", "blocked_by": named}, "it-x", "s-1")
+    linked = []
+    for index in range(60):
+        blocker = f"blk-{index:03d}"
+        _create(lg, blocker, "ticket")
+        _append(lg, "item.linked", {"rel": "blocks", "target": "it-x"}, blocker, f"b-{index}")
+        linked.append(blocker)
+    # A blocks link to another item is not one of this card's rows.
+    _create(lg, "it-y", "ticket")
+    _append(lg, "item.linked", {"rel": "blocks", "target": "it-y"}, "blk-000", "b-y")
+    item = next(row for row in lg.items() if row["item_id"] == "it-x")
+    full = project_item(lg, item)
+    lg.close()
+    text = _printed_card(monkeypatch, db, "it-x")
+    body = text.split("\n## Blockers\n", 1)[1].split("\n\n", 1)[0]
+    shown = {line[2:] for line in body.splitlines() if line.startswith("- ")}
+    removed = [name for name in full.blockers if name not in shown]
+    removed_linked = [name for name in removed if name in linked]
+    removed_named = [name for name in removed if name in named]
+    assert removed_linked and removed_named
+    assert len(removed) == len(removed_linked) + len(removed_named)
+    prefix = f"ledger --db {shlex.quote(db)}"
+    markers = _section_markers(text, "Blockers")
+    assert markers == [
+        (len(removed_named), f"{prefix} export-item --json -- it-x"),
+        (len(removed_linked), f"{prefix} query --blocks=it-x --all"),
+    ]
+    queried = _queried_ids(_run_printed(monkeypatch, markers[1][1], db))
+    assert set(removed_linked) <= queried
+    assert queried == set(linked)
+    held = set()
+    for event in _exported_events(_run_printed(monkeypatch, markers[0][1], db)):
+        held.update(event["payload"].get("blocked_by") or ())
+    assert set(removed_named) <= held
+    assert word_count(text, command_prefix=prefix) <= WORD_LIMIT
+
+
+def test_word_count_counts_the_new_query_prefixes_as_commands() -> None:
+    prefix = "ledger --db '/tmp/a b/ledger.db'"
+    for verb in ("query --duplicate-of=it-1 --all", "query --blocks=it-1 --all"):
+        # The quoted path is one argument: three words for the prefix.
+        assert word_count(f"(+3 cut; {prefix} {verb})", command_prefix=prefix) == 8
+
+
+def _links_body(text: str) -> list[str]:
+    return text.split("\n## Links\n", 1)[1].split("\n\n", 1)[0].splitlines()
+
+
+def test_bounded_card_caps_links_to_the_newest_eight(tmp_path: Path, monkeypatch) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-l", "ticket")
+    links = [
+        _append(lg, "item.linked", {"rel": "url", "target": f"https://example.invalid/{n}"},
+                "it-l", f"l-{n}")
+        for n in range(11)
+    ]
+    lg.close()
+    text = _printed_card(monkeypatch, db, "it-l")
+    assert LINK_LIMIT == 8
+    assert word_count(text) <= WORD_LIMIT
+    prefix = f"ledger --db {shlex.quote(db)}"
+    assert _links_body(text) == [
+        f"- url: https://example.invalid/{n} (event={event.id})"
+        for n, event in enumerate(links)
+        if n >= 3
+    ] + [f"(+3 cut; {prefix} export-item --json -- it-l)"]
+    assert "dropped: links" in text
+
+
+def test_link_cap_counts_cut_duplicated_by_rows_under_their_query(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-l", "ticket")
+    for n in range(3):
+        _create(lg, f"it-dup-{n}", "ticket")
+        _append(lg, "item.linked", {"rel": "duplicate-of", "target": "it-l"}, f"it-dup-{n}",
+                f"d-{n}")
+    for n in range(8):
+        _append(lg, "item.linked", {"rel": "url", "target": f"https://example.invalid/{n}"},
+                "it-l", f"l-{n}")
+    lg.close()
+    text = _printed_card(monkeypatch, db, "it-l")
+    body = _links_body(text)
+    assert len(body) == 9
+    assert not any("duplicated-by" in line for line in body)
+    command = f"ledger --db {shlex.quote(db)} query --duplicate-of=it-l --all"
+    assert body[-1] == f"(+3 cut; {command})"
+    assert _queried_ids(_run_printed(monkeypatch, command, db)) == {
+        "it-dup-0", "it-dup-1", "it-dup-2"
+    }
+
+
+def test_full_card_shows_every_row_and_no_cut_marker(tmp_path: Path, monkeypatch) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    title = _words("t", 600)
+    _create(lg, "it-f", "ticket", title)
+    for n in range(3):
+        _create(lg, f"it-dup-{n}", "ticket")
+        _append(lg, "item.linked", {"rel": "duplicate-of", "target": "it-f"}, f"it-dup-{n}",
+                f"d-{n}")
+    for n in range(4):
+        _create(lg, f"it-kid-{n}", "ticket", f"kid {n}")
+        _append(lg, "item.linked", {"rel": "child-of", "target": "it-f"}, f"it-kid-{n}",
+                f"k-{n}")
+    blockers = [f"{_words('b', 12)} blocker-{n}" for n in range(9)]
+    _append(lg, "item.state", {"status": "blocked", "blocked_by": blockers}, "it-f", "s-1")
+    for n in range(4):
+        _create(lg, f"it-blk-{n}", "ticket")
+        _append(lg, "item.linked", {"rel": "blocks", "target": "it-f"}, f"it-blk-{n}", f"b-{n}")
+    elected = [_elect(lg, "it-f", n, f"e-{n}", pad=PAD) for n in range(30)]
+    asked = [
+        _append(lg, "decision.asked",
+                {"question": f"ask-{n}? {PAD}", "options": [{"label": "yes"}, {"label": "no"}]},
+                "it-f", f"a-{n}")
+        for n in range(6)
+    ]
+    links = [
+        _append(lg, "item.linked",
+                {"rel": "url", "target": f"https://example.invalid/{n}/{PAD.replace(' ', '-')}"},
+                "it-f", f"l-{n}")
+        for n in range(12)
+    ]
+    notes = [
+        _append(lg, "item.note", {"text": f"note-{n} {PAD}"}, "it-f", f"n-{n}")
+        for n in range(60)
+    ]
+    long_text = _words("x", 70)
+    tried = _append(lg, "item.tried", {"what": long_text, "outcome": _words("o", 50)}, "it-f",
+                    "tr-1")
+    findings = [f"finding-{n} {_words('f', 40)}" for n in range(9)]
+    _append(lg, "review.recorded", {"round": 1, "verdict": "changes", "findings": findings},
+            "it-f", "rv-1")
+    point = _words("p", 110)
+    refs = [f"plans/plan-{n}.md" for n in range(3)]
+    _append(lg, "item.stopped", {"point": point, "phase": "build", "refs": refs}, "it-f",
+            "st-1")
+    item = next(row for row in lg.items() if row["item_id"] == "it-f")
+    full = project_item(lg, item, full=True)
+    bounded = project_card(lg, "it-f")
+    lg.close()
+
+    # The bounded card of the same item does cut: every cap is exceeded.
+    assert "cut;" in format_card(bounded)
+    assert bounded.truncated and len(bounded.links) <= LINK_LIMIT
+
+    code, text, err = invoke(monkeypatch, ["--db", db, "card", "--full", "--", "it-f"])
+    assert code == 0, err
+    assert "cut;" not in text
+    assert "(+" not in text
+    assert "…" not in text
+    assert "full text in event" not in text
+    assert "## Truncated" not in text
+    assert word_count(text) > WORD_LIMIT
+    assert f"title: {title}\n" in text
+    for event in elected + asked + links + notes:
+        assert f"event={event.id}" in text
+    for n in range(3):
+        assert f"- duplicated-by: it-dup-{n} (event=" in text
+    for n in range(4):
+        assert f"- it-kid-{n}: kid {n} [open] holder: -" in text
+        assert f"- it-blk-{n}\n" in text
+    for name in blockers:
+        assert f"- {name}\n" in text
+    # The next step names every blocker in full.
+    step = text.split("\n## Next step\n", 1)[1].split("\n", 1)[0]
+    for name in blockers:
+        assert name in step
+    assert f"event={tried.id}: {long_text} -> {_words('o', 50)}" in text
+    for finding in findings:
+        assert f"  finding: {finding}\n" in text
+    assert f"[build]: {point}\n" in text
+    for ref in refs:
+        assert f"- {ref}\n" in text
+    header = [int(part) for part in text.splitlines()[2].split(": ", 1)[1].split(", ")]
+    assert len(header) > 40
+    assert _shown_event_ids(text) <= set(header)
+    assert header == list(full.source_event_ids)
+
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "card", "--full", "it-f"])
+    assert code == 0, err
+    data = json.loads(out)["data"]
+    assert data["truncated"] == []
+    assert data["source_event_ids_omitted"] == 0
+    assert len(data["notes"]) == 60
+    assert len(data["links"]) == 15
+    assert len(data["decisions"]) == 30
+    assert len(data["open_questions"]) == 6
+    assert len(data["blockers"]) == 13
+    assert len(data["children"]) == 4
+    assert data["reviews"][0]["findings_cut"] == 0
+
+
+def test_full_card_header_names_decision_standing_and_result_events(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-d", "ticket")
+    _create(lg, "it-o", "ticket")
+    recorded = {
+        "who": "tester",
+        "who_kind": "person",
+        "standing": "lean",
+        "effect": "synthetic effect",
+        "tags": [{"type": "ticket", "id": "it-d"}],
+        "verbatim": "synthetic words",
+        "phase": "build",
+    }
+    # The source event and the replacing decision live on another item, so
+    # nothing else on this card names them.
+    source = _append(lg, "item.note", {"text": "source"}, "it-o", "src")
+    decision = _append(
+        lg, "decision.recorded", {**recorded, "source_event_id": source.id}, "it-d", "dec"
+    )
+    replacement = _append(
+        lg, "decision.recorded", {**recorded, "tags": [{"type": "ticket", "id": "it-o"}]},
+        "it-o", "dec-2",
+    )
+    _append(
+        lg, "decision.standing",
+        {"decision_event_id": decision.id, "standing": "lean", "source_event_id": source.id},
+        "it-d", "st-0",
+    )
+    result = _append(
+        lg, "decision.result", {"decision_event_id": decision.id, "result": "shipped"},
+        "it-d", "res",
+    )
+    standing = _append(
+        lg, "decision.standing",
+        {
+            "decision_event_id": decision.id,
+            "standing": "superseded",
+            "superseded_by": replacement.id,
+            "source_event_id": source.id,
+        },
+        "it-d", "st-1",
+    )
+    lg.close()
+    code, text, err = invoke(monkeypatch, ["--db", db, "card", "--full", "--", "it-d"])
+    assert code == 0, err
+    header = {int(part) for part in text.splitlines()[2].split(": ", 1)[1].split(", ")}
+    assert {source.id, standing.id, result.id, replacement.id} <= header
+    assert decision.id in header
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "card", "--full", "it-d"])
+    assert code == 0, err
+    [row] = json.loads(out)["data"]["decision_records"]
+    assert row["standing_event_id"] == standing.id
+    assert row["result_event_id"] == result.id
+    assert row["superseded_by"] == replacement.id
+    assert row["source_event_id"] == source.id
+
+
+def test_full_card_keeps_every_pointer_unclipped(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    _create(lg, "it-p", "ticket")
+    pointers = [{"ref": f"{_words('q', 20)}-{n}", "note": _words("m", 30)} for n in range(15)]
+    item = next(row for row in lg.items() if row["item_id"] == "it-p")
+    full = project_item(lg, item, pointers=lambda _item: pointers, full=True)
+    capped = project_item(lg, item, pointers=lambda _item: pointers)
+    lg.close()
+    assert [row["ref"] for row in full.pointers] == [row["ref"] for row in pointers]
+    assert [row["note"] for row in full.pointers] == [row["note"] for row in pointers]
+    assert len(capped.pointers) < len(pointers)

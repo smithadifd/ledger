@@ -243,10 +243,13 @@ List decision records with their current standing.
 
 ## Reading verbs
 
-**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--since DATE] [--until DATE] [--limit N | --all]`**
+**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--duplicate-of ID] [--blocks ID] [--since DATE] [--until DATE] [--limit N | --all]`**
 Current items, at most 50 unless `--limit` says otherwise; `--all` removes the cap
 (with `--limit` it is a usage error, and `limit` in the JSON is then `null`). `--parent ID`
-keeps the children of `ID` (items whose current `child-of` anchor is `ID`). `--since` and
+keeps the children of `ID` (items whose current `child-of` anchor is `ID`).
+`--duplicate-of ID` keeps the other items with a `duplicate-of` link to `ID`
+(the card's `duplicated-by` rows), and `--blocks ID` keeps the items with a
+`blocks` link to `ID`, whatever their status. `--since` and
 `--until` keep the items whose newest event falls in the window, with the
 same date forms and the same refusals as `search`. Exit 1 when nothing
 matches. Each row in `items` carries the item's fields plus `revision`, `parent_id`
@@ -295,10 +298,20 @@ ledger questions --type ticket
 **`ready [--limit N]`** Open items with no open blocker, including claimed
 items whose lease expired.
 
-**`card ITEM [--md PATH]`** A bounded resume card: header (revision and
+**`card ITEM [--md PATH] [--full]`** A bounded resume card: header (revision and
 source event ids), fields, decisions, open questions with their options, the
 next step, links, blockers, notes and resume sections. `--md` also writes a
-markdown copy.
+markdown copy. `--full` prints the same card unbounded: every row, every word
+of every row and every source event id, with no caps and no cut markers, so it
+can run past the 400-word bound. Links show the newest 8 and a count of the
+rest; past the word bound the oldest shown link goes first. A section a long
+card cuts ends with `(+K cut; COMMAND)`, where
+`COMMAND` prints the rows it cut: `ledger export-item --json -- ITEM` for rows
+the item's own events hold, `ledger query --parent=ITEM --all` for children,
+`ledger query --duplicate-of=ITEM --all` for `duplicated-by` links and
+`ledger query --blocks=ITEM --all` for blockers named only by another item's
+`blocks` link. A section that cut both its own rows and other items' rows has
+one marker for each.
 
 **`links ITEM`** Every link that names the item, in both directions. Outgoing
 rows are the item's own links (`link ITEM ...`); incoming rows are other items'
@@ -448,3 +461,11 @@ form of the agent contract ([agent-contract.md](agent-contract.md)), so a
 session-start hook can print both. It never writes. With no items it prints
 `no open items`; when open items exist but none has a stop, it prints
 `N open item(s) with no stop recorded; ledger query lists them`. Both exit 0.
+`--json` carries `items` (one entry per stopped open item, as the text lists
+them) and `open_without_stop`, always present: how many open items have no
+stop recorded and so are not in `items` (0 when there are none, and 0 with
+`--item`). `--brief` adds `contract`. Two open items, neither stopped:
+
+```json
+{"data": {"items": [], "open_without_stop": 2}, "error": null, "ok": true}
+```
