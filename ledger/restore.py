@@ -8,14 +8,18 @@ it detects accidental corruption or edits; it does not prove who wrote the file.
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from .decisions import check_event as check_decision_event
 from .export import canonical_stream, verify_export, verify_stream_digest
 from .paths import resolve_db_path
-from .schema import SYSTEM_CLAIM_KIND
+from .schema import DOC_INLINE_LIMIT, DOC_KIND, SYSTEM_CLAIM_KIND, validate_payload
 from .store import (
     RESERVED_KIND_PREFIX,
     Event,
@@ -35,6 +39,67 @@ _INSERT = """INSERT INTO events (
     actor, harness, model, session, channel, provenance_class,
     recorded_at, prev_hash, hash
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+
+DOC_DIGEST_MISMATCH = "restore_doc_digest_mismatch"
+
+
+def inline_document_bytes(payload: Any) -> bytes:
+    """The bytes of an inline document's ``content_b64``.
+
+    Raises ``ValueError`` when it is missing, not a string, not base64, or
+    not the canonical encoding of its bytes (so one document has one stored
+    form).
+    """
+    encoded = payload.get("content_b64") if isinstance(payload, dict) else None
+    if type(encoded) is not str:
+        raise ValueError("content_b64 is not a string")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError(f"content_b64 is not base64: {exc}") from None
+    if base64.b64encode(data).decode("ascii") != encoded:
+        raise ValueError("content_b64 is not the canonical base64 of its bytes")
+    return data
+
+
+def check_document_event(event: Event) -> None:
+    """Refuse a ``doc.attached`` event that would enter the store with a
+    digest the ledger did not compute.
+
+    The payload must pass its schema, which requires the inline bytes
+    (``content_b64``) and refuses any other key, a ``path`` included
+    (``unknown-key:path``): documents are inline-only. The bytes are decoded
+    and their ``size`` and ``sha256`` recomputed; a malformed encoding,
+    bytes over ``DOC_INLINE_LIMIT``, or a mismatch with the stored values
+    refuses with ``restore_doc_digest_mismatch`` naming the event. Other
+    kinds pass.
+    """
+    if event.kind != DOC_KIND:
+        return
+    try:
+        validate_payload(event.kind, event.payload, event.payload_version)
+    except ValidationError as exc:
+        raise LedgerError(
+            f"restore refuses event {event.id} ({event.kind}): {exc.reason}"
+        ) from exc
+    try:
+        data = inline_document_bytes(event.payload)
+    except ValueError as exc:
+        problem = str(exc)
+    else:
+        problem = None
+        if len(data) > DOC_INLINE_LIMIT:
+            problem = f"{len(data)} inline bytes, over the {DOC_INLINE_LIMIT}-byte limit"
+        elif len(data) != event.payload["size"]:
+            problem = f"size {event.payload['size']} but the bytes are {len(data)}"
+        elif hashlib.sha256(data).hexdigest() != event.payload["sha256"]:
+            problem = "sha256 does not match the bytes"
+    if problem is not None:
+        raise LedgerError(
+            f"restore refuses event {event.id} ({event.kind}): "
+            f"{DOC_DIGEST_MISMATCH}: {problem}"
+        )
 
 
 @dataclass(frozen=True)
@@ -61,7 +126,14 @@ def _replay_events(lg: Ledger, events: list[Event]) -> None:
     allowed. The guards
     see only the rows replayed before them, as the original append did; one
     refusal rolls back the whole replay.
+
+    Before anything is inserted, every ``doc.attached`` event in the batch
+    has its inline digest recomputed (``check_document_event``). This is the
+    one path ``restore_export`` and ``replay_events`` share, so neither can
+    insert a document whose sha256 the ledger did not compute.
     """
+    for event in events:
+        check_document_event(event)
     conn = lg._conn
     conn.execute("BEGIN IMMEDIATE")
     try:

@@ -32,6 +32,7 @@ Event kinds (`ledger/schema.py`):
 |------|---------|------------|
 | `item.created`, `item.state`, `item.note`, `item.linked` | the item and its status, notes and links | durable |
 | `item.spec` | one version of the item's spec (written only by `spec set`) | durable |
+| `doc.attached` | a document attached to the item, its bytes inline (written only by `doc add`) | durable |
 | `item.tried`, `item.stopped` | what was tried, and where work stopped | durable |
 | `item.progress` | progress bookkeeping; may extend a claim's lease | ephemeral |
 | `decision.asked`, `decision.elected`, `decision.held` | open questions, their answers, and a hold on a question | durable |
@@ -58,6 +59,25 @@ child has one current anchor at a time (moving it appends a new link and
 leaves the old one in the log). Anchors form a forest: no item is below
 itself. The anchor's card lists its children with a `closed/total` count, and
 `v_items` carries `parent_id` and `children_open`.
+
+A *document* is a file attached to an item as one `doc.attached` event
+(`ledger doc add`). It is content-addressed: the ledger computes its sha256
+and size from the bytes it read, and a caller never supplies them, which is
+why `append` refuses the kind. Documents are inline-only: the bytes are
+stored base64 in the event, so the hash chain covers them, and a file over
+the 64 KiB inline limit is refused. `doc add` opens the file one path
+component at a time, from `/` (or from the current directory for a relative
+path), never following a symlink at any component, so a symlink anywhere in
+the path as given, or one swapped in while the walk runs, is refused rather
+than followed; a `..` component is refused too. On macOS `/tmp`, `/var` and
+`/etc` are symlinks, so pass the real path. Every read verifies the stored
+bytes and touches nothing else:
+`doc show --content` prints a document's bytes and `doc verify` reports it
+`ok` only when they hash to the stored sha256 and size; otherwise it is a
+`mismatch`, never content. The file a document came from can change or go
+away without affecting it. Restore and replay recompute every document's
+digest before inserting it and refuse a document that names a path, so an
+export cannot bring in a forged one.
 
 The views (`ledger/migrations/`) include `v_items` (current state per item),
 `v_ready` (open items with no open blocker, including claims whose lease has

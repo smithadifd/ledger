@@ -21,6 +21,7 @@ from ledger.verbs import claim
 from ledger.verbs import context
 from ledger.verbs import contract
 from ledger.verbs import decisions
+from ledger.verbs import doc
 from ledger.verbs import doctor
 from ledger.verbs import elect
 from ledger.verbs import entities
@@ -58,6 +59,7 @@ MODULES = (
     context,
     contract,
     decisions,
+    doc,
     doctor,
     elect,
     entities,
