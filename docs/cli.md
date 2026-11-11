@@ -169,7 +169,9 @@ repeated `/` and a `.` component are skipped. On macOS `/tmp`, `/var` and
 `/private/tmp/brief.md`). A `FILE` that is empty, ends in `/`, or is not a
 readable regular file (missing, a directory, a FIFO) is `doc_unreadable` as
 well, and so is a file with more than one hard link (refused before any of
-its bytes are read), and every `FILE` on a platform that cannot open a path
+its bytes are read; the check is made against the name as well as the
+opened file, so a link removed or swapped during the add is refused), and
+every `FILE` on a platform that cannot open a path
 without following symlinks. A filename in a refusal is escaped as `events`
 escapes a text column.
 

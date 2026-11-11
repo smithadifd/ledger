@@ -841,6 +841,131 @@ def test_a_hard_linked_file_is_refused_unread_until_its_second_link_is_gone(
     assert len(doc_events(db)) == 1
 
 
+def _record_reads(monkeypatch) -> list[int]:
+    """Every descriptor ``os.read`` is called with."""
+    reads: list[int] = []
+    real_read = os.read
+
+    def recording_read(fd, size):
+        reads.append(fd)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(os, "read", recording_read)
+    return reads
+
+
+def _assert_race_refused(db, monkeypatch, linked: Path, reads: list[int], message: str):
+    """One ``doc add`` of ``linked`` is refused ``doc_unreadable`` with
+    ``message``, reads nothing, prints no secret, writes nothing and leaks
+    no descriptor. Each caller then adds a single-link name as a control,
+    so the empty read list proves something."""
+    before = _open_descriptors()
+    code, refused, err = add(monkeypatch, db, linked)
+    assert (code, refused["ok"]) == (3, False), f"the raced file was added: {refused}"
+    assert refused["error"]["code"] == "doc_unreadable", (refused, err)
+    assert refused["error"]["message"] == f"cannot read {linked}: {message}"
+    assert reads == [], "doc add read the raced file before refusing it"
+    assert not _output_holds_secret(json.dumps(refused), err)
+    assert doc_events(db) == []
+    assert not _store_holds_secret(db)
+    assert _open_descriptors() == before, "a refused leaf check leaked a descriptor"
+
+
+def test_a_hard_link_unlinked_after_the_leaf_open_is_refused_unread(
+    db, tmp_path, monkeypatch
+):
+    # A writer plants a hard link to a file it cannot read, then unlinks it
+    # after doc add opened it and before the leaf check: the descriptor now
+    # reads one link, but the name no longer exists.
+    secret = write(tmp_path / "credentials", SECRET)
+    linked = tmp_path / "linked.md"
+    os.link(secret, linked)
+    reads = _record_reads(monkeypatch)
+    ran = _swap_after_opening(monkeypatch, "linked.md", linked.unlink)
+    _assert_race_refused(db, monkeypatch, linked, reads, doc_verb._REMOVED)
+    assert ran == ["linked.md"] and not linked.exists(), "the unlink did not run"
+    assert os.stat(secret).st_nlink == 1
+    code, added, err = add(monkeypatch, db, secret)
+    assert code == 0, err
+    assert reads, "the recorder saw no read, so its empty list above proves nothing"
+
+
+def test_a_hard_link_replaced_after_the_leaf_open_is_refused_unread(
+    db, tmp_path, monkeypatch
+):
+    # The writer replaces its planted link with a file of its own after the
+    # open: both names now read one link, but the name is another inode.
+    secret = write(tmp_path / "credentials", SECRET)
+    linked = tmp_path / "linked.md"
+    os.link(secret, linked)
+
+    def replace() -> None:
+        linked.unlink()
+        write(linked, b"the writer's own bytes")
+
+    reads = _record_reads(monkeypatch)
+    ran = _swap_after_opening(monkeypatch, "linked.md", replace)
+    _assert_race_refused(db, monkeypatch, linked, reads, doc_verb._REMOVED)
+    assert ran == ["linked.md"], "the replace did not run"
+    assert os.stat(linked).st_nlink == 1 and os.stat(secret).st_nlink == 1
+    code, added, err = add(monkeypatch, db, secret)
+    assert code == 0, err
+    assert reads, "the recorder saw no read, so its empty list above proves nothing"
+
+
+def _after_leaf_fstat(monkeypatch, inode: int, act) -> list[int]:
+    """Run ``act()`` once, just after ``os.fstat`` has read the file with
+    ``inode``; the returned list holds the inode once it has run."""
+    ran: list[int] = []
+    real_fstat = os.fstat
+
+    def racing_fstat(fd):
+        info = real_fstat(fd)
+        if not ran and info.st_ino == inode:
+            act()
+            ran.append(inode)
+        return info
+
+    monkeypatch.setattr(os, "fstat", racing_fstat)
+    return ran
+
+
+def test_a_second_link_on_the_descriptor_alone_is_refused_unread(
+    db, tmp_path, monkeypatch
+):
+    # The descriptor's fstat reads two links; the other name is unlinked
+    # before the name is checked, so the name alone would read one. Both
+    # counts must be one.
+    secret = write(tmp_path / "credentials", SECRET)
+    linked = tmp_path / "linked.md"
+    os.link(secret, linked)
+    reads = _record_reads(monkeypatch)
+    ran = _after_leaf_fstat(monkeypatch, os.stat(secret).st_ino, secret.unlink)
+    _assert_race_refused(db, monkeypatch, linked, reads, doc_verb._HARD_LINKED)
+    assert ran and os.stat(linked).st_nlink == 1, "the unlink did not run"
+    code, added, err = add(monkeypatch, db, linked)
+    assert code == 0, err
+    assert reads, "the recorder saw no read, so its empty list above proves nothing"
+
+
+def test_a_second_link_on_the_name_alone_is_refused_unread(db, tmp_path, monkeypatch):
+    # The descriptor's fstat reads one link; a second link is made before the
+    # name is checked, so the descriptor alone would read one. Both counts
+    # must be one.
+    secret = write(tmp_path / "credentials", SECRET)
+    second = tmp_path / "second.md"
+    reads = _record_reads(monkeypatch)
+    ran = _after_leaf_fstat(
+        monkeypatch, os.stat(secret).st_ino, lambda: os.link(secret, second)
+    )
+    _assert_race_refused(db, monkeypatch, secret, reads, doc_verb._HARD_LINKED)
+    assert ran and os.stat(secret).st_nlink == 2, "the link did not run"
+    second.unlink()
+    code, added, err = add(monkeypatch, db, secret)
+    assert code == 0, err
+    assert reads, "the recorder saw no read, so its empty list above proves nothing"
+
+
 # ---- the no-follow walk: one component at a time, from a descriptor -------------
 
 

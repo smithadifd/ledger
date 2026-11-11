@@ -73,7 +73,9 @@ rather than followed, including one swapped in while the walk runs. A
 directory replaced after the walk opened it does not redirect the walk,
 because later opens are relative to the descriptor already held. A `..`
 component is refused too, and so is a file with more than one hard link,
-before any of its bytes are read. On macOS `/tmp`, `/var` and
+before any of its bytes are read; the check is made against the name as
+well as the opened file, so a link removed or swapped during the add is
+refused. On macOS `/tmp`, `/var` and
 `/etc` are symlinks, so pass the real path. Every read verifies the stored
 bytes and touches nothing else:
 `doc show --content` prints a document's bytes and `doc verify` reports it

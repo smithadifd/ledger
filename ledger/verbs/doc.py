@@ -85,6 +85,7 @@ def document_key(item_id: str, role: str, sha256: str) -> str:
 _NOT_REGULAR = "not a readable regular file"
 _THROUGH_SYMLINK = "its path goes through a symlink, which is refused; pass the real path"
 _HARD_LINKED = "it has more than one hard link, which is refused; pass a file with one link"
+_REMOVED = "it was removed or replaced while it was being read, which is refused"
 
 
 def _unreadable(name: str, reason: str) -> CliError:
@@ -160,10 +161,18 @@ def _open_by_walk(name: str) -> int:
     grammar of FILE is ``_walk_plan``'s. A platform with no no-follow,
     directory-only or descriptor-relative open is refused before any open.
 
-    The leaf is then refused unless one ``fstat`` of its descriptor shows a
-    regular file with exactly one hard link (``_leaf_refusal``), before any
-    byte is read: a second hard link can name a file the caller cannot read
-    under a path the walk accepts, with no symlink anywhere.
+    The leaf is then verified before any byte is read, with its parent's
+    descriptor still open (``_leaf_refusal``): an ``fstat`` of the leaf
+    descriptor and a no-follow ``stat`` of the leaf name relative to the
+    parent descriptor must both succeed, both show a regular file, agree on
+    ``st_dev`` and ``st_ino``, and both read exactly one hard link. A second
+    hard link can name a file the caller cannot read under a path the walk
+    accepts, with no symlink anywhere, and a writer can unlink that link
+    after the open and before the check, so the descriptor alone would read
+    one link. Checking the name too closes that race: while the planted link
+    exists both stats read two links; once it is unlinked the name stat
+    fails; once it is replaced by another file the inode differs. The parent
+    descriptor is closed after the verification and on every refusal.
     """
     absolute, directories, leaf = _walk_plan(name)
     flags = _no_follow_flags()
@@ -181,23 +190,49 @@ def _open_by_walk(name: str) -> int:
             child = _open_component(name, part, os.O_RDONLY | directory | nofollow, fd)
             os.close(fd)
             fd = child
-        return _open_component(
+        leaf_fd = _open_component(
             name, leaf, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0), fd
         )
+        verified = False
+        try:
+            refusal = _leaf_refusal(leaf_fd, leaf, fd)
+            if refusal is not None:
+                raise _unreadable(name, refusal)
+            verified = True
+            return leaf_fd
+        finally:
+            if not verified:
+                os.close(leaf_fd)
     finally:
         os.close(fd)
 
 
-def _leaf_refusal(fd: int) -> str | None:
-    """Why the walk's leaf descriptor is refused, or None. One ``fstat``:
-    the leaf must be a regular file with exactly one hard link."""
+def _leaf_refusal(fd: int, leaf: str, parent_fd: int) -> str | None:
+    """Why the walk's leaf is refused, or None. The ``fstat`` of the leaf
+    descriptor and the no-follow ``stat`` of ``leaf`` under ``parent_fd``
+    must both show the same regular file (``st_dev`` and ``st_ino``) with
+    exactly one hard link; see ``_open_by_walk`` for why both are read."""
     try:
         info = os.fstat(fd)
     except OSError:
         return _NOT_REGULAR
     if not stat.S_ISREG(info.st_mode):
         return _NOT_REGULAR
-    if info.st_nlink != 1:
+    if info.st_nlink == 0:
+        return _REMOVED
+    try:
+        named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return _REMOVED
+    except (OSError, ValueError, NotImplementedError):
+        return _NOT_REGULAR
+    if named.st_nlink == 0:
+        return _REMOVED
+    if not stat.S_ISREG(named.st_mode):
+        return _REMOVED
+    if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
+        return _REMOVED
+    if info.st_nlink != 1 or named.st_nlink != 1:
         return _HARD_LINKED
     return None
 
@@ -219,16 +254,14 @@ def _read_input(name: str) -> bytes:
     Opened by ``_open_by_walk``, so refused ``doc_unreadable`` when any
     component of the path as given is a symlink or ``..``, when it ends in
     ``/``, when it is empty, when it is not a readable regular file
-    (missing, a directory, a FIFO), and when it has more than one hard link;
-    the leaf checks run before any byte is read. The bytes are read from the
-    walk's leaf descriptor. A file over ``DOC_INLINE_LIMIT`` is a usage
-    error. The name is escaped in every refusal.
+    (missing, a directory, a FIFO), when it has more than one hard link,
+    and when its name no longer names the opened file; the walk runs these
+    leaf checks before any byte is read. The bytes are read from the walk's
+    leaf descriptor. A file over ``DOC_INLINE_LIMIT`` is a usage error. The
+    name is escaped in every refusal.
     """
     fd = _open_by_walk(name)
     try:
-        refusal = _leaf_refusal(fd)
-        if refusal is not None:
-            raise _unreadable(name, refusal)
         data = _read_at_most(fd, DOC_INLINE_LIMIT)
     except OSError as exc:
         raise CliError(
