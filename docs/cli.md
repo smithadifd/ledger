@@ -152,12 +152,16 @@ bytes are not copied. `--inline` and `--by-path` force the choice;
 `--inline` over the limit is a usage error (exit 2). A stored path is
 absolute, or relative to the directory that holds the database: a relative
 `FILE` is stored as given when it names the same file from there, and made
-absolute otherwise. The media type defaults to `application/octet-stream`,
+absolute otherwise. A relative stored path resolves against the ledger home,
+so after a restore into a different directory `doc verify` may report
+`missing` for a file that still sits beside the original database. The media type defaults to `application/octet-stream`,
 and to `text/markdown` for a `.md` file. Adding the same item, role and
 sha256 again writes nothing and reports `unchanged`; the same bytes under
 another role are a second document. An unknown item is `not_found` (exit
-1); a `FILE` that is not a readable regular file is `doc_unreadable` (exit
-3). `ledger append` and `append-many` refuse the `doc.attached` kind.
+1); a `FILE` that is not a readable regular file, a symlink included (it is
+never followed), is `doc_unreadable` (exit 3). `ledger append` and
+`append-many` refuse the `doc.attached` kind. `doc add` is a write and needs
+`LEDGER_HARNESS`; `doc show` and `doc verify` are reads and do not.
 
 **`doc show ITEM [--id N] [--content]`** List the item's documents, oldest
 first: event id, role, size, the start of the sha256, `inline` or the path,
@@ -174,7 +178,9 @@ hashes them first: when they match, it writes exactly those bytes to stdout
 with no trailing newline, and with `--json` it prints
 `{"document": {<the row>, "content_b64": ...}}`. A mismatch is refused
 `doc_mismatch` and a missing file `doc_missing` (exit 4), and nothing is
-printed.
+printed; a stored path that is now a symlink, a FIFO or anything but a
+regular file is missing. A filename or path in a refusal or a text line is
+escaped as `events` escapes a text column.
 
 **`doc verify [ITEM] [--id N]`** Re-hash every document in scope (every
 document in the ledger when no item is given) and report each as `ok`,

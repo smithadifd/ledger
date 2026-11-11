@@ -7,6 +7,16 @@ they live otherwise; ``--inline`` and ``--by-path`` force the choice. A
 stored path is absolute, or relative to the ledger home (the directory that
 holds the database), and is never resolved through a symlink.
 
+A symlink is never followed at the leaf: ``doc add`` refuses one
+(``doc_unreadable``), and a stored path that is now a symlink, a FIFO or
+anything but a regular file reads as ``missing``. Every filename and stored
+path is escaped before it reaches a refusal or the text output, so a name
+holding a terminal control sequence is never printed raw.
+
+``doc show`` and ``doc verify`` are reads and run without ``LEDGER_HARNESS``;
+``doc add`` is the one write and refuses without it, as every write verb
+does.
+
 Adding the same item, role and sha256 again writes nothing and reports
 ``unchanged``; the idempotency key is derived from those three, so a retried
 add lands once. The same bytes under another role are a second document.
@@ -45,6 +55,7 @@ from ledger.verbs import (
     actor_kwargs,
     open_db,
 )
+from ledger.verbs.events import text_cell
 
 ACTIONS = ("add", "show", "verify")
 MARKDOWN_MIME = "text/markdown"
@@ -78,15 +89,31 @@ def _resolve(stored: str, home: Path) -> Path:
 def _open_regular(path: Path | str) -> int | None:
     """An open descriptor on ``path`` when it is a regular file, else None.
 
+    The leaf is never followed: it is opened ``O_NOFOLLOW``, so a symlink
+    fails to open. Where the platform has no ``O_NOFOLLOW``, the leaf is
+    ``lstat``-ed first (anything but a regular file, a symlink included, is
+    refused there) and the opened file must be that same device and inode.
     Opened non-blocking so a FIFO cannot stall the read; the type is checked
     on the open descriptor, so a swap after a check cannot slip in.
     """
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    leaf = None
+    if not nofollow:
+        try:
+            leaf = os.lstat(path)
+        except OSError:
+            return None
+        if not stat.S_ISREG(leaf.st_mode):
+            return None
     try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | nofollow)
     except OSError:
         return None
     try:
-        if stat.S_ISREG(os.fstat(fd).st_mode):
+        opened = os.fstat(fd)
+        if stat.S_ISREG(opened.st_mode) and (
+            leaf is None or (opened.st_dev, opened.st_ino) == (leaf.st_dev, leaf.st_ino)
+        ):
             return fd
     except OSError:
         pass
@@ -115,11 +142,13 @@ def _hash_fd(fd: int, *, keep: int | None) -> tuple[str, int, bytes | None]:
 
 def _read_input(name: str) -> tuple[str, int, bytes | None]:
     """Hash the file named on the command line: sha256, size, and the bytes
-    when they fit inline. An unreadable input is refused ``doc_unreadable``."""
+    when they fit inline. An unreadable input (missing, a symlink, a FIFO,
+    anything but a regular file) is refused ``doc_unreadable``; the name is
+    escaped in the message."""
     fd = _open_regular(name)
     if fd is None:
         raise CliError(
-            f"cannot read {name}: not a readable regular file",
+            f"cannot read {text_cell(name)}: not a readable regular file",
             code="doc_unreadable",
             exit_code=EXIT_REFUSED,
         )
@@ -127,7 +156,7 @@ def _read_input(name: str) -> tuple[str, int, bytes | None]:
         return _hash_fd(fd, keep=DOC_INLINE_LIMIT)
     except OSError as exc:
         raise CliError(
-            f"cannot read {name}: {exc.strerror or exc}",
+            f"cannot read {text_cell(name)}: {exc.strerror or exc}",
             code="doc_unreadable",
             exit_code=EXIT_REFUSED,
         ) from exc
@@ -185,7 +214,7 @@ def attach_document(
     sha256, size, data = _read_input(name)
     if storage == "inline" and size > DOC_INLINE_LIMIT:
         raise UsageError(
-            f"--inline: {name} is {size} bytes, over the {DOC_INLINE_LIMIT}-byte "
+            f"--inline: {text_cell(name)} is {size} bytes, over the {DOC_INLINE_LIMIT}-byte "
             "inline limit; store it with --by-path"
         )
     inline = storage == "inline" or (storage is None and size <= DOC_INLINE_LIMIT)
@@ -272,7 +301,11 @@ def verify_status(event: Event, home: Path) -> str:
 
 
 def _refuse(event: Event, status: str) -> CliError:
-    where = "inline bytes" if "content_b64" in event.payload else event.payload.get("path")
+    where = (
+        "inline bytes"
+        if "content_b64" in event.payload
+        else text_cell(event.payload.get("path"))
+    )
     if status == STATUS_MISSING:
         return CliError(
             f"document {event.id}: {where} is missing or not a regular file; "
@@ -364,6 +397,16 @@ def _refuse_flags(args, names: tuple[str, ...], action: str) -> None:
 
 
 def _run_add(args, ctx: Context) -> Result:
+    # The verb's one write: it needs the writer identity, refused exactly as
+    # the CLI refuses a write verb without it. show and verify are reads, so
+    # the verb is not ``writes`` and this action checks for itself.
+    if not ctx.harness:
+        raise CliError(
+            "LEDGER_HARNESS is required for writes; set it, e.g. "
+            "LEDGER_HARNESS=claude-code",
+            code="missing_harness",
+            exit_code=EXIT_REFUSED,
+        )
     _refuse_flags(args, ("event_id", "content"), "add")
     if args.item is None or args.file is None:
         raise UsageError("doc add needs ITEM and FILE")
@@ -413,7 +456,7 @@ def _show_line(row: dict[str, Any]) -> str:
         str(row["role"]),
         str(row["size"]),
         str(row["sha256"])[:12],
-        "inline" if row["storage"] == "inline" else str(row["path"]),
+        "inline" if row["storage"] == "inline" else text_cell(row["path"]),
     ]
     if row["title"] is not None:
         fields.append(str(row["title"]))
@@ -490,5 +533,7 @@ VERB = Verb(
     help="add, show or verify an item's content-addressed documents",
     add_arguments=add_arguments,
     run=run,
-    writes=True,
+    # show and verify are reads (the mods pane reads documents without a
+    # harness); add is the one write and checks LEDGER_HARNESS itself.
+    writes=False,
 )

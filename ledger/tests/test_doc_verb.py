@@ -21,10 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from ledger.export import export_events
+from ledger.export import event_filename, event_record, export_events, hash_body
 from ledger.restore import replay_events, restore_export
 from ledger.schema import DOC_INLINE_LIMIT, DOC_KIND, ValidationError, validate_payload
-from ledger.store import LedgerError, open_ledger
+from ledger.store import LedgerError, canonical_dumps, event_digest, open_ledger
 from ledger.verbs import doc as doc_verb
 
 from test_cli import invoke, seed
@@ -71,14 +71,16 @@ def doc_events(db: str) -> list:
         return lg.events(kind=DOC_KIND)
 
 
-def run_module(db: str, *argv: str) -> subprocess.CompletedProcess:
+def run_module(
+    db: str, *argv: str, timeout: float | None = None
+) -> subprocess.CompletedProcess:
     """The real CLI in a child process, stdout captured as bytes."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
     env.pop("PYTHONPATH", None)
     env["LEDGER_HARNESS"] = "pytest"
     return subprocess.run(
         [sys.executable, "-m", "ledger", "--db", db, *argv],
-        cwd=PKG_PARENT, capture_output=True, env=env, check=False,
+        cwd=PKG_PARENT, capture_output=True, env=env, check=False, timeout=timeout,
     )
 
 
@@ -573,3 +575,317 @@ def test_a_failed_doc_verify_reads_ok_false_exit_4_with_every_row(db, tmp_path, 
     code, verified, err = cli_json(monkeypatch, db, "doc", "verify")
     assert code == 0, err
     assert verified["ok"] is True and verified["error"] is None
+
+
+# ---- show and verify are reads; add needs the writer identity -----------------
+
+NO_HARNESS = {"LEDGER_HARNESS": None}
+
+
+def test_show_and_verify_are_reads_and_add_needs_the_harness_as_spec_set_does(
+    db, tmp_path, monkeypatch
+):
+    assert doc_verb.VERB.writes is False
+    code, added, err = add(monkeypatch, db, write(tmp_path / "a.md", b"read me"))
+    assert code == 0, err
+    event_id = str(added["data"]["document"]["event_id"])
+    for argv in (
+        ("doc", "show", ITEM),
+        ("doc", "show", ITEM, "--id", event_id),
+        ("doc", "show", ITEM, "--id", event_id, "--content"),
+        ("doc", "verify"),
+        ("doc", "verify", ITEM, "--id", event_id),
+    ):
+        code, out, err = invoke(monkeypatch, ["--json", "--db", db, *argv], env=NO_HARNESS)
+        assert code == 0, (argv, err)
+        assert json.loads(out)["ok"] is True, argv
+    code, out, err = invoke(
+        monkeypatch,
+        ["--db", db, "doc", "show", ITEM, "--id", event_id, "--content"],
+        env=NO_HARNESS,
+    )
+    assert (code, out) == (0, "read me"), err
+
+    other = str(write(tmp_path / "b.md", b"never written"))
+    for mode in (["--json"], []):
+        refused_doc = invoke(
+            monkeypatch,
+            [*mode, "--db", db, "doc", "add", ITEM, other, "--role", "brief"],
+            env=NO_HARNESS,
+        )
+        refused_spec = invoke(
+            monkeypatch,
+            [*mode, "--db", db, "spec", "set", ITEM, "--title", "T", "--body", "b"],
+            env=NO_HARNESS,
+        )
+        assert refused_doc == refused_spec, mode
+        assert refused_doc[0] == 3, mode
+    code, out, _err = invoke(
+        monkeypatch,
+        ["--json", "--db", db, "doc", "add", ITEM, other, "--role", "brief"],
+        env=NO_HARNESS,
+    )
+    assert (code, json.loads(out)["error"]["code"]) == (3, "missing_harness")
+    assert len(doc_events(db)) == 1
+
+
+# ---- symlinks are never followed ----------------------------------------------
+
+SECRET = b"secret-token-0123456789abcdef"
+
+
+def _store_bytes(db: str) -> bytes:
+    """Every byte of the database and its sidecars."""
+    home = Path(db).parent
+    return b"".join(
+        path.read_bytes() for path in sorted(home.iterdir())
+        if path.name.startswith(Path(db).name) and path.is_file()
+    )
+
+
+def _assert_reads_as_missing(monkeypatch, db: str, event_id: str, forbidden: bytes) -> None:
+    """verify says ``missing`` and ``show --content`` refuses ``doc_missing``,
+    and ``forbidden`` is printed nowhere."""
+    code, verified, err = cli_json(monkeypatch, db, "doc", "verify", ITEM)
+    assert code == 4, err
+    assert [row["status"] for row in verified["data"]["documents"]] == ["missing"]
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM, "--id", event_id, "--content")
+    assert (code, out) == (4, ""), "a document read through a symlink was printed"
+    assert forbidden.decode() not in out + err
+    code, shown, _err = cli_json(
+        monkeypatch, db, "doc", "show", ITEM, "--id", event_id, "--content"
+    )
+    assert (code, shown["error"]["code"], shown["data"]) == (4, "doc_missing", None)
+    assert forbidden.decode() not in json.dumps(shown)
+
+
+def test_a_symlink_given_to_doc_add_is_refused_and_its_target_never_read(
+    db, tmp_path, monkeypatch
+):
+    secret = write(tmp_path / "credentials", SECRET)
+    link = tmp_path / "innocent.md"
+    link.symlink_to(secret)
+    for extra in ((), ("--inline",), ("--by-path",)):
+        code, refused, err = add(monkeypatch, db, link, *extra)
+        assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), extra
+        assert SECRET.decode() not in json.dumps(refused) + err
+    assert doc_events(db) == []
+    assert SECRET not in _store_bytes(db)
+
+
+@pytest.mark.parametrize("target", ["same-bytes", "secret"])
+def test_a_symlink_put_at_a_stored_path_reads_as_missing_and_is_never_printed(
+    db, tmp_path, monkeypatch, target
+):
+    body = b"the packet, by path"
+    source = write(tmp_path / "packet.txt", body)
+    code, added, err = add(monkeypatch, db, source, "--by-path", role="packet")
+    assert code == 0, err
+    event_id = str(added["data"]["document"]["event_id"])
+    # The same bytes elsewhere would verify ok if the link were followed.
+    pointed = write(tmp_path / "pointed", body if target == "same-bytes" else SECRET)
+    source.unlink()
+    source.symlink_to(pointed)
+    _assert_reads_as_missing(monkeypatch, db, event_id, forbidden=pointed.read_bytes())
+    assert SECRET not in _store_bytes(db)
+
+
+def test_without_o_nofollow_the_lstat_check_still_refuses_a_symlink(
+    db, tmp_path, monkeypatch
+):
+    body = b"the packet, by path"
+    source = write(tmp_path / "packet.txt", body)
+    code, added, err = add(monkeypatch, db, source, "--by-path", role="packet")
+    assert code == 0, err
+    event_id = str(added["data"]["document"]["event_id"])
+    secret = write(tmp_path / "credentials", SECRET)
+    link = tmp_path / "innocent.md"
+    link.symlink_to(secret)
+    pointed = write(tmp_path / "pointed", body)
+    source.unlink()
+    source.symlink_to(pointed)
+    # A platform with no O_NOFOLLOW takes the lstat path.
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    code, refused, err = add(monkeypatch, db, link)
+    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), err
+    _assert_reads_as_missing(monkeypatch, db, event_id, forbidden=body)
+    assert SECRET not in _store_bytes(db)
+
+
+def test_without_o_nofollow_a_file_swapped_after_the_lstat_is_refused(
+    db, tmp_path, monkeypatch
+):
+    # The lstat saw one regular file and the open reached another (a swap
+    # between the two calls): the device and inode differ, so it is refused.
+    body = b"the packet, by path"
+    source = write(tmp_path / "packet.txt", body)
+    code, added, err = add(monkeypatch, db, source, "--by-path", role="packet")
+    assert code == 0, err
+    event_id = str(added["data"]["document"]["event_id"])
+    decoy = write(tmp_path / "decoy", b"what the lstat saw")
+    real_lstat = os.lstat
+    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+    monkeypatch.setattr(
+        os, "lstat",
+        lambda path, *a, **k: real_lstat(decoy) if str(path) == str(source)
+        else real_lstat(path, *a, **k),
+    )
+    _assert_reads_as_missing(monkeypatch, db, event_id, forbidden=body)
+
+
+# ---- FIFOs never block ----------------------------------------------------------
+
+TIMEOUT = 20
+
+
+def bounded_json(db: str, *argv: str) -> tuple[int, dict]:
+    """The real CLI with --json in a child process; a hang past TIMEOUT fails
+    the test instead of stalling the suite."""
+    try:
+        done = run_module(db, "--json", *argv, timeout=TIMEOUT)
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"ledger {' '.join(argv)} blocked for {TIMEOUT}s on a FIFO")
+    return done.returncode, json.loads(done.stdout)
+
+
+def test_a_fifo_at_a_stored_path_reads_as_missing_without_blocking(db, tmp_path, monkeypatch):
+    source = write(tmp_path / "packet.txt", b"the packet")
+    code, added, err = add(monkeypatch, db, source, "--by-path", role="packet")
+    assert code == 0, err
+    event_id = str(added["data"]["document"]["event_id"])
+    source.unlink()
+    os.mkfifo(source)
+    code, verified = bounded_json(db, "doc", "verify", ITEM)
+    assert code == 4, verified
+    assert [row["status"] for row in verified["data"]["documents"]] == ["missing"]
+    code, shown = bounded_json(db, "doc", "show", ITEM, "--id", event_id, "--content")
+    assert (code, shown["error"]["code"], shown["data"]) == (4, "doc_missing", None)
+
+
+def test_a_fifo_given_to_doc_add_is_refused_without_blocking(db, tmp_path):
+    fifo = tmp_path / "input.fifo"
+    os.mkfifo(fifo)
+    code, refused = bounded_json(db, "doc", "add", ITEM, str(fifo), "--role", "brief")
+    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), refused
+    assert doc_events(db) == []
+
+
+# ---- a forged inline document is never printed or reported ok -----------------
+
+
+@pytest.mark.parametrize("forged", [{"sha256": "f" * 64}, {"size": 3}])
+def test_show_content_refuses_a_forged_inline_document_and_prints_nothing(
+    db, monkeypatch, forged
+):
+    _forge_inline(db, **forged)
+    [event] = doc_events(db)
+    event_id = str(event.id)
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM, "--id", event_id, "--content")
+    assert (code, out) == (4, ""), "a forged inline document's bytes were printed"
+    assert "does not hash to the stored sha256" in err
+    code, shown, _err = cli_json(
+        monkeypatch, db, "doc", "show", ITEM, "--id", event_id, "--content"
+    )
+    assert (code, shown["ok"], shown["error"]["code"], shown["data"]) == (
+        4, False, "doc_mismatch", None
+    )
+    raw = run_module(db, "doc", "show", ITEM, "--id", event_id, "--content")
+    assert (raw.returncode, raw.stdout) == (4, b"")
+
+
+@pytest.mark.parametrize("forged", [{"sha256": "f" * 64}, {"size": 3}])
+def test_doc_verify_reports_a_forged_inline_document_as_mismatch(db, monkeypatch, forged):
+    _forge_inline(db, **forged)
+    code, verified, _err = cli_json(monkeypatch, db, "doc", "verify", ITEM)
+    assert code == 4
+    assert verified["error"]["code"] == "doc_verify_failed"
+    assert [row["status"] for row in verified["data"]["documents"]] == ["mismatch"]
+
+
+# ---- a control character in a stored path ---------------------------------------
+
+
+def test_a_control_character_in_a_stored_path_is_refused_at_add_and_on_restore(
+    db, tmp_path, monkeypatch
+):
+    evil = write(tmp_path / "evil\x1b[2Jname.txt", b"bytes")
+    code, refused, _err = add(monkeypatch, db, evil, "--by-path")
+    assert code == 3
+    assert refused["error"]["message"] == "ask_control_character:path"
+    assert doc_events(db) == []
+
+    clean = write(tmp_path / "clean.txt", b"clean")
+    assert add(monkeypatch, db, clean, "--by-path")[0] == 0
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, export)
+        events = lg.events()
+    document = events[-1]
+    assert document.kind == DOC_KIND
+    # The last event of a valid export, its path rewritten and its hash
+    # recomputed, so the chain still verifies.
+    forged = dataclasses.replace(
+        document, payload={**document.payload, "path": str(tmp_path / "evil\x1bname.txt")}
+    )
+    forged = dataclasses.replace(forged, hash=event_digest(hash_body(forged)))
+    (export / event_filename(forged.id)).write_text(
+        canonical_dumps(event_record(forged)) + "\n", encoding="utf-8"
+    )
+    dest = tmp_path / "restored" / "ledger.db"
+    with pytest.raises((ValidationError, LedgerError), match="ask_control_character:path"):
+        restore_export(export, dest, system="home")
+    assert not any(dest.parent.glob("ledger.db*")), "a refused restore left files behind"
+    replaced = [forged if event.id == forged.id else event for event in events]
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        with pytest.raises(
+            LedgerError,
+            match=r"restore refuses event \d+ \(doc\.attached\): ask_control_character:path",
+        ):
+            replay_events(fresh, replaced)
+        assert fresh.events() == []
+
+
+# ---- filenames and stored paths are escaped in refusals and text --------------
+
+OSC52 = "\x1b]52;c;cHduZWQ=\x07"
+OSC52_ESCAPED = "\\x1b]52;c;cHduZWQ=\\x07"
+
+
+def test_a_filename_holding_an_escape_sequence_is_escaped_in_the_refusal_text(
+    db, tmp_path, monkeypatch
+):
+    gone = tmp_path / f"gone{OSC52}.md"
+    code, out, err = cli(monkeypatch, db, "doc", "add", ITEM, str(gone), "--role", "brief")
+    assert code == 3
+    assert "\x1b" not in out + err and "\x07" not in out + err
+    assert f"gone{OSC52_ESCAPED}.md" in err
+    code, refused, _err = add(monkeypatch, db, gone)
+    assert refused["error"]["code"] == "doc_unreadable"
+    assert "\x1b" not in refused["error"]["message"]
+
+    big = write(tmp_path / f"big{OSC52}.bin", b"x" * (DOC_INLINE_LIMIT + 1))
+    code, out, err = cli(
+        monkeypatch, db, "doc", "add", ITEM, str(big), "--role", "brief", "--inline"
+    )
+    assert code == 2
+    assert "\x1b" not in out + err and "\x07" not in out + err
+    assert f"big{OSC52_ESCAPED}.bin" in err
+    assert doc_events(db) == []
+
+
+def test_a_stored_path_is_escaped_in_show_text_and_in_a_refusal(db, tmp_path, monkeypatch):
+    # U+2028 is not a control character, so the schema stores it; the text
+    # output must still never print it raw.
+    odd = write(tmp_path / "line break.txt", b"odd")
+    code, added, err = add(monkeypatch, db, odd, "--by-path")
+    assert code == 0, err
+    event_id = str(added["data"]["document"]["event_id"])
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM)
+    assert code == 0, err
+    assert " " not in out
+    assert "line\\u2028break.txt" in out
+    odd.unlink()
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM, "--id", event_id, "--content")
+    assert (code, out) == (4, "")
+    assert " " not in err
+    assert "line\\u2028break.txt" in err

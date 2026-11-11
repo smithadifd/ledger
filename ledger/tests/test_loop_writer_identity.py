@@ -690,7 +690,11 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
         "state",
     )
     cli_writers = {name for name, verb in discover_verbs().items() if verb.writes}
-    assert set(action_names) == cli_writers | {"restore"}
+    # ``doc`` is a read verb (show, verify) with one write action, ``add``,
+    # which checks LEDGER_HARNESS itself; the ``doc`` branch below runs only
+    # ``doc add``.
+    assert "doc" not in cli_writers
+    assert set(action_names) == cli_writers | {"restore", "doc"}
 
     for sequence in range(24):
         item_id = f"property-{sequence}"
