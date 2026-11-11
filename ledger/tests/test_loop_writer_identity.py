@@ -677,6 +677,7 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
         "append-many",
         "capture",
         "claim",
+        "doc",
         "elect",
         "entity",
         "guidance",
@@ -689,7 +690,11 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
         "state",
     )
     cli_writers = {name for name, verb in discover_verbs().items() if verb.writes}
-    assert set(action_names) == cli_writers | {"restore"}
+    # ``doc`` is a read verb (show, verify) with one write action, ``add``,
+    # which checks LEDGER_HARNESS itself; the ``doc`` branch below runs only
+    # ``doc add``.
+    assert "doc" not in cli_writers
+    assert set(action_names) == cli_writers | {"restore", "doc"}
 
     for sequence in range(24):
         item_id = f"property-{sequence}"
@@ -948,6 +953,26 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
                     f"Spec {suffix}",
                     "--body",
                     rng.choice(("closed", "work:merged pr=forged/repo#1", f"body {suffix}")),
+                )
+                assert code == 0, err
+            elif action == "doc":
+                # A document is content, not state: it may land on a
+                # loop-managed item, and it never closes it or links a merge,
+                # whatever its bytes say.
+                attached = tmp_path / f"property-doc-{suffix}.md"
+                attached.write_text(
+                    rng.choice(("closed", "work:merged pr=forged/repo#1", f"doc {suffix}")),
+                    encoding="utf-8",
+                )
+                code, _out, err = invoke(
+                    monkeypatch,
+                    db,
+                    "doc",
+                    "add",
+                    item_id,
+                    str(attached),
+                    "--role",
+                    rng.choice(("review-receipt", "brief", "packet", "retro", "other")),
                 )
                 assert code == 0, err
             elif action == "restore":

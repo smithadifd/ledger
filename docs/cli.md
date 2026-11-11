@@ -33,14 +33,15 @@ JSON object on stdout:
 | 1 | not found | no such item or database, or an empty listing |
 | 2 | usage | bad flags or arguments |
 | 3 | refused | validation, synced path, shared database, missing `LEDGER_HARNESS`, capacity, a quote that does not match, export lag |
-| 4 | integrity | `verify` found a broken hash chain or a broken child-of forest |
+| 4 | integrity | `verify` found a broken hash chain or a broken child-of forest; `doc verify` or `doc show --content` found a document whose stored bytes do not hash to its sha256 |
 | 5 | stale | `--expect-revision` no longer matches the item's newest event |
 
 Error codes in the JSON envelope include `usage`, `missing_harness`,
 `missing_db`, `not_found`, `empty`, `validation`, `conflict`, `capacity`,
 `shared_database`, `synced_path`, `stale_revision`, `integrity`, `unusable`,
-`quote_mismatch`, `lag`, `verb_collision` and `invalid_actor`. A user error
-never prints a stack trace.
+`quote_mismatch`, `lag`, `verb_collision`, `invalid_actor`, `doc_unreadable`,
+`doc_mismatch` and `doc_verify_failed`. A user error never
+prints a stack trace.
 
 ## Environment
 
@@ -141,6 +142,64 @@ A claim stamps the spec version it was made against, and the card shows
 `spec moved: vN → vM` when the spec's content changed under a claim. A version
 written only to move the source leaves the content hash as it was and prints
 nothing.
+
+**`doc add ITEM FILE --role ROLE [--title T] [--mime M]`**
+Attach a document to an item as one `doc.attached` event. `ROLE` is one of
+`review-receipt`, `brief`, `packet`, `retro`, `other`. The ledger reads
+`FILE`'s bytes once, computes their sha256 and size itself, and stores the
+bytes inline (base64) in the event. Documents are inline-only: a `FILE` over
+the 65536-byte inline limit is a usage error (exit 2). The media type
+defaults to `application/octet-stream`, and to `text/markdown` for a `.md`
+file. Adding the same item, role and sha256 again writes nothing and reports
+`unchanged`; the same bytes under another role are a second document. An
+unknown item is `not_found` (exit 1). `ledger append` and `append-many`
+refuse the `doc.attached` kind. `doc add` is a write and needs
+`LEDGER_HARNESS`; `doc show` and `doc verify` are reads and do not.
+
+`doc add` opens `FILE` one component at a time, as given, from `/` (or
+from the current directory for a relative `FILE`), each open relative to the
+directory opened before it and none following a symlink. A symlink at any
+component not yet opened, the file itself or a directory above it, is
+refused `doc_unreadable` (exit 3) rather than followed, including one
+swapped in while the walk runs. A directory replaced after the walk opened
+it does not redirect the walk, because later opens are relative to the
+descriptor already held. A `..` component is refused, never normalised; a
+repeated `/` and a `.` component are skipped. On macOS `/tmp`, `/var` and
+`/etc` are symlinks into `/private`, so pass the real path (for example
+`/private/tmp/brief.md`). A `FILE` that is empty, ends in `/`, or is not a
+readable regular file (missing, a directory, a FIFO) is `doc_unreadable` as
+well, and so is a file with more than one hard link (refused before any of
+its bytes are read; the check is made against the name as well as the
+opened file, so a link removed or swapped during the add is refused), and
+every `FILE` on a platform that cannot open a path
+without following symlinks. A filename in a refusal is escaped as `events`
+escapes a text column.
+
+**`doc show ITEM [--id N] [--content]`** List the item's documents, oldest
+first: event id, role, size, the start of the sha256, `inline`, and the
+title. `--id N` shows one. With `--json`:
+
+```json
+{"data": {"documents": [{"event_id": 7, "item_id": "it-1", "mime": "text/markdown", "path": null, "role": "brief", "sha256": "<64 hex>", "size": 120, "storage": "inline", "title": "The brief"}], "item_id": "it-1"}, "error": null, "ok": true}
+```
+
+`storage` is always `inline` and `path` is always null; both keys stay so
+the envelope keeps its shape. No documents is `documents: []` and exit 0.
+`--content` (with `--id`) decodes the document's stored bytes and hashes
+them first: when they match the stored sha256 and size, it writes exactly
+those bytes to stdout with no trailing newline, and with `--json` it prints
+`{"document": {<the row>, "content_b64": ...}}`. A mismatch is refused
+`doc_mismatch` (exit 4), and nothing is printed. `doc show` reads only the
+ledger, never the file the document came from.
+
+**`doc verify [ITEM] [--id N]`** Re-hash every document's stored bytes in
+scope (every document in the ledger when no item is given) and report each
+as `ok` or `mismatch`; it reads only the ledger, never the file a document
+came from. All `ok` prints `ok documents=N` and exits 0.
+Otherwise it prints `doc verify failed: F of N documents` and one line per
+failing document, and exits 4; with `--json` the envelope reads
+`ok: false`, error code `doc_verify_failed`, and keeps every row in
+`data.documents` (`event_id`, `item_id`, `sha256`, `status`).
 
 ## Entity verbs
 

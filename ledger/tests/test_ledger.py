@@ -108,6 +108,8 @@ def test_every_v1_kind_is_registered() -> None:
         "ledger.system",
         # set_spec alone writes it (test_item_spec covers it).
         "item.spec",
+        # attach_document alone writes it (test_doc_verb covers it).
+        "doc.attached",
         # the entity verb alone writes them (test_entities covers them).
         "entity.registered",
         "entity.state",
