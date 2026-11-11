@@ -27,6 +27,7 @@ from ledger.export import event_filename, event_record, export_events, hash_body
 from ledger.restore import replay_events, restore_export
 from ledger.schema import DOC_INLINE_LIMIT, DOC_KIND, ValidationError, validate_payload
 from ledger.store import LedgerError, canonical_dumps, event_digest, open_ledger
+from ledger.verbs import CliError
 from ledger.verbs import doc as doc_verb
 
 from test_cli import invoke, seed
@@ -702,16 +703,10 @@ def test_a_file_reached_through_a_symlinked_parent_is_refused_and_never_read(
     _assert_refused_unread(monkeypatch, db, through)
     code, refused, _err = add(monkeypatch, db, through)
     assert "goes through a symlink" in refused["error"]["message"]
-    # Relative, from the working directory; and through the link and back
-    # out with ``..``, which the OS resolves from the link's target
-    # (elsewhere/beside.md), not lexically (beside.md here).
+    # Relative, from the working directory. A path through the link and
+    # back out with ``..`` is refused for its ``..`` (see below).
     monkeypatch.chdir(tmp_path)
     _assert_refused_unread(monkeypatch, db, "linked/secret.md")
-    write(tmp_path / "elsewhere" / "beside.md", SECRET)
-    assert (tmp_path / "linked" / ".." / "beside.md").read_bytes() == SECRET
-    _assert_refused_unread(monkeypatch, db, "linked/../beside.md")
-    code, refused, _err = add(monkeypatch, db, "linked/../beside.md")
-    assert "goes through a symlink" in refused["error"]["message"]
 
 
 def test_a_symlinked_leaf_is_refused_and_its_target_never_read(db, tmp_path, monkeypatch):
@@ -728,46 +723,18 @@ def test_a_symlinked_leaf_is_refused_and_its_target_never_read(db, tmp_path, mon
     _assert_refused_unread(monkeypatch, db, chained)
 
 
-def _swap_to_symlink_after_the_path_check(monkeypatch, source: Path, target: Path) -> None:
-    """Replace ``source`` with a symlink to ``target`` just after doc add's
-    path check has seen a regular file there, as a racing writer could."""
-    real_realpath = os.path.realpath
-
-    def racing_realpath(path, *args, **kwargs):
-        resolved = real_realpath(path, *args, **kwargs)
-        if str(path) == str(source) and not source.is_symlink():
-            source.unlink()
-            source.symlink_to(target)
-        return resolved
-
-    monkeypatch.setattr(os.path, "realpath", racing_realpath)
+# ---- the no-follow walk: one component at a time, from a descriptor -------------
 
 
-def test_the_open_refuses_a_leaf_swapped_to_a_symlink_after_the_path_check(
-    db, tmp_path, monkeypatch
-):
-    # Pins the open-time guard (O_NOFOLLOW): the path check passed on a
-    # regular file, and the leaf is a symlink by the time it is opened.
-    secret = write(tmp_path / "credentials", SECRET)
-    source = write(tmp_path / "packet.md", b"what the check saw")
-    _swap_to_symlink_after_the_path_check(monkeypatch, source, secret)
-    code, refused, err = add(monkeypatch, db, source)
-    assert source.is_symlink(), "the swap did not run"
-    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), err
-    assert "not a readable regular file" in refused["error"]["message"]
-    assert not _output_holds_secret(json.dumps(refused), err)
-    assert doc_events(db) == []
-    assert not _store_holds_secret(db)
+def _patch_open(monkeypatch, wrapper) -> None:
+    """Install ``wrapper`` as ``os.open``, declared descriptor-relative as the
+    real one is, so the walk's platform check still sees dir_fd support."""
+    monkeypatch.setattr(os, "supports_dir_fd", os.supports_dir_fd | {wrapper})
+    monkeypatch.setattr(os, "open", wrapper)
 
 
-def test_without_o_nofollow_the_lstat_check_refuses_a_symlink_before_any_open(
-    db, tmp_path, monkeypatch
-):
-    # A platform with no O_NOFOLLOW takes the lstat path: a leaf that is a
-    # symlink is refused there, and os.open is never called on it.
-    secret = write(tmp_path / "credentials", SECRET)
-    source = write(tmp_path / "packet.md", b"what the check saw")
-    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
+def _record_opens(monkeypatch) -> list[str]:
+    """Every name ``os.open`` is called with, in order."""
     opened: list[str] = []
     real_open = os.open
 
@@ -775,40 +742,223 @@ def test_without_o_nofollow_the_lstat_check_refuses_a_symlink_before_any_open(
         opened.append(os.fspath(path))
         return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "open", recording_open)
-    _swap_to_symlink_after_the_path_check(monkeypatch, source, secret)
-    code, refused, err = add(monkeypatch, db, source)
-    assert source.is_symlink(), "the swap did not run"
-    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), err
-    assert str(source) not in opened, "os.open was called on a symlink"
-    assert doc_events(db) == []
-    assert not _store_holds_secret(db)
-
-    link = tmp_path / "direct-link.md"
-    link.symlink_to(secret)
-    assert doc_verb._open_regular(str(link)) is None
-    assert str(link) not in opened, "os.open was called on a symlink"
+    _patch_open(monkeypatch, recording_open)
+    return opened
 
 
-def test_without_o_nofollow_a_file_swapped_after_the_lstat_is_refused(
+def _swap_after_opening(monkeypatch, component: str, swap) -> list[str]:
+    """Run ``swap()`` once, just after the walk has opened ``component``, as
+    a racing writer could between two component opens. The returned list
+    names the component once the swap has run."""
+    ran: list[str] = []
+    real_open = os.open
+
+    def racing_open(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        if not ran and os.fspath(path) == component:
+            swap()
+            ran.append(component)
+        return fd
+
+    _patch_open(monkeypatch, racing_open)
+    return ran
+
+
+def _parent_swap_tree(tmp_path: Path):
+    """``walk-top/walk-parent/packet.md`` and a ``swap`` that moves
+    ``walk-parent`` aside and puts a symlink to a directory holding a
+    secret ``packet.md`` in its place."""
+    top = tmp_path / "walk-top"
+    parent = top / "walk-parent"
+    parent.mkdir(parents=True)
+    source = write(parent / "packet.md", b"what the walk started on")
+    other = tmp_path / "walk-other"
+    other.mkdir()
+    write(other / "packet.md", SECRET)
+
+    def swap() -> None:
+        parent.rename(top / "walk-parent-moved")
+        parent.symlink_to(other, target_is_directory=True)
+
+    return source, parent, swap
+
+
+def test_a_parent_swapped_for_a_symlink_before_the_walk_opens_it_is_refused(
     db, tmp_path, monkeypatch
 ):
-    # The lstat saw one regular file and the open reached another (a swap
-    # between the two calls): the device and inode differ, so it is refused.
-    source = write(tmp_path / "packet.txt", SECRET)
-    decoy = write(tmp_path / "decoy", b"what the lstat saw")
-    real_lstat = os.lstat
-    monkeypatch.delattr(os, "O_NOFOLLOW", raising=False)
-    monkeypatch.setattr(
-        os, "lstat",
-        lambda path, *a, **k: real_lstat(decoy) if os.fspath(path) == str(source)
-        else real_lstat(path, *a, **k),
-    )
+    # The walk has opened the grandparent; the parent becomes a symlink to
+    # another directory before the walk opens it. The no-follow open of the
+    # parent fails, so the other directory's file is never read.
+    source, parent, swap = _parent_swap_tree(tmp_path)
+    ran = _swap_after_opening(monkeypatch, "walk-top", swap)
     code, refused, err = add(monkeypatch, db, source)
-    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), err
+    assert ran == ["walk-top"] and parent.is_symlink(), "the swap did not run"
+    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), (refused, err)
+    assert "goes through a symlink" in refused["error"]["message"]
     assert not _output_holds_secret(json.dumps(refused), err)
     assert doc_events(db) == []
     assert not _store_holds_secret(db)
+
+
+def test_a_parent_swapped_after_the_walk_opened_it_still_reads_the_opened_directory(
+    db, tmp_path, monkeypatch
+):
+    # The walk has opened the parent; it then becomes a symlink to another
+    # directory. The leaf is opened relative to the parent's descriptor, so
+    # it is the file in the directory the walk opened, never the other one.
+    source, parent, swap = _parent_swap_tree(tmp_path)
+    ran = _swap_after_opening(monkeypatch, "walk-parent", swap)
+    code, added, err = add(monkeypatch, db, source)
+    assert ran == ["walk-parent"] and parent.is_symlink(), "the swap did not run"
+    assert code == 0, (added, err)
+    [stored] = doc_events(db)
+    assert base64.b64decode(stored.payload["content_b64"]) == b"what the walk started on"
+    assert not _output_holds_secret(json.dumps(added), err)
+    assert not _store_holds_secret(db)
+
+
+def test_a_leaf_swapped_to_a_symlink_after_its_parent_opened_is_refused(
+    db, tmp_path, monkeypatch
+):
+    secret = write(tmp_path / "credentials", SECRET)
+    parent = tmp_path / "walk-parent"
+    parent.mkdir()
+    source = write(parent / "packet.md", b"what the walk started on")
+
+    def swap() -> None:
+        source.unlink()
+        source.symlink_to(secret)
+
+    ran = _swap_after_opening(monkeypatch, "walk-parent", swap)
+    code, refused, err = add(monkeypatch, db, source)
+    assert ran == ["walk-parent"] and source.is_symlink(), "the swap did not run"
+    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), (refused, err)
+    assert "goes through a symlink" in refused["error"]["message"]
+    assert not _output_holds_secret(json.dumps(refused), err)
+    assert doc_events(db) == []
+    assert not _store_holds_secret(db)
+
+
+def test_dotdot_after_a_symlinked_directory_is_refused_before_any_component_opens(
+    db, tmp_path, monkeypatch
+):
+    # ``link/../secret.md``: lexically the sibling of ``link``; the OS would
+    # resolve ``..`` from the link's target. Neither is read: ``..`` is
+    # refused as given, before the walk opens a component.
+    real = tmp_path / "elsewhere" / "real"
+    real.mkdir(parents=True)
+    (tmp_path / "link").symlink_to(real, target_is_directory=True)
+    write(tmp_path / "secret.md", SECRET)
+    write(tmp_path / "elsewhere" / "secret.md", SECRET)
+    monkeypatch.chdir(tmp_path)
+    opened = _record_opens(monkeypatch)
+    for given in ("link/../secret.md", f"{tmp_path}/link/../secret.md"):
+        _assert_refused_unread(monkeypatch, db, given)
+        code, refused, _err = add(monkeypatch, db, given)
+        assert "its path holds a '..' component" in refused["error"]["message"], given
+    assert "link" not in opened, "the walk opened a component of a path holding '..'"
+
+
+@pytest.mark.parametrize(
+    "given", ["sub/../a.md", "./sub/../a.md", "sub/..", "../a.md", "{tmp}/sub/../a.md"]
+)
+def test_dotdot_anywhere_is_refused_even_when_it_resolves_inside_the_tree(
+    db, tmp_path, monkeypatch, given
+):
+    (tmp_path / "sub").mkdir()
+    write(tmp_path / "a.md", b"inside the tree")
+    monkeypatch.chdir(tmp_path)
+    given = given.format(tmp=tmp_path)
+    code, refused, err = add(monkeypatch, db, given)
+    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), (refused, err)
+    assert "its path holds a '..' component" in refused["error"]["message"]
+    assert doc_events(db) == []
+
+
+@pytest.mark.parametrize("given", ["{file}/", "{file}//", "sub/", ".", "sub/.", "/", ""])
+def test_a_file_ending_in_slash_or_dot_or_empty_is_refused(db, tmp_path, monkeypatch, given):
+    (tmp_path / "sub").mkdir()
+    regular = write(tmp_path / "a.md", b"a regular file")
+    monkeypatch.chdir(tmp_path)
+    given = given.format(file=regular)
+    code, refused, err = add(monkeypatch, db, given)
+    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), (given, refused, err)
+    expected = "it is empty" if given == "" else "it names a directory, not a file"
+    assert expected in refused["error"]["message"], given
+    assert doc_events(db) == []
+
+
+def test_repeated_slashes_and_dot_components_are_skipped(db, tmp_path, monkeypatch):
+    (tmp_path / "sub").mkdir()
+    monkeypatch.chdir(tmp_path)
+    cases = {
+        "/" + str(write(tmp_path / "abs.md", b"double-slash absolute")): b"double-slash absolute",
+        f"{tmp_path}//sub//mid.md": b"double-slash inside",
+        "sub//rel.md": b"double-slash relative",
+        "./dot.md": b"leading dot",
+        "././sub/./deep.md": b"dots inside",
+    }
+    write(tmp_path / "sub" / "mid.md", b"double-slash inside")
+    write(tmp_path / "sub" / "rel.md", b"double-slash relative")
+    write(tmp_path / "dot.md", b"leading dot")
+    write(tmp_path / "sub" / "deep.md", b"dots inside")
+    for given, body in cases.items():
+        code, added, err = add(monkeypatch, db, given)
+        assert code == 0, (given, added, err)
+        assert added["data"]["unchanged"] is False, given
+        event_id = str(added["data"]["document"]["event_id"])
+        code, shown, err = cli_json(
+            monkeypatch, db, "doc", "show", ITEM, "--id", event_id, "--content"
+        )
+        assert base64.b64decode(shown["data"]["document"]["content_b64"]) == body, given
+    assert len(doc_events(db)) == len(cases)
+
+
+@pytest.mark.parametrize("missing", ["O_NOFOLLOW", "O_DIRECTORY", "dir_fd"])
+def test_a_platform_without_no_follow_opens_refuses_before_opening_the_leaf(
+    db, tmp_path, monkeypatch, missing
+):
+    source = write(tmp_path / "packet.md", b"never opened")
+    opened = _record_opens(monkeypatch)
+    if missing == "dir_fd":
+        monkeypatch.setattr(os, "supports_dir_fd", set())
+    else:
+        monkeypatch.delattr(os, missing)
+    code, refused, err = add(monkeypatch, db, source)
+    assert (code, refused["error"]["code"]) == (3, "doc_unreadable"), (refused, err)
+    assert "cannot open a path without following symlinks" in refused["error"]["message"]
+    assert "packet.md" not in opened, "os.open was called on the leaf"
+    assert doc_events(db) == []
+
+
+def _open_descriptors() -> int:
+    return len(os.listdir("/dev/fd"))
+
+
+def test_the_walk_leaks_no_descriptor_accepted_or_refused(tmp_path, monkeypatch):
+    nested = tmp_path / "a" / "b"
+    nested.mkdir(parents=True)
+    source = write(nested / "doc.md", b"counted")
+    (tmp_path / "a" / "link").symlink_to(nested, target_is_directory=True)
+    (tmp_path / "a" / "leaf-link.md").symlink_to(source)
+    monkeypatch.chdir(tmp_path)
+    before = _open_descriptors()
+    for accepted in (str(source), "a/b/doc.md"):
+        assert doc_verb._read_input(accepted) == b"counted"
+        assert _open_descriptors() == before, accepted
+    for refused in (
+        str(tmp_path / "a" / "link" / "doc.md"),
+        "a/link/doc.md",
+        str(tmp_path / "a" / "leaf-link.md"),
+        str(tmp_path / "a" / "missing" / "doc.md"),
+        str(nested),
+        str(source) + "/",
+        "a/../a/b/doc.md",
+    ):
+        with pytest.raises(CliError) as caught:
+            doc_verb._read_input(refused)
+        assert caught.value.code == "doc_unreadable", refused
+        assert _open_descriptors() == before, refused
 
 
 # ---- FIFOs never block ----------------------------------------------------------

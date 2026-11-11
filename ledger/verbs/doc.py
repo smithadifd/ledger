@@ -6,15 +6,15 @@ inline (``content_b64``). Documents are inline-only: a file over
 ``DOC_INLINE_LIMIT`` is refused, because by-path documents are not
 supported yet.
 
-``doc add`` refuses (``doc_unreadable``) a FILE whose path holds a symlink
-anywhere, leaf or parent: its resolved path must equal its absolute path,
-checked once before the open. The open itself never follows the leaf
-(``O_NOFOLLOW``; where the platform has no such flag, the leaf is
-``lstat``-ed first, anything but a regular file is refused there, and the
-opened file must be that same device and inode). It is non-blocking, so a
-FIFO cannot stall it, and the open descriptor must be a regular file. Every
-filename is escaped before it reaches a refusal, so a name holding a
-terminal control sequence is never printed raw.
+``doc add`` opens FILE one component at a time, as given (never
+normalised), each open relative to the descriptor of the component before
+it and none following a symlink; see ``_open_by_walk`` for the grammar. A
+symlink at any component of the path as given, or one swapped in while the
+walk runs, is refused (``doc_unreadable``) rather than followed. The leaf
+open is non-blocking, so a FIFO cannot stall it, and the open descriptor
+must be a regular file. Every filename is escaped before it reaches a
+refusal, so a name holding a terminal control sequence is never printed
+raw.
 
 ``doc show`` and ``doc verify`` read only the stored inline bytes and
 recompute their sha256 and size; they never touch the filesystem. They are
@@ -81,40 +81,111 @@ def document_key(item_id: str, role: str, sha256: str) -> str:
     return f"doc:{item_id}:{role}:{sha256}"
 
 
-def _open_regular(path: str) -> int | None:
-    """An open descriptor on ``path`` when it is a regular file, else None.
+_NOT_REGULAR = "not a readable regular file"
+_THROUGH_SYMLINK = "its path goes through a symlink, which is refused; pass the real path"
 
-    The leaf is never followed: it is opened ``O_NOFOLLOW``, so a symlink
-    fails to open. Where the platform has no ``O_NOFOLLOW``, the leaf is
-    ``lstat``-ed first (anything but a regular file, a symlink included, is
-    refused there, before any open) and the opened file must be that same
-    device and inode. Opened non-blocking so a FIFO cannot stall the read;
-    the type is checked on the open descriptor, so a swap after a check
-    cannot slip in.
+
+def _unreadable(name: str, reason: str) -> CliError:
+    return CliError(
+        f"cannot read {text_cell(name)}: {reason}",
+        code="doc_unreadable",
+        exit_code=EXIT_REFUSED,
+    )
+
+
+def _walk_plan(name: str) -> tuple[bool, list[str], str]:
+    """``(absolute, directory components, leaf)`` for FILE as given.
+
+    FILE is split on ``/`` and never normalised. Empty components (a
+    leading ``/`` or a repeated one, as in ``//a.md`` or ``a//b.md``) and
+    ``.`` components are skipped. Refused ``doc_unreadable``: an empty FILE;
+    a ``..`` component anywhere; and a FILE whose last component is empty or
+    ``.`` (it ends in ``/`` or ``/.``, so it names a directory).
     """
+    if name == "":
+        raise CliError(
+            "cannot read FILE: it is empty", code="doc_unreadable", exit_code=EXIT_REFUSED
+        )
+    parts = name.split("/")
+    if ".." in parts:
+        raise _unreadable(
+            name, "its path holds a '..' component, which is refused; pass the real path"
+        )
+    leaf = parts[-1]
+    if leaf in ("", "."):
+        raise _unreadable(name, "it names a directory, not a file")
+    directories = [part for part in parts[:-1] if part not in ("", ".")]
+    return name.startswith("/"), directories, leaf
+
+
+def _no_follow_flags() -> tuple[int, int] | None:
+    """``(O_NOFOLLOW, O_DIRECTORY)``, or None when the platform lacks either
+    flag or cannot open relative to a directory descriptor."""
     nofollow = getattr(os, "O_NOFOLLOW", 0)
-    leaf = None
-    if not nofollow:
-        try:
-            leaf = os.lstat(path)
-        except OSError:
-            return None
-        if not stat.S_ISREG(leaf.st_mode):
-            return None
-    try:
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | nofollow)
-    except OSError:
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory or os.open not in os.supports_dir_fd:
         return None
+    return nofollow, directory
+
+
+def _is_symlink(part: str, dir_fd: int) -> bool:
+    """Whether ``part`` under ``dir_fd`` is a symlink. Chooses a refusal's
+    wording only; the refusal itself is the failed no-follow open."""
     try:
-        opened = os.fstat(fd)
-        if stat.S_ISREG(opened.st_mode) and (
-            leaf is None or (opened.st_dev, opened.st_ino) == (leaf.st_dev, leaf.st_ino)
-        ):
-            return fd
-    except OSError:
+        return stat.S_ISLNK(os.stat(part, dir_fd=dir_fd, follow_symlinks=False).st_mode)
+    except (OSError, ValueError, NotImplementedError):
+        return False
+
+
+def _open_component(name: str, part: str, flags: int, dir_fd: int) -> int:
+    try:
+        return os.open(part, flags, dir_fd=dir_fd)
+    except (OSError, ValueError):
         pass
-    os.close(fd)
-    return None
+    raise _unreadable(name, _THROUGH_SYMLINK if _is_symlink(part, dir_fd) else _NOT_REGULAR)
+
+
+def _open_by_walk(name: str) -> int:
+    """An open descriptor on the leaf of FILE, reached without following a
+    symlink at any component.
+
+    The walk starts from a descriptor on ``/`` (absolute FILE) or ``.``
+    (relative FILE); the starting directory itself is not checked. Each
+    directory component is opened ``O_DIRECTORY | O_NOFOLLOW`` relative to
+    the descriptor before it, and the leaf ``O_NOFOLLOW | O_NONBLOCK``
+    relative to its parent's; each parent descriptor is closed once its
+    child is open, and every descriptor is closed on every refusal. The
+    grammar of FILE is ``_walk_plan``'s. A platform with no no-follow,
+    directory-only or descriptor-relative open is refused before any open.
+    """
+    absolute, directories, leaf = _walk_plan(name)
+    flags = _no_follow_flags()
+    if flags is None:
+        raise _unreadable(
+            name, "this platform cannot open a path without following symlinks"
+        )
+    nofollow, directory = flags
+    try:
+        fd = os.open("/" if absolute else ".", os.O_RDONLY | directory)
+    except OSError as exc:
+        raise _unreadable(name, _NOT_REGULAR) from exc
+    try:
+        for part in directories:
+            child = _open_component(name, part, os.O_RDONLY | directory | nofollow, fd)
+            os.close(fd)
+            fd = child
+        return _open_component(
+            name, leaf, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0), fd
+        )
+    finally:
+        os.close(fd)
+
+
+def _is_regular(fd: int) -> bool:
+    try:
+        return stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError:
+        return False
 
 
 def _read_at_most(fd: int, limit: int) -> bytes:
@@ -131,32 +202,17 @@ def _read_at_most(fd: int, limit: int) -> bytes:
 def _read_input(name: str) -> bytes:
     """The bytes of the file named on the command line, read once.
 
-    Refused ``doc_unreadable`` when any component of its path is a symlink
-    (its resolved path is not its absolute path), and when it is not a
-    readable regular file (missing, a directory, a FIFO, a symlinked leaf).
-    A file over ``DOC_INLINE_LIMIT`` is a usage error. The name is escaped
-    in every refusal.
+    Opened by ``_open_by_walk``, so refused ``doc_unreadable`` when any
+    component of the path as given is a symlink or ``..``, when it ends in
+    ``/``, when it is empty, and when it is not a readable regular file
+    (missing, a directory, a FIFO). The bytes are read from the walk's leaf
+    descriptor. A file over ``DOC_INLINE_LIMIT`` is a usage error. The name
+    is escaped in every refusal.
     """
+    fd = _open_by_walk(name)
     try:
-        absolute = os.path.abspath(name)
-        resolved = os.path.realpath(name)
-    except (OSError, ValueError):
-        absolute = resolved = None
-    if absolute is not None and resolved != absolute:
-        raise CliError(
-            f"cannot read {text_cell(name)}: its path goes through a symlink, "
-            "which is refused; pass the real path",
-            code="doc_unreadable",
-            exit_code=EXIT_REFUSED,
-        )
-    fd = _open_regular(absolute) if absolute is not None else None
-    if fd is None:
-        raise CliError(
-            f"cannot read {text_cell(name)}: not a readable regular file",
-            code="doc_unreadable",
-            exit_code=EXIT_REFUSED,
-        )
-    try:
+        if not _is_regular(fd):
+            raise _unreadable(name, _NOT_REGULAR)
         data = _read_at_most(fd, DOC_INLINE_LIMIT)
     except OSError as exc:
         raise CliError(

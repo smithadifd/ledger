@@ -65,10 +65,13 @@ A *document* is a file attached to an item as one `doc.attached` event
 and size from the bytes it read, and a caller never supplies them, which is
 why `append` refuses the kind. Documents are inline-only: the bytes are
 stored base64 in the event, so the hash chain covers them, and a file over
-the 64 KiB inline limit is refused. `doc add` refuses a file whose path
-holds a symlink anywhere, the file or a directory above it (on macOS that
-includes `/tmp`, `/var` and `/etc`, so pass the real path), and never reads
-through one. Every read verifies the stored bytes and touches nothing else:
+the 64 KiB inline limit is refused. `doc add` opens the file one path
+component at a time, from `/` (or from the current directory for a relative
+path), never following a symlink at any component, so a symlink anywhere in
+the path as given, or one swapped in while the walk runs, is refused rather
+than followed; a `..` component is refused too. On macOS `/tmp`, `/var` and
+`/etc` are symlinks, so pass the real path. Every read verifies the stored
+bytes and touches nothing else:
 `doc show --content` prints a document's bytes and `doc verify` reports it
 `ok` only when they hash to the stored sha256 and size; otherwise it is a
 `mismatch`, never content. The file a document came from can change or go
