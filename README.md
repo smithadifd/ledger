@@ -323,9 +323,13 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `capture` | record a harness hook's prompt or picker answer (run by hooks only) | yes |
 | `guidance` | `set`, `list` or `withdraw` a dated burn-or-protect note for a resource pool | `set`, `withdraw` |
 | `query` | list current items, with filters and a row cap | no |
+| `events` | list events across all items, newest first; `--id N` (repeatable) prints exactly those events | no |
+| `links` | print every link that names an item, outgoing and incoming, and how the other end resolves (`item`, `unresolved` or `external`) | no |
 | `ready` | list open items with no open blocker | no |
+| `questions` | list open asks across all items, oldest first | no |
 | `card` | render a bounded resume card for an item | no |
 | `resume` | list each open item's newest stop and the command that continues it; `--brief` adds the agent contract's short form | no |
+| `contract` | print the full agent contract from the installed package; never opens the database | no |
 | `decisions` | list decision records with their current standing | no |
 | `entities` | render the entity registry as markdown tables or JSON, naming the ledger revision | no |
 | `context` | print a bounded orientation pack for an item or initiative and its linked items | no |
@@ -334,7 +338,7 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `search` | full-text search over items, decisions, utterances and markdown roots | no |
 | `index` | build or rebuild the derived search index | no |
 | `lint-quotes` | check every election's quotes against its utterance | no |
-| `verify` | verify the hash chain and every payload; `--system` checks the claim | no |
+| `verify` | verify the hash chain and every payload, then replay the `child-of` forest and fail with exit 4 on the first break; `--system` checks the claim | no |
 | `doctor` | print the database path, schema version, search-index state and expired claims | no |
 | `export` | write events after the watermark; `--commit`, `--push`, `--check` | no |
 | `backup` | online backup with an integrity check | no |
@@ -352,7 +356,7 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | 1 | not found, or an empty result (`ready` and `query` with no rows) |
 | 2 | usage error |
 | 3 | refused: validation, synced path, shared database, missing `LEDGER_HARNESS`, capacity, a failed quote |
-| 4 | integrity failure (`verify` found a broken chain) |
+| 4 | integrity failure (`verify` found a broken chain, or the first break in the `child-of` forest) |
 | 5 | stale revision: `--expect-revision` no longer matches the item's newest event |
 
 Errors print one line on stderr, or with `--json` an envelope whose `error`
