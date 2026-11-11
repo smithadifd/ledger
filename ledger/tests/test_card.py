@@ -1,6 +1,7 @@
 """Resume cards: revision, types, truncation, JSON, and --md path guard."""
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
@@ -2145,6 +2146,131 @@ def test_cut_blockers_query_returns_only_the_open_blockers(
     assert _queried_ids(_run_printed(monkeypatch, unfiltered, db)) == {
         "blk-open-1", "blk-open-2", "blk-closed"
     }
+
+
+_WORDS_MARKER = re.compile(r"\(\+(\d+) words cut; (.+)\)$")
+_ASK_MARKER = re.compile(r"… \(\+(\d+) words cut; full text in event (\d+); ([^)]+)\)")
+_FIELD_LINE = re.compile(r"^(title|owner|claim): ")
+
+
+def _text_cut_markers(text: str) -> list[tuple[str, int, str, str]]:
+    """Every (section, count, unit, command) cut marker the text card prints
+    for a ``truncated`` name, in the order it prints them."""
+    cuts = []
+    heading = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            heading = line[3:]
+            continue
+        field = _FIELD_LINE.match(line)
+        if heading is None and field:
+            match = _WORDS_MARKER.search(line)
+            if match:
+                cuts.append((field.group(1), int(match.group(1)), "words", match.group(2)))
+            continue
+        if heading == "Next step":
+            match = _WORDS_MARKER.search(line)
+            if match:
+                cuts.append(("next_step", int(match.group(1)), "words", match.group(2)))
+            continue
+        if heading == "Open questions":
+            for match in _ASK_MARKER.finditer(line):
+                cuts.append(("ask", int(match.group(1)), "words", match.group(3)))
+        match = _MARKER.match(line)
+        if match and heading is not None:
+            section = "children" if heading.startswith("Children (") else _HEADINGS[heading]
+            cuts.append((section, int(match.group(1)), "rows", match.group(2)))
+    return cuts
+
+
+def _json_cut_markers(data: dict) -> list[tuple[str, int, str, str]]:
+    return [(e["section"], e["count"], e["unit"], e["command"]) for e in data["cuts"]]
+
+
+def test_json_cuts_follow_the_text_order_of_title_owner_and_claim(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-1", "ticket", _words("t", 300))
+    state = {"status": "claimed", "owner": _words("o", 300), "claim": _words("k", 300)}
+    _append(lg, "item.state", state, "it-1", "s-1")
+    lg.close()
+    text = _printed_card(monkeypatch, db, "it-1")
+    data = _card_json(monkeypatch, db, "it-1")
+    # The card trims owner, then claim, then title; the text prints the
+    # title first, then owner and claim. The JSON follows the text.
+    assert data["truncated"] == ["owner", "claim", "title"]
+    markers = _text_cut_markers(text)
+    assert [marker[0] for marker in markers] == ["title", "owner", "claim"]
+    assert _json_cut_markers(data) == markers
+
+
+def test_json_cuts_follow_the_text_order_of_an_ask_children_and_blockers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _decision(lg, "dc-x")
+    pad = " ".join(["w"] * 60)
+    for index in range(2):
+        _append(
+            lg,
+            "decision.asked",
+            {
+                "question": f"q{index}?",
+                "ask": pad,
+                "options": [
+                    {"label": "A", "description": pad},
+                    {"label": "B", "description": pad},
+                ],
+                "recommendation": pad,
+                "default": "B",
+            },
+            "dc-x",
+            f"ask-{index}",
+        )
+    for index in range(6):
+        child = f"ch-{index:02d}"
+        _create(lg, child, "ticket", " ".join([f"c{index}"] * 12))
+        _append(lg, "item.linked", {"rel": "child-of", "target": "dc-x"}, child, f"l-{child}")
+    for index in range(80):
+        blocker = f"blk-{index:02d}"
+        _create(lg, blocker, "ticket")
+        _append(lg, "item.linked", {"rel": "blocks", "target": "dc-x"}, blocker, f"b-{blocker}")
+    lg.close()
+    text = _printed_card(monkeypatch, db, "dc-x")
+    data = _card_json(monkeypatch, db, "dc-x")
+    assert data["truncated"] == ["ask", "children", "blockers"]
+    markers = _text_cut_markers(text)
+    sections = [marker[0] for marker in markers]
+    assert sections[-2:] == ["children", "blockers"]
+    assert set(sections[:-2]) == {"ask"}
+    assert _json_cut_markers(data) == markers
+    # Each ask entry names the event the text marker names, in the same order.
+    asked = [int(m.group(2)) for m in _ASK_MARKER.finditer(text.split("\n## Open questions\n")[1])]
+    assert [e["event_id"] for e in data["cuts"] if e["section"] == "ask"] == asked
+
+
+def test_a_truncated_name_with_no_marker_gets_the_export_entry(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    _create(lg, "it-x", "ticket")
+    card = project_card(lg, "it-x")
+    lg.close()
+    # Notes is named as cut, but no count was recorded, so the text prints
+    # no marker for it. The JSON still gives it one entry, under the export.
+    card = dataclasses.replace(card, truncated=("notes",))
+    text = format_card(card)
+    assert _text_cut_markers(text) == []
+    assert "dropped: notes" in text
+    assert card.as_dict()["cuts"] == [
+        {
+            "section": "notes",
+            "count": 0,
+            "unit": "rows",
+            "command": "ledger export-item --json -- it-x",
+        }
+    ]
 
 
 def _links_body(text: str) -> list[str]:
