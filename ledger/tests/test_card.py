@@ -2198,3 +2198,148 @@ def test_full_card_keeps_every_pointer_unclipped(tmp_path: Path) -> None:
     assert [row["ref"] for row in full.pointers] == [row["ref"] for row in pointers]
     assert [row["note"] for row in full.pointers] == [row["note"] for row in pointers]
     assert len(capped.pointers) < len(pointers)
+
+
+def _child_ledger(lg):
+    """A parent and one child: created, state set, linked child-of the parent."""
+    parent = _create(lg, "it-parent", "ticket", "parent")
+    child = _create(lg, "it-child", "ticket", "child")
+    state = _append(
+        lg, "item.state", {"status": "claimed", "owner": "tester"}, "it-child", "s-child"
+    )
+    link = _append(
+        lg, "item.linked", {"rel": "child-of", "target": "it-parent"}, "it-child", "l-child"
+    )
+    return parent, child, state, link
+
+
+def test_full_card_names_child_creation_state_and_link_events(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    parent, child, state, link = _child_ledger(lg)
+    card = project_card(lg, "it-parent", full=True)
+    lg.close()
+    assert card.children[0]["item_id"] == "it-child"
+    assert card.source_event_ids == tuple(sorted({parent.id, child.id, state.id, link.id}))
+    code, text, err = invoke(monkeypatch, ["--db", db, "card", "--full", "--", "it-parent"])
+    assert code == 0, err
+    header = {int(part) for part in text.splitlines()[2].split(": ", 1)[1].split(", ")}
+    assert {child.id, state.id, link.id} <= header
+
+
+def test_full_card_child_without_state_names_creation_and_link_only(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    parent = _create(lg, "it-parent", "ticket", "parent")
+    child = _create(lg, "it-child", "ticket", "child")
+    link = _append(
+        lg, "item.linked", {"rel": "child-of", "target": "it-parent"}, "it-child", "l-child"
+    )
+    card = project_card(lg, "it-parent", full=True)
+    lg.close()
+    assert card.children[0]["status"] == "open"
+    assert card.source_event_ids == tuple(sorted({parent.id, child.id, link.id}))
+
+
+def test_full_card_child_linked_twice_names_the_resolved_link(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    parent = _create(lg, "it-parent", "ticket", "parent")
+    _create(lg, "it-other", "ticket", "other")
+    child = _create(lg, "it-child", "ticket", "child")
+    first = _append(
+        lg, "item.linked", {"rel": "child-of", "target": "it-parent"}, "it-child", "l-1"
+    )
+    moved = _append(
+        lg, "item.linked",
+        {"rel": "child-of", "target": "it-other", "moved_from": "it-parent"},
+        "it-child", "l-2",
+    )
+    back = _append(
+        lg, "item.linked",
+        {"rel": "child-of", "target": "it-parent", "moved_from": "it-other"},
+        "it-child", "l-3",
+    )
+    card = project_card(lg, "it-parent", full=True)
+    other = project_card(lg, "it-other", full=True)
+    lg.close()
+    # v_items resolves the child's anchor from its latest child-of link.
+    assert [row["item_id"] for row in card.children] == ["it-child"]
+    assert card.source_event_ids == tuple(sorted({parent.id, child.id, back.id}))
+    assert first.id not in card.source_event_ids
+    assert moved.id not in card.source_event_ids
+    assert other.children == ()
+    assert child.id not in other.source_event_ids
+
+
+def test_bounded_card_source_ids_unchanged_by_child_rows(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    parent, child, state, link = _child_ledger(lg)
+    card = project_card(lg, "it-parent")
+    item = next(row for row in lg.items() if row["item_id"] == "it-parent")
+    unbounded = project_item(lg, item)
+    lg.close()
+    assert [row["item_id"] for row in card.children] == ["it-child"]
+    assert card.source_event_ids == (parent.id,)
+    assert unbounded.source_event_ids == (parent.id,)
+    assert card.source_omitted == 0
+
+
+def test_card_json_child_rows_keep_their_keys(tmp_path: Path, monkeypatch) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _child_ledger(lg)
+    lg.close()
+    expected = [
+        {"item_id": "it-child", "title": "child", "status": "claimed", "holder": "tester"}
+    ]
+    for argv in (["card", "it-parent"], ["card", "--full", "it-parent"]):
+        code, out, err = invoke(monkeypatch, ["--json", "--db", db, *argv])
+        assert code == 0, err
+        rows = json.loads(out)["data"]["children"]
+        assert [sorted(row) for row in rows] == [["holder", "item_id", "status", "title"]]
+        assert rows == expected
+
+
+def test_full_card_refuses_a_child_whose_link_was_not_read(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    parent, child, state, link = _child_ledger(lg)
+    read = lg.events()
+    # The child row is current, but the events read lack its child-of link,
+    # as when an append lands between the two reads.
+    monkeypatched = [event for event in read if event.id != link.id]
+    lg.events = lambda *args, **kwargs: list(monkeypatched)
+    with pytest.raises(RuntimeError, match="child it-child of it-parent has no link_event_id"):
+        project_card(lg, "it-parent", full=True)
+    bounded = project_card(lg, "it-parent")
+    lg.close()
+    assert bounded.source_event_ids == (parent.id,)
+
+
+def test_full_card_refuses_a_child_whose_latest_read_link_names_another_anchor(
+    tmp_path: Path,
+) -> None:
+    lg = open_ledger(_db(tmp_path))
+    _create(lg, "it-parent", "ticket", "parent")
+    _create(lg, "it-other", "ticket", "other")
+    _create(lg, "it-child", "ticket", "child")
+    _append(lg, "item.linked", {"rel": "child-of", "target": "it-parent"}, "it-child", "l-1")
+    moved = _append(
+        lg, "item.linked",
+        {"rel": "child-of", "target": "it-other", "moved_from": "it-parent"},
+        "it-child", "l-2",
+    )
+    back = _append(
+        lg, "item.linked",
+        {"rel": "child-of", "target": "it-parent", "moved_from": "it-other"},
+        "it-child", "l-3",
+    )
+    read = [event for event in lg.events() if event.id != back.id]
+    # The events read end at the move away; the child row already shows the
+    # move back. The latest link read names another anchor, so it is not this
+    # child's link, and no earlier link to this item stands in for it.
+    lg.events = lambda *args, **kwargs: list(read)
+    with pytest.raises(RuntimeError, match="child it-child of it-parent has no link_event_id"):
+        project_card(lg, "it-parent", full=True)
+    lg.close()
+    assert moved.id < back.id

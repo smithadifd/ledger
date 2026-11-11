@@ -1469,6 +1469,70 @@ def _resume_sections(
     }
 
 
+def _children_with_sources(
+    rows: Iterable[Mapping[str, Any]], events: Iterable[Any], item_id: str
+) -> list[tuple[dict[str, Any], dict[str, int | None]]]:
+    """Each child row of ``item_id`` (see children_of) with the ids of the
+    events it was rendered from.
+
+    The sources are the child's creation event, its current state event
+    (None when it has none) and the child-of link that makes it a child of
+    ``item_id``: the child's latest child-of link, as v_items resolves
+    parent_id. That link is None when the events read do not hold it.
+    """
+    kids = sorted(
+        (row for row in rows if row.get("parent_id") == item_id),
+        key=lambda row: int(row["created_event_id"]),
+    )
+    ids = {row["item_id"] for row in kids}
+    before: dict[str, set[str]] = {i: set() for i in ids}
+    anchor_link: dict[str, Any] = {}
+    for event in events:
+        if event.kind != "item.linked":
+            continue
+        rel = event.payload.get("rel")
+        if rel == "child-of":
+            if event.item_id in ids:
+                held = anchor_link.get(event.item_id)
+                if held is None or event.id > held.id:
+                    anchor_link[event.item_id] = event
+            continue
+        if rel != "blocks":
+            continue
+        blocker, blocked = event.item_id, event.payload.get("target")
+        if blocker in ids and blocked in ids and blocker != blocked:
+            before[blocked].add(blocker)
+    ordered: list[tuple[dict[str, Any], dict[str, int | None]]] = []
+    placed: set[str] = set()
+    left = list(kids)
+    while left:
+        pick = next((row for row in left if before[row["item_id"]] <= placed), left[0])
+        left.remove(pick)
+        placed.add(pick["item_id"])
+        link = anchor_link.get(pick["item_id"])
+        state_id = pick.get("state_event_id")
+        ordered.append(
+            (
+                {
+                    "item_id": pick["item_id"],
+                    "title": pick["title"],
+                    "status": pick["status"],
+                    "holder": pick["owner"] if pick["owner"] is not None else pick["claim"],
+                },
+                {
+                    "created_event_id": int(pick["created_event_id"]),
+                    "state_event_id": None if state_id is None else int(state_id),
+                    "link_event_id": (
+                        link.id
+                        if link is not None and link.payload.get("target") == item_id
+                        else None
+                    ),
+                },
+            )
+        )
+    return ordered
+
+
 def children_of(
     rows: Iterable[Mapping[str, Any]], events: Iterable[Any], item_id: str
 ) -> list[dict[str, Any]]:
@@ -1478,34 +1542,29 @@ def children_of(
     order. A cycle among the blocks links falls back to creation order for
     what is left.
     """
-    kids = sorted(
-        (row for row in rows if row.get("parent_id") == item_id),
-        key=lambda row: int(row["created_event_id"]),
-    )
-    ids = {row["item_id"] for row in kids}
-    before: dict[str, set[str]] = {i: set() for i in ids}
-    for event in events:
-        if event.kind != "item.linked" or event.payload.get("rel") != "blocks":
-            continue
-        blocker, blocked = event.item_id, event.payload.get("target")
-        if blocker in ids and blocked in ids and blocker != blocked:
-            before[blocked].add(blocker)
-    ordered: list[dict[str, Any]] = []
-    placed: set[str] = set()
-    left = list(kids)
-    while left:
-        pick = next((row for row in left if before[row["item_id"]] <= placed), left[0])
-        left.remove(pick)
-        placed.add(pick["item_id"])
-        ordered.append(
-            {
-                "item_id": pick["item_id"],
-                "title": pick["title"],
-                "status": pick["status"],
-                "holder": pick["owner"] if pick["owner"] is not None else pick["claim"],
-            }
-        )
-    return ordered
+    return [row for row, _sources in _children_with_sources(rows, events, item_id)]
+
+
+def _child_source_ids(
+    item_id: str, children: Iterable[tuple[Mapping[str, Any], Mapping[str, int | None]]]
+) -> set[int]:
+    """The events behind the child rows: each child's creation, state (when it
+    has one) and child-of link event. A child whose creation or link event is
+    missing is refused, never left out of the full card's header."""
+    ids: set[int] = set()
+    for row, sources in children:
+        for key in ("created_event_id", "link_event_id"):
+            value = sources[key]
+            if value is None:
+                raise RuntimeError(
+                    f"card --full: child {row['item_id']} of {item_id} has no {key}"
+                    " in the events read; the ledger changed during projection, rerun"
+                )
+            ids.add(int(value))
+        state_id = sources["state_event_id"]
+        if state_id is not None:
+            ids.add(int(state_id))
+    return ids
 
 
 def project_item(
@@ -1600,7 +1659,8 @@ def project_item(
     # link {rel: "blocks", target: T} on item S blocks T.
     rows = lg.items()
     closed = {row["item_id"] for row in rows if row["status"] == "closed"}
-    children = children_of(rows, events, item_id)
+    child_sources = _children_with_sources(rows, events, item_id)
+    children = [row for row, _sources in child_sources]
     linked_only: set[str] = set()
     for event in events:
         if event.kind != "item.linked":
@@ -1669,8 +1729,14 @@ def project_item(
     )
     if full:
         # The full card names every event it was projected from, including
-        # each decision record's standing, result, source and superseding events.
-        ids = base | _content_ids(card) | _record_ref_ids(card)
+        # each decision record's standing, result, source and superseding events
+        # and each child row's creation, state and child-of link events.
+        ids = (
+            base
+            | _content_ids(card)
+            | _record_ref_ids(card)
+            | _child_source_ids(item_id, child_sources)
+        )
         return replace(card, source_event_ids=tuple(sorted(ids)))
     # The creation, state and current spec events are always named; past SOURCE_ID_LIMIT
     # the header keeps them, the newest open ask and the latest election,
