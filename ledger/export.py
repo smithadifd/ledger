@@ -383,8 +383,26 @@ _ATX_HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _TICKETS_SECTION = "Tickets"
 # Mirrors search.py ``_FENCE``: up to three spaces of indent, a run of three
 # or more backticks or tildes, then the rest of the line (an info string on
-# an opener; a closer must have nothing but whitespace there).
-_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+# an opener; a closer must have nothing but whitespace there). The indent is
+# literal spaces only, as in CommonMark and the importer: a tab or a
+# non-breaking space before the run means the line is not a fence.
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+
+
+def _newline_lines(text: str) -> list[str]:
+    """Split ``text`` into lines on the newline character alone, keeping each
+    line's end, so line N is the Nth line the importer counts.
+
+    ``str.splitlines`` also breaks on form feed, vertical tab, U+001C to
+    U+001E, U+0085, U+2028 and U+2029; one of those above a ticket would
+    put the importer's recorded line on another row. A final line without a
+    newline is the last line, as before."""
+    lines = text.split("\n")
+    tail = lines.pop()
+    out = [line + "\n" for line in lines]
+    if tail:
+        out.append(tail)
+    return out
 
 
 def _opens_fence(run: str, rest: str) -> bool:
@@ -522,9 +540,10 @@ def ticket_section(text: str, line: int) -> str:
     ``## Tickets`` section. It runs through the line before the next heading
     of level three or less. A line inside a ``` or ~~~ fence is never a
     heading, so it neither starts nor ends the section; an opening fence may
-    carry an info string.
+    carry an info string. Lines are numbered by newline alone, as the
+    importer numbers them (``_newline_lines``).
     """
-    lines = text.splitlines(keepends=True)
+    lines = _newline_lines(text)
     if line < 1:
         raise ValueError("ticket section not found")
     headings = _headings(lines)
@@ -649,7 +668,7 @@ def anchor_ticket_line(text: str, ticket_id: str) -> int | None:
     ``text`` whose id is ``ticket_id``, outside any code fence; None when there
     is none. More than one is a ValueError: the section is never guessed."""
     found: list[int] = []
-    for number, heading in enumerate(_headings(text.splitlines(keepends=True)), start=1):
+    for number, heading in enumerate(_headings(_newline_lines(text)), start=1):
         if heading is None or heading[0] != 3:
             continue
         _level, heading_text, in_tickets = heading
