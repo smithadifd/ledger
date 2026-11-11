@@ -540,11 +540,16 @@ def spec_content_hash(events: Iterable[Any], version: int | None) -> str | None:
 
 
 def item_spec_moved(lg: Ledger, item_id: str) -> str | None:
-    """The ``spec moved`` line for one item, or None (see ``spec_moved_line``)."""
-    item = lg.item(item_id)
-    if item is None:
-        return None
-    events = lg.events(item_id=item_id)
+    """The ``spec moved`` line for one item, or None (see ``spec_moved_line``).
+
+    The item row and its events are read in one snapshot (see _read_snapshot),
+    so the line never mixes the claim of one state with the spec of another.
+    """
+    with _read_snapshot(lg):
+        item = lg.item(item_id)
+        if item is None:
+            return None
+        events = lg.events(item_id=item_id)
     spec = latest_spec_event(events)
     current = None if spec is None else spec.payload.get("version")
     claimed = claim_spec_version(events, item)
@@ -1574,6 +1579,94 @@ def _child_source_ids(
     return ids
 
 
+def _blockers_with_sources(
+    item_id: str,
+    item_events: Iterable[Any],
+    events: Iterable[Any],
+    closed: set[str],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Each Blockers row of ``item_id`` with the ids of the events that name it.
+
+    A blocker is named by the item's own ``blocked_by`` (the latest item.state
+    that states the set, carried forward by a later "blocked" state that does
+    not restate it) or by a ``blocks`` link on the blocker that targets
+    ``item_id``: a link {rel: "blocks", target: T} on item S blocks T, the
+    direction v_ready reads (migrations/0001_initial.sql). The sources are
+    that state event (None when only links name the blocker) and every such
+    link event. Closed blockers are left out. Order: the ``blocked_by``
+    order, then the blockers only links name, in link order.
+    """
+    named: list[str] = []
+    named_by: int | None = None
+    for event in item_events:
+        if event.kind != "item.state":
+            continue
+        if "blocked_by" in event.payload:
+            seen: list[str] = []
+            for blocker in event.payload["blocked_by"]:
+                text = str(blocker)
+                if text not in seen:
+                    seen.append(text)
+            named = seen
+            named_by = event.id
+        elif event.payload["status"] != "blocked":
+            # A transition to a non-blocked status ends the block. Only a
+            # transition back to "blocked" without a restated set may carry
+            # the previous set forward.
+            named = []
+            named_by = None
+    order = list(named)
+    links: dict[str, list[int]] = {}
+    for event in events:
+        if event.kind != "item.linked":
+            continue
+        if event.payload.get("rel") != "blocks":
+            continue
+        if event.payload.get("target") != item_id:
+            continue
+        if event.item_id in closed:
+            continue
+        if event.item_id not in order:
+            order.append(event.item_id)
+        links.setdefault(event.item_id, []).append(event.id)
+    return [
+        (
+            blocker,
+            {
+                "state_event_id": named_by if blocker in named else None,
+                "link_event_ids": tuple(links.get(blocker, ())),
+            },
+        )
+        for blocker in order
+        if blocker not in closed
+    ]
+
+
+def _blocker_source_ids(
+    item_id: str, blockers: Iterable[tuple[str, Mapping[str, Any]]]
+) -> set[int]:
+    """The events behind the Blockers rows: the state event whose
+    ``blocked_by`` names the blocker and every ``blocks`` link event that
+    names it. A row with neither is refused, never left out of the full
+    card's header."""
+    ids: set[int] = set()
+    for blocker, sources in blockers:
+        state_id = sources["state_event_id"]
+        link_ids = sources["link_event_ids"]
+        if state_id is None and not link_ids:
+            # Internal invariant, not a reachable refusal:
+            # _blockers_with_sources only yields a blocker that a state
+            # event or a link event named.
+            raise RuntimeError(
+                f"card --full: blocker {blocker} of {item_id} has no source event"
+                " in its read snapshot"
+            )
+        if state_id is not None:
+            ids.add(int(state_id))
+        ids.update(int(value) for value in link_ids)
+    return ids
+
+
 @contextmanager
 def _read_snapshot(lg: Ledger) -> Iterator[None]:
     """Hold one SQLite read snapshot over every read made inside the block.
@@ -1595,13 +1688,14 @@ def _read_snapshot(lg: Ledger) -> Iterator[None]:
 
 def project_item(
     lg: Ledger,
-    item: Mapping[str, Any],
+    item_id: str,
     *,
     pointers: PointerSource | None = None,
     program: str = "ledger",
     full: bool = False,
 ) -> Card:
-    """Build an unbounded card from current views and the item's events.
+    """Build an unbounded card for ``item_id`` from current views and the
+    item's events; raise KeyError if missing.
 
     Ephemeral events recorded before the item's latest close have decayed
     and are left out. ``pointers`` is the conversation-pointer sidecar, when
@@ -1609,10 +1703,14 @@ def project_item(
     pointers capped and the header bounded to SOURCE_ID_LIMIT ids, unless
     ``full``: then nothing is clipped, capped or cut.
 
-    Every ledger read is made in one read snapshot, so no row or source id
-    on the card is newer than its revision_id.
+    The item's own row and every other ledger read are made in one read
+    snapshot, so no row or source id on the card is newer than its
+    revision_id.
     """
     with _read_snapshot(lg):
+        item = lg.item(item_id)
+        if item is None:
+            raise KeyError(item_id)
         return _project_item(lg, item, pointers=pointers, program=program, full=full)
 
 
@@ -1679,42 +1777,18 @@ def _project_item(
     notes = tuple(
         _note_row(event) for event in item_events if event.kind == "item.note"
     )
-    blocked_by: list[str] = []
-    for event in item_events:
-        if event.kind != "item.state":
-            continue
-        if "blocked_by" in event.payload:
-            seen: list[str] = []
-            for blocker in event.payload["blocked_by"]:
-                text = str(blocker)
-                if text not in seen:
-                    seen.append(text)
-            blocked_by = seen
-        elif event.payload["status"] != "blocked":
-            # A transition to a non-blocked status ends the block. Only a
-            # transition back to "blocked" without a restated set may carry
-            # the previous set forward.
-            blocked_by = []
-    # A "blocks" link lives on the blocker and names the item it blocks,
-    # the same direction v_ready reads (migrations/0001_initial.sql): a
-    # link {rel: "blocks", target: T} on item S blocks T.
     rows = lg.items()
     closed = {row["item_id"] for row in rows if row["status"] == "closed"}
     child_sources = _children_with_sources(rows, events, item_id)
     children = [row for row, _sources in child_sources]
-    linked_only: set[str] = set()
-    for event in events:
-        if event.kind != "item.linked":
-            continue
-        if event.payload.get("rel") != "blocks":
-            continue
-        if event.payload.get("target") != item_id:
-            continue
-        if event.item_id not in closed and event.item_id not in blocked_by:
-            blocked_by.append(event.item_id)
-            # Named only by the blocker's own link event, not by this item's.
-            linked_only.add(event.item_id)
-    blockers = tuple(b for b in blocked_by if b not in closed)
+    blocker_sources = _blockers_with_sources(item_id, item_events, events, closed)
+    blockers = tuple(blocker for blocker, _sources in blocker_sources)
+    # Named only by the blockers' own link events, not by this item's.
+    linked_only = {
+        blocker
+        for blocker, sources in blocker_sources
+        if sources["state_event_id"] is None
+    }
     owner = item["owner"]
     claim = item["claim"]
     next_step = derive_next_step(
@@ -1770,13 +1844,15 @@ def _project_item(
     )
     if full:
         # The full card names every event it was projected from, including
-        # each decision record's standing, result, source and superseding events
-        # and each child row's creation, state and child-of link events.
+        # each decision record's standing, result, source and superseding events,
+        # each child row's creation, state and child-of link events, and each
+        # Blockers row's blocked_by state event and blocks link events.
         ids = (
             base
             | _content_ids(card)
             | _record_ref_ids(card)
             | _child_source_ids(item_id, child_sources)
+            | _blocker_source_ids(item_id, blocker_sources)
         )
         return replace(card, source_event_ids=tuple(sorted(ids)))
     # The creation, state and current spec events are always named; past SOURCE_ID_LIMIT
