@@ -36,7 +36,14 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--blocks",
         metavar="ITEM",
-        help="only the items that block ITEM (items with a blocks link to ITEM)",
+        help="only the items that block ITEM (items with a blocks link to ITEM), "
+        "whatever their status",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="only the items that are not closed (open, claimed or blocked); with "
+        "--blocks, the blockers a card counts",
     )
     parser.add_argument(
         "--since",
@@ -102,6 +109,8 @@ def run(args, ctx: Context) -> Result:
             if args.type and item["type"] != args.type:
                 continue
             if args.status and item["status"] != args.status:
+                continue
+            if args.open and item["status"] == "closed":
                 continue
             if args.parent is not None and row.get("parent_id") != args.parent:
                 continue

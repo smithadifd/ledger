@@ -243,13 +243,16 @@ List decision records with their current standing.
 
 ## Reading verbs
 
-**`query [--item ID] [--type TYPE] [--status STATUS] [--parent ID] [--duplicate-of ID] [--blocks ID] [--since DATE] [--until DATE] [--limit N | --all]`**
+**`query [--item ID] [--type TYPE] [--status STATUS] [--open] [--parent ID] [--duplicate-of ID] [--blocks ID] [--since DATE] [--until DATE] [--limit N | --all]`**
 Current items, at most 50 unless `--limit` says otherwise; `--all` removes the cap
 (with `--limit` it is a usage error, and `limit` in the JSON is then `null`). `--parent ID`
 keeps the children of `ID` (items whose current `child-of` anchor is `ID`).
 `--duplicate-of ID` keeps the other items with a `duplicate-of` link to `ID`
 (the card's `duplicated-by` rows), and `--blocks ID` keeps the items with a
-`blocks` link to `ID`, whatever their status. `--since` and
+`blocks` link to `ID`, whatever their status. `--open` keeps the items that are
+not closed (`open`, `claimed` or `blocked`); with `--blocks ID` that is the set
+of blockers the card counts, since the card leaves closed blockers out.
+Without `--open` the output is unchanged. `--since` and
 `--until` keep the items whose newest event falls in the window, with the
 same date forms and the same refusals as `search`. Exit 1 when nothing
 matches. Each row in `items` carries the item's fields plus `revision`, `parent_id`
@@ -309,9 +312,36 @@ card cuts ends with `(+K cut; COMMAND)`, where
 `COMMAND` prints the rows it cut: `ledger export-item --json -- ITEM` for rows
 the item's own events hold, `ledger query --parent=ITEM --all` for children,
 `ledger query --duplicate-of=ITEM --all` for `duplicated-by` links and
-`ledger query --blocks=ITEM --all` for blockers named only by another item's
-`blocks` link. A section that cut both its own rows and other items' rows has
-one marker for each.
+`ledger query --blocks=ITEM --open --all` for blockers named only by another
+item's `blocks` link (`--open`, because the card leaves closed blockers out). A
+section that cut both its own rows and other items' rows has one marker for
+each. The next step names at most five blockers; its `(+K cut; COMMAND)` for
+the rest names the same commands by the same kinds, so blockers held only by
+other items' `blocks` links point at the `query --blocks` command, not at
+`export-item`.
+
+With `--json`, `truncated` lists the names of what the card cut and `cuts`
+carries one entry for each marker the text form prints, in the same order:
+`section`, `count` and `command` exactly as the text prints them, and `unit`
+(`rows` for `(+K cut; ...)`, `words` for `(+K words cut; ...)`). An ask field's
+entry also has `event_id`, the event holding its full text; the words cut
+from asks the card then capped away have one `ask` entry without it. Every
+name in `truncated` has at least one entry. A card that cut children and
+blockers:
+
+```json
+{
+  "truncated": ["children", "blockers"],
+  "cuts": [
+    {"section": "children", "count": 31, "unit": "rows",
+     "command": "ledger query --parent=it-anchor --all"},
+    {"section": "blockers", "count": 2, "unit": "rows",
+     "command": "ledger export-item --json -- it-anchor"},
+    {"section": "blockers", "count": 3, "unit": "rows",
+     "command": "ledger query --blocks=it-anchor --open --all"}
+  ]
+}
+```
 
 **`links ITEM`** Every link that names the item, in both directions. Outgoing
 rows are the item's own links (`link ITEM ...`); incoming rows are other items'

@@ -1091,6 +1091,16 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
     cli_cut = cli_row["omitted_words"]["ask"]
     assert len(cli_row["ask"].split()) + cli_cut == 600
     assert cli_cut >= cut
+    # The JSON names the ask marker's count, command and event, as printed.
+    assert data["cuts"] == [
+        {
+            "section": "ask",
+            "count": cli_cut,
+            "unit": "words",
+            "command": f"ledger --db {shlex.quote(db)} export-item --json -- dc-1",
+            "event_id": asked.id,
+        }
+    ]
     assert "a599" not in data["open_questions"][0]["ask"]
 
 
@@ -1194,6 +1204,21 @@ def test_ask_floor_then_question_cap_keeps_next_step(tmp_path: Path) -> None:
     assert card.next_step == "Answer open questions before continuing."
     for event in asked:
         assert event.id in card.source_event_ids
+    # Every ask word the card cut is counted in the JSON: the printed markers
+    # name their events; the words of asks capped away have one entry left.
+    omitted = dict(card.omitted)
+    cuts = [entry for entry in card.as_dict()["cuts"] if entry["section"] == "ask"]
+    assert sum(entry["count"] for entry in cuts) == omitted["ask"]
+    shown = {int(row["asked_event_id"]) for row in card.open_questions}
+    assert {entry["event_id"] for entry in cuts if "event_id" in entry} == shown
+    assert [entry for entry in cuts if "event_id" not in entry] == [
+        {
+            "section": "ask",
+            "count": omitted["ask"] - sum(e["count"] for e in cuts if "event_id" in e),
+            "unit": "words",
+            "command": "ledger export-item --json -- dc-1",
+        }
+    ]
     lg.close()
 
 
@@ -1954,7 +1979,7 @@ def test_cut_blockers_come_back_from_the_printed_commands(tmp_path: Path, monkey
     markers = _section_markers(text, "Blockers")
     assert markers == [
         (len(removed_named), f"{prefix} export-item --json -- it-x"),
-        (len(removed_linked), f"{prefix} query --blocks=it-x --all"),
+        (len(removed_linked), f"{prefix} query --blocks=it-x --open --all"),
     ]
     queried = _queried_ids(_run_printed(monkeypatch, markers[1][1], db))
     assert set(removed_linked) <= queried
@@ -1971,6 +1996,155 @@ def test_word_count_counts_the_new_query_prefixes_as_commands() -> None:
     for verb in ("query --duplicate-of=it-1 --all", "query --blocks=it-1 --all"):
         # The quoted path is one argument: three words for the prefix.
         assert word_count(f"(+3 cut; {prefix} {verb})", command_prefix=prefix) == 8
+    verb = "query --blocks=it-1 --open --all"
+    assert word_count(f"(+3 cut; {prefix} {verb})", command_prefix=prefix) == 9
+
+
+_HEADINGS = {
+    "Decisions": "decisions",
+    "Open questions": "open_questions",
+    "Links": "links",
+    "Blockers": "blockers",
+    "Notes": "notes",
+    "Decision records": "decision_records",
+    "Tried": "tried",
+    "Progress": "progress",
+    "Review rounds": "reviews",
+    "References": "refs",
+    "Conversation pointers": "pointers",
+}
+
+
+def _text_row_cuts(text: str) -> list[tuple[str, int, str]]:
+    """Every (section, count, command) row marker the text card prints."""
+    cuts = []
+    section = None
+    for line in text.splitlines():
+        if line.startswith("## "):
+            heading = line[3:]
+            section = "children" if heading.startswith("Children (") else _HEADINGS.get(heading)
+            continue
+        match = _MARKER.match(line)
+        if match and section is not None:
+            cuts.append((section, int(match.group(1)), match.group(2)))
+    return cuts
+
+
+def _card_json(monkeypatch, db: str, item_id: str) -> dict:
+    code, out, err = invoke(monkeypatch, ["--db", db, "--json", "card", "--", item_id])
+    assert code == 0, err
+    return json.loads(out)["data"]
+
+
+def test_json_cut_sections_carry_the_text_count_and_command(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _create(lg, "it-anchor", "ticket")
+    blockers = [f"blk-{index}" for index in range(7)]
+    for blocker in blockers:
+        _create(lg, blocker, "ticket")
+        _append(lg, "item.linked", {"rel": "blocks", "target": "it-anchor"}, blocker, f"b-{blocker}")
+    for index in range(40):
+        child = f"it-child-{index:02d}"
+        _create(lg, child, "ticket", " ".join([f"t{index}"] * 12))
+        _append(lg, "item.linked", {"rel": "child-of", "target": "it-anchor"}, child, f"l-{child}")
+    lg.close()
+    text = _printed_card(monkeypatch, db, "it-anchor")
+    data = _card_json(monkeypatch, db, "it-anchor")
+    assert "children" in data["truncated"]
+    prefix = f"ledger --db {shlex.quote(db)}"
+    # Every name the card cut has an entry, each with its count and command.
+    assert {entry["section"] for entry in data["cuts"]} == set(data["truncated"])
+    for entry in data["cuts"]:
+        assert isinstance(entry["count"], int) and entry["count"] > 0, entry
+        assert entry["command"].startswith(prefix + " "), entry
+    # The row markers are the text form's, word for word and in order.
+    rows = [entry for entry in data["cuts"] if entry["unit"] == "rows"]
+    assert [(e["section"], e["count"], e["command"]) for e in rows] == _text_row_cuts(text)
+    children = [entry for entry in rows if entry["section"] == "children"]
+    assert [(e["count"], e["command"]) for e in children] == [
+        (40 - len(data["children"]), f"{prefix} query --parent=it-anchor --all")
+    ]
+    # The next step names five blockers and the query that prints the rest,
+    # not export-item, which holds no blocks link of another item.
+    command = f"{prefix} query --blocks=it-anchor --open --all"
+    assert data["next_step"] == (
+        f"Clear blockers: {', '.join(blockers[:5])} (+2 cut; {command})."
+    )
+    assert "export-item" not in data["next_step"]
+    assert f"## Next step\n{data['next_step']}\n" in text
+    assert set(blockers[5:]) <= _queried_ids(_run_printed(monkeypatch, command, db))
+    assert word_count(text, command_prefix=prefix) <= WORD_LIMIT
+
+
+def test_next_step_names_each_kind_of_blocker_it_cut(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    _create(lg, "it-x", "ticket")
+    named = [f"own-{index}" for index in range(6)]
+    _append(lg, "item.state", {"status": "blocked", "blocked_by": named}, "it-x", "s-1")
+    for index in range(2):
+        _create(lg, f"blk-{index}", "ticket")
+        _append(lg, "item.linked", {"rel": "blocks", "target": "it-x"}, f"blk-{index}", f"b-{index}")
+    card = project_card(lg, "it-x")
+    lg.close()
+    # The state names own-0..own-5, the links add blk-0 and blk-1: the step
+    # names five, then the item's export for own-5 and the query for the
+    # linked two, in the order a capped Blockers section prints them.
+    assert card.next_step == (
+        "Clear blockers: own-0, own-1, own-2, own-3, own-4 "
+        "(+1 cut; ledger export-item --json -- it-x) "
+        "(+2 cut; ledger query --blocks=it-x --open --all)."
+    )
+    assert card.as_dict()["cuts"] == []
+
+
+def test_cut_blockers_query_returns_only_the_open_blockers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = str(_db(tmp_path))
+    lg = open_ledger(db)
+    _decision(lg, "dc-x")
+    pad = " ".join(["w"] * 60)
+    for index in range(8):
+        _append(
+            lg,
+            "decision.asked",
+            {
+                "question": f"q{index}?",
+                "ask": pad,
+                "options": [
+                    {"label": "A", "description": pad},
+                    {"label": "B", "description": pad},
+                ],
+                "recommendation": pad,
+                "default": "B",
+            },
+            "dc-x",
+            f"ask-{index}",
+        )
+    for blocker in ("blk-open-1", "blk-open-2", "blk-closed"):
+        _create(lg, blocker, "ticket")
+        _append(lg, "item.linked", {"rel": "blocks", "target": "dc-x"}, blocker, f"b-{blocker}")
+    _append(lg, "item.state", {"status": "closed"}, "blk-closed", "s-closed")
+    lg.close()
+    text = _printed_card(monkeypatch, db, "dc-x")
+    prefix = f"ledger --db {shlex.quote(db)}"
+    command = f"{prefix} query --blocks=dc-x --open --all"
+    assert _section_markers(text, "Blockers") == [(2, command)]
+    data = _card_json(monkeypatch, db, "dc-x")
+    assert [
+        (entry["count"], entry["command"]) for entry in data["cuts"]
+        if entry["section"] == "blockers"
+    ] == [(2, command)]
+    # The printed command returns exactly the two open blockers the card cut.
+    assert _queried_ids(_run_printed(monkeypatch, command, db)) == {"blk-open-1", "blk-open-2"}
+    # Without the flag, query --blocks still returns every linking item.
+    unfiltered = f"{prefix} query --blocks=dc-x --all"
+    assert _queried_ids(_run_printed(monkeypatch, unfiltered, db)) == {
+        "blk-open-1", "blk-open-2", "blk-closed"
+    }
 
 
 def _links_body(text: str) -> list[str]:

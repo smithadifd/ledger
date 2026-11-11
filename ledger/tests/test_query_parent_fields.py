@@ -101,6 +101,30 @@ def test_query_duplicate_of_and_blocks_keep_the_linking_items(tmp_path, monkeypa
     assert code == 1
 
 
+def test_query_blocks_open_keeps_only_the_open_blockers(tmp_path, monkeypatch):
+    db = str(tmp_path / "ledger.db")
+    for item_id in ("it-kept", "it-a", "it-b", "it-c", "it-other"):
+        _new(monkeypatch, db, item_id)
+    for item in ("it-a", "it-b", "it-c"):
+        code, _out, err = invoke(
+            monkeypatch, ["--db", db, "link", item, "--rel", "blocks", "--target=it-kept"]
+        )
+        assert code == 0, err
+    for item in ("it-c", "it-other"):
+        code, _out, err = invoke(monkeypatch, ["--db", db, "state", item, "--status", "closed"])
+        assert code == 0, err
+    code, _out, err = invoke(monkeypatch, ["--db", db, "state", "it-b", "--status", "claimed",
+                                           "--owner", "tester"])
+    assert code == 0, err
+
+    # Not closed: open and claimed blockers stay, the closed one goes.
+    assert _ids(monkeypatch, db, "--blocks=it-kept", "--open", "--all") == {"it-a", "it-b"}
+    # Without the flag the output is unchanged: every linking item.
+    assert _ids(monkeypatch, db, "--blocks=it-kept", "--all") == {"it-a", "it-b", "it-c"}
+    # --open is a filter like the others: alone it keeps every item not closed.
+    assert _ids(monkeypatch, db, "--open", "--all") == {"it-kept", "it-a", "it-b"}
+
+
 def test_query_text_output_is_unchanged(tmp_path, monkeypatch):
     db = str(tmp_path / "ledger.db")
     for item_id in ("it-anchor", "it-a"):
