@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.19 — 2026-11-11
+
+New read verbs (`links`, `contract`, `events --id`), an unbounded `card --full`, a cheaper search-index catch-up, and a `verify` that replays the child-of forest.
+
+- **`ledger links ITEM`** prints every link that names the item, in both directions: its own outgoing links and other items' links that target it. Each row says how the other end resolves: `item` (with its title), `unresolved` (printed, never dropped) or `external`. An unknown item is refused `not_found`.
+- **`ledger events --id N`** (repeatable) prints exactly those events in id order. A missing id is refused `not_found`, naming every missing id; combining `--id` with another filter is a usage error. The text form now escapes tabs and newlines in the kind, item and actor columns, so one event stays on one line.
+- **`ledger contract`** prints the agent contract from the installed package, and never opens the database. The page now ships inside the wheel, and `resume --brief` points to the verb.
+- **`ledger card --full`** prints the card unbounded: every row, word, finding, pointer and source id, with no cut marker. Its `source_event_ids` also name each decision record's standing, result and superseding events and the creation, state and `child-of` link events behind each child row (a blocker named only by another item's `blocks` link is not yet named), and the whole card is read from one database snapshot. The bounded card shows the newest 8 links with a count of the rest.
+- **Every cut card section names a command that prints its rows.** `query` gains `--duplicate-of ID` and `--blocks ID` for inbound duplicate rows and for blockers named only by another item's link.
+- **`ledger --json resume`** always carries `open_without_stop`, so a ledger whose open items have no stop no longer reads as empty.
+- **`ledger verify`** replays every event into an empty in-memory copy of the schema and checks each `child-of` link with the write path's own guard. The first refusal fails with exit 4 and the guard's code (`second_anchor`, `self_link`, `anchor_missing`, `cycle`); an event the guard cannot evaluate is reported `unevaluable`, never skipped.
+- **Search index:** a `behind` index catches up from the new events without re-reading markdown (the new `refresh` field says `append` or `rebuild`). `index_status` and doctor carry a `severity` (`ok`, `info`, `warn`). With no `search_roots`, `ledger index` says only the ledger is indexed and names the setting to add. A ref `some/dir/` is stored as `some/dir`. A non-regular file (such as a FIFO) at the index path is refused instead of blocking the search.
+- **`export-item --ticket`** finds tagged (`### Ticket: [tag] ID — title`) and bare (`### ID — title` inside `## Tickets`) ticket headings, as the roadmap importer does.
+- **The SQLite-not-found refusal's remedy is narrowed:** it no longer suggests a python.org build (CPython's macOS installer links SQLite statically), and the message no longer doubles its full stop before the path. A test now fails when the newest dated CHANGELOG heading does not name the `pyproject.toml` version.
+- **`KNOWN-LIMITS.md`** is new: it lists the known limits of this alpha under the same threat model as the harness's own list (a FIFO planted beside the search index hangs `ledger search`; control characters in an item id break the printed resume and card-footer commands; rows stored before 0.1.15, or restored from older exports, print an extra separator in `ledger questions`).
+
+Upgrade with `@v0.1.19`.
+
 ## 0.1.18 — 2026-11-10
 
 The SQLite-not-found refusal now names its usual cause and the remedy.
