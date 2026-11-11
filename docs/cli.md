@@ -265,9 +265,23 @@ recorded time with the same date forms and the same refusals as `query`.
 Exit 1 when nothing matches. `--json` carries
 `{events, limit, truncated}`; each event is
 `{id, kind, item_id, actor, harness, model, session, recorded_at, payload}`.
+The text form is one event per line: recorded time, kind, item, actor and a
+payload summary, tab-separated. An empty column prints `-`, and a tab, newline
+or other non-printable character in a column prints escaped (`\t`, `\n`), so
+an event never spans two lines.
+
+**`events --id N [--id N ...]`** Exactly the events with those ids, in id
+order (oldest first), each once however often it is named. `N` is a positive
+integer; anything else is a usage error (exit 2). `--id` reads by id alone: with
+`--since`, `--until`, `--kind`, `--item`, `--actor` or `--limit` it is a usage
+error naming the flag. An id no event has is refused (`not_found`, exit 1,
+`event not found: <ids>`, naming every missing id) and nothing is printed.
+`--json` carries the same `{events, limit, truncated}` with `limit` `null` and
+`truncated` `false`.
 
 ```sh
 ledger events --kind item.note --limit 20
+ledger events --id 42 --id 17
 ```
 
 **`questions [--item ID] [--type TYPE] [--since DATE] [--until DATE] [--limit N]`**
@@ -299,6 +313,28 @@ the item's own events hold, `ledger query --parent=ITEM --all` for children,
 `blocks` link. A section that cut both its own rows and other items' rows has
 one marker for each.
 
+**`links ITEM`** Every link that names the item, in both directions. Outgoing
+rows are the item's own links (`link ITEM ...`); incoming rows are other items'
+links whose target is `ITEM`, of any relation. Each list is in event order,
+oldest first; a link an item holds to itself is in both. Each row names the
+other end (an outgoing link's target, an incoming link's holder) and how it
+resolves: `item` (an item; its title is shown), `unresolved` (it should be an
+item, as for the `item`, `blocks`, `duplicate-of` and `child-of` relations and
+every incoming holder, but no item has that id) or `external` (a `pr`,
+`branch`, `session` or `url` target that is not an item id). An unresolved row
+is printed, never dropped. The text form is one row per line:
+`out|in`, relation, other end, resolution, title (`-` when none) and
+`event=<id>`, tab-separated, outgoing rows first; a tab or newline in a column
+prints escaped. `--json` carries `{item_id, title, outgoing, incoming}`; an
+outgoing row is `{event_id, rel, target, resolution, title}` and an incoming
+row `{event_id, rel, source, resolution, title}`, with `title` `null` unless
+the end resolves. An unknown item exits 1 (`not_found`, `item not found: ID`),
+as `card` does; an item no link names exits 1 with `empty`. It only reads.
+
+```sh
+ledger links it-1a2b3c4d5e6f
+```
+
 **`context ITEM [--budget N]`** A read-only orientation pack for an item or
 an initiative (an item of type `initiative`; its members link to it with
 `link --rel item`). The header names the item, its revision as the card names
@@ -329,16 +365,35 @@ ephemeral events recorded before its latest close, then one completeness
 line: `completeness: N events returned, M events on the item, K decayed`
 (with `--json`, a `completeness` object in `data` with `events_returned`,
 `events_on_item` and `events_decayed`). `--ticket` instead prints
-the `### Ticket:` section its source locator points at, read with `git show`
-from the current repository. An item whose source is a row key `row:<ID>`
+the ticket section its source locator points at, read with `git show`
+from the current repository: a ticket heading through the line before the next
+heading of level three or less. A ticket heading is a level-3 heading outside
+any code fence, in one of two forms:
+
+- `### Ticket: ID — title`, where one lead word may come before the id (a
+  `[tag]` or a lowercase slug, as in `### Ticket: [tag] ID — title`);
+- a bare `### ID — title` inside a `## Tickets` section (the nearest heading of
+  level two or less above it is exactly `## Tickets`); a bare id needs a digit
+  and takes no lead word.
+
+The title is optional and follows `: ` or a spaced em dash, en dash or hyphen.
+An id is uppercase-led segments joined by single hyphens, each of which may end
+in one lowercase letter (`SL12`, `SL12a`, `CSF3-9-H1`); an `RM-` id is never a
+ticket id. A `path:line@commit` locator shows the section of the nearest
+heading of level three or less at or above that line, and refuses
+(`not_found`) when that heading is not a ticket heading; a `### Ticket:`
+heading whose tail is not that shape still counts there, with no id.
+An item whose source is a row key `row:<ID>`
 is read at the locator of its newest valid `also at <locator>` note (the text
 is exactly `also at ` and a locator, either `path:line@commit` or `path#ID`;
 a note of any other shape is skipped). A `path#ID` locator names no line or
-commit: the section is the one headed `### Ticket: ID` in `path` at the
-current `HEAD` of the repository. With no such note the command refuses with
-`row_source_no_also_at`; a `path#ID` whose heading is absent (a bare `### ID`
-heading and a table row do not count) refuses with `row_source_anchor_not_found`,
-and one repeated, `row_source_anchor_ambiguous` (exit 1), reading nothing.
+commit: the section is the one whose ticket heading, of either form, carries
+the id `ID` in `path` at the current `HEAD` of the repository. With no such
+note the command refuses with `row_source_no_also_at`; a `path#ID` whose
+heading is absent (a bare heading outside `## Tickets`, a fenced heading and a
+table row do not count) refuses with `row_source_anchor_not_found`, and one
+repeated (two ticket headings of either form with that id),
+`row_source_anchor_ambiguous` (exit 1), reading nothing.
 
 **`search WORD... [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
 Full-text search, ranked by BM25; the words may be quoted or separate.

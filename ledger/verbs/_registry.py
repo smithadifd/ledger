@@ -32,6 +32,7 @@ from ledger.verbs import grants
 from ledger.verbs import guidance
 from ledger.verbs import index
 from ledger.verbs import link
+from ledger.verbs import links
 from ledger.verbs import lint_quotes
 from ledger.verbs import new
 from ledger.verbs import note
@@ -68,6 +69,7 @@ MODULES = (
     guidance,
     index,
     link,
+    links,
     lint_quotes,
     new,
     note,
