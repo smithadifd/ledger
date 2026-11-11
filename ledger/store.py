@@ -37,6 +37,7 @@ from .paths import SharedDatabaseError, SyncPathError, SyncPathWarning, resolve_
 from .schema import (
     CAPTURE_CHANNEL_PREFIX,
     CAPTURE_CHANNELS,
+    DOC_KIND,
     ENTITY_REGISTERED_KIND,
     ENTITY_STATE_KIND,
     PICKER_CHANNEL,
@@ -55,10 +56,11 @@ _MIGRATION_NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _RECORDED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 RESERVED_KIND_PREFIX = "loop."
 # Kinds one writer owns: claim_system writes the system claim, set_spec
-# (verbs/spec.py) writes item.spec, and register_entity and set_entity_state
-# (verbs/entity.py) write the entity kinds. Generic appends refuse them.
+# (verbs/spec.py) writes item.spec, attach_document (verbs/doc.py) writes
+# doc.attached, and register_entity and set_entity_state (verbs/entity.py)
+# write the entity kinds. Generic appends refuse them.
 ENTITY_KINDS = (ENTITY_REGISTERED_KIND, ENTITY_STATE_KIND)
-RESERVED_KINDS = (SYSTEM_CLAIM_KIND, SPEC_KIND, *ENTITY_KINDS)
+RESERVED_KINDS = (SYSTEM_CLAIM_KIND, SPEC_KIND, DOC_KIND, *ENTITY_KINDS)
 RESERVED_NOTE_PREFIXES = ("work:", "loop:")
 
 # Non-Cf members of Unicode's Default_Ignorable_Code_Point property. Cf
@@ -749,6 +751,18 @@ class Ledger:
             raise ValidationError("spec-writer-capability-required")
         # The spec writer owns item.spec only.
         if kwargs.get("kind") != SPEC_KIND:
+            raise ValidationError(f"reserved-kind:{kwargs.get('kind')}")
+        return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
+
+    def _append_doc_event(self, capability: object, **kwargs: Any) -> Event:
+        """Append a ``doc.attached`` event only for the document writer
+        (``attach_document``), which computed its sha256 from the bytes."""
+        from .verbs.doc import _DOC_WRITER_CAPABILITY
+
+        if capability is not _DOC_WRITER_CAPABILITY:
+            raise ValidationError("doc-writer-capability-required")
+        # The document writer owns doc.attached only.
+        if kwargs.get("kind") != DOC_KIND:
             raise ValidationError(f"reserved-kind:{kwargs.get('kind')}")
         return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
 

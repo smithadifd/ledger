@@ -42,6 +42,12 @@ SPEC_MERGE_CLASSES = ("MC-0", "MC-1", "MC-2", "MC-3", "MC-4")
 # its content_hash (verbs/spec.py). version, source, source_rev and the hash
 # itself are not content.
 SPEC_CONTENT_FIELDS = ("title", "body_md", "acceptance", "size", "merge_class")
+# A document attached to an item (verbs/doc.py): content-addressed, its
+# bytes inline when they fit under DOC_INLINE_LIMIT, or named by path.
+DOC_KIND = "doc.attached"
+DOC_ROLES = ("review-receipt", "brief", "packet", "retro", "other")
+DOC_INLINE_LIMIT = 65536
+DOC_DEFAULT_MIME = "application/octet-stream"
 # Channels only `ledger capture` (verbs/capture.py) writes: the harness's
 # record of a submitted prompt and of a question-picker answer. The store
 # refuses every other writer on any channel that starts with the prefix.
@@ -55,6 +61,17 @@ _SOURCE = {"type": "string", "min_len": 1}
 _REF = {"type": "string", "min_len": 1, "max_len": 300, "single_line": True}
 _TEXT = {"type": "string", "min_len": 1}
 _SHA256_HEX = {"type": "string", "pattern": r"[0-9a-f]{64}"}
+# A document's displayed text: one line, no control character (the same
+# definition as an ask's, control_character), checked wherever the payload
+# is validated, so a restored document holds none either.
+_DOC_TITLE = {"type": "string", "min_len": 1, "max_len": 300, "single_line": True,
+              "no_control": True}
+_DOC_PATH = {"type": "string", "min_len": 1, "max_len": 4096, "no_control": True}
+_DOC_MIME = {
+    "type": "string",
+    "max_len": 127,
+    "pattern": r"[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*/[A-Za-z0-9][A-Za-z0-9!#$&^_.+-]*",
+}
 # What the harness displayed in one AskUserQuestion call and what came
 # back (verbs/capture.py builds it; ledger.answers reads it). display,
 # answers and annotation are the harness's own data, kept verbatim.
@@ -243,6 +260,27 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
             "source_rev": {"type": "string", "min_len": 1, "max_len": 300,
                            "single_line": True},
         },
+    },
+    # A document attached to an item. sha256 and size are computed by the
+    # ledger from the bytes it read: ``ledger doc add`` is the only live
+    # writer (the store reserves the kind), and restore and replay recompute
+    # an inline document's digest before inserting it (restore.py). Exactly
+    # one of content_b64 (the bytes, base64, at most DOC_INLINE_LIMIT) and
+    # path (absolute, or relative to the ledger home, stored as given).
+    (DOC_KIND, 1): {
+        "item_id": "required",
+        "required": {
+            "role": {"enum": DOC_ROLES},
+            "sha256": _SHA256_HEX,
+            "size": {"type": "integer", "min": 0},
+            "mime": _DOC_MIME,
+        },
+        "optional": {
+            "title": _DOC_TITLE,
+            "content_b64": {"type": "string"},
+            "path": _DOC_PATH,
+        },
+        "exactly_one": (("content_b64", "path"),),
     },
     ("decision.asked", 1): {
         "item_id": "required",
@@ -577,6 +615,7 @@ DURABILITY: dict[str, str] = {
     "item.linked": DURABLE,
     "item.note": DURABLE,
     SPEC_KIND: DURABLE,
+    DOC_KIND: DURABLE,
     ENTITY_REGISTERED_KIND: DURABLE,
     ENTITY_STATE_KIND: DURABLE,
     "item.tried": DURABLE,
@@ -758,6 +797,8 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
             _fail(f"too-long:{path}")
         if spec.get("single_line") and ("\n" in value or "\r" in value):
             _fail(f"not-single-line:{path}")
+        if spec.get("no_control") and control_character(value) is not None:
+            _fail(f"{ASK_CONTROL_CHARACTER}:{path}")
         pattern = spec.get("pattern")
         if pattern is not None and re.fullmatch(pattern, value) is None:
             _fail(f"bad-type:{path}")
@@ -873,6 +914,10 @@ def validate_payload(kind: str, payload: Any, payload_version: int = 1) -> dict[
         present = [key for key in group if key in payload]
         if present and len(present) != len(group):
             _fail(f"incomplete-group:{','.join(group)}")
+    # Keys of which exactly one must appear.
+    for group in schema.get("exactly_one", ()):
+        if sum(1 for key in group if key in payload) != 1:
+            _fail(f"exactly-one-of:{','.join(group)}")
     return payload
 
 
