@@ -14,6 +14,7 @@ New read verbs (`links`, `contract`, `events --id`), an unbounded `card --full`,
 - **Search index:** a `behind` index catches up from the new events without re-reading markdown (the new `refresh` field says `append` or `rebuild`). `index_status` and doctor carry a `severity` (`ok`, `info`, `warn`). With no `search_roots`, `ledger index` says only the ledger is indexed and names the setting to add. A ref `some/dir/` is stored as `some/dir`. A non-regular file (such as a FIFO) at the index path is refused instead of blocking the search.
 - **`export-item --ticket`** finds tagged (`### Ticket: [tag] ID — title`) and bare (`### ID — title` inside `## Tickets`) ticket headings, as the roadmap importer does.
 - **The SQLite-not-found refusal's remedy is narrowed:** it no longer suggests a python.org build (CPython's macOS installer links SQLite statically), and the message no longer doubles its full stop before the path. A test now fails when the newest dated CHANGELOG heading does not name the `pyproject.toml` version.
+- **`KNOWN-LIMITS.md`** is new: it lists the known limits of this alpha under the same threat model as the harness's own list (a FIFO planted beside the search index hangs `ledger search`; control characters in an item id break the printed resume and card-footer commands; rows stored before 0.1.15, or restored from older exports, print an extra separator in `ledger questions`).
 
 Upgrade with `@v0.1.19`.
 
