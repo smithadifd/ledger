@@ -6,6 +6,8 @@ import json
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
+import pytest
+
 from ledger.cli import main
 from ledger.search import MAX_LIMIT
 from ledger.store import open_ledger
@@ -384,3 +386,88 @@ def test_text_cells_keep_an_actor_with_a_tab_or_newline_on_one_line(
     code, body, err = run_json(monkeypatch, db, "events", "--id", "1")
     assert code == EXIT_OK, err
     assert body["data"]["events"][0]["actor"] == "ali\tce\nbob\r"
+
+
+# --- line boundaries ----------------------------------------------------------
+
+# Every character str.splitlines splits on, besides newline and carriage return.
+BOUNDARIES = ("\u2028", "\u2029", "\x85", "\x0c", "\x0b", "\x1c", "\x1d", "\x1e")
+
+
+def boundary_ledger(db: Path, ch: str) -> Path:
+    """Two events: one whose payload holds ``ch``, one whose actor holds it."""
+    with open_ledger(db) as lg:
+        lg.append(
+            kind="item.note",
+            item_id="it-1",
+            idempotency_key="k-payload",
+            harness="pytest",
+            actor="alice",
+            recorded_at="2026-01-10T09:00:00.000Z",
+            payload={"text": f"one{ch}two"},
+        )
+        lg.append(
+            kind="item.note",
+            item_id="it-1",
+            idempotency_key="k-actor",
+            harness="pytest",
+            actor=f"ali{ch}ce",
+            recorded_at="2026-01-10T10:00:00.000Z",
+            payload={"text": "plain"},
+        )
+    return db
+
+
+def payload_escape(ch: str) -> str:
+    """How the payload column names ``ch``: JSON's own escape where JSON
+    escapes it (the C0 controls), else the ``repr`` escape."""
+    json_form = json.dumps(ch, ensure_ascii=False)[1:-1]
+    return repr(ch)[1:-1] if json_form == ch else json_form
+
+
+def test_line_boundaries_are_every_splitlines_boundary():
+    from ledger.verbs.events import LINE_BOUNDARIES
+
+    splits = {
+        chr(code)
+        for code in range(0x110000)
+        if len(f"a{chr(code)}b".splitlines()) > 1
+    }
+    assert LINE_BOUNDARIES == splits
+    assert splits == set(BOUNDARIES) | {"\n", "\r"}
+
+
+@pytest.mark.parametrize("ch", BOUNDARIES, ids=ascii)
+def test_every_line_boundary_keeps_one_line_per_event(tmp_path, monkeypatch, ch):
+    db = boundary_ledger(tmp_path / "ledger.db", ch)
+    for argv in (["events"], ["events", "--id", "1", "--id", "2"]):
+        code, out, err = invoke(monkeypatch, ["--db", str(db), *argv])
+        assert code == EXIT_OK, err
+        lines = out.splitlines()
+        assert len(lines) == 2, (argv, ascii(out))
+        assert ch not in out, argv
+        by_text = {line.split("\t")[4]: line.split("\t") for line in lines}
+        payload_line = by_text[f'{{"text":"one{payload_escape(ch)}two"}}']
+        assert payload_line[3] == "alice"
+        actor_line = by_text['{"text":"plain"}']
+        assert actor_line[3] == f"ali{repr(ch)[1:-1]}ce"
+
+
+@pytest.mark.parametrize("ch", BOUNDARIES, ids=ascii)
+def test_json_form_keeps_every_line_boundary_raw(tmp_path, monkeypatch, ch):
+    db = boundary_ledger(tmp_path / "ledger.db", ch)
+    code, body, err = run_json(monkeypatch, db, "events", "--id", "1", "--id", "2")
+    assert code == EXIT_OK, err
+    events = body["data"]["events"]
+    assert events[0]["payload"] == {"text": f"one{ch}two"}
+    assert events[1]["actor"] == f"ali{ch}ce"
+
+
+def test_ordinary_non_ascii_text_prints_unescaped(tmp_path, monkeypatch):
+    db = boundary_ledger(tmp_path / "ledger.db", "\u00e9\U0001f600")
+    code, out, err = invoke(monkeypatch, ["--db", str(db), "events"])
+    assert code == EXIT_OK, err
+    lines = out.splitlines()
+    assert len(lines) == 2
+    assert lines[0].split("\t")[3] == "ali\u00e9\U0001f600ce"
+    assert lines[1].split("\t")[4] == '{"text":"one\u00e9\U0001f600two"}'
