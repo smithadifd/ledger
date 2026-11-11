@@ -326,3 +326,11 @@ def test_newest_changelog_heading_names_the_package_version() -> None:
         f"newest CHANGELOG heading names {newest.group(1)!r}, "
         f"but pyproject.toml's version is {version!r}"
     )
+
+
+def test_concepts_documents_note_search_and_severity() -> None:
+    text = (ROOT / "docs" / "concepts.md").read_text(encoding="utf-8")
+    section = text.split("## The search index", 1)[1].split("\n## ", 1)[0]
+    assert "A note is searched as part of its item, not as its own document" in _squash(section)
+    for severity in ("`ok`", "`info`", "`warn`"):
+        assert f"| {severity} |" in section

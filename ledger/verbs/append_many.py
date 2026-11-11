@@ -21,7 +21,7 @@ import json
 import sys
 from typing import Any
 
-from ledger.schema import ValidationError, schema_for
+from ledger.schema import ValidationError, schema_for, strip_directory_ref_slash
 from ledger.verbs import (
     Context,
     Result,
@@ -155,7 +155,9 @@ def run(args, ctx: Context) -> Result:
                 events.append(
                     lg.append(
                         kind=spec["kind"],
-                        payload=spec["payload"],
+                        payload=strip_directory_ref_slash(
+                            spec["kind"], spec["payload"], spec["payload_version"]
+                        ),
                         item_id=args.item,
                         idempotency_key=key,
                         payload_version=spec["payload_version"],
