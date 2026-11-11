@@ -14,6 +14,7 @@ import pytest
 
 from ledger.card import (
     Card,
+    _blocker_source_ids,
     _bound_ids,
     _key_step_ids,
     DROP_ORDER,
@@ -21,6 +22,7 @@ from ledger.card import (
     WORD_LIMIT,
     footer_line,
     format_card,
+    item_spec_moved,
     project_card,
     project_item,
     word_count,
@@ -29,6 +31,7 @@ from ledger.cli import main
 from ledger.schema import ITEM_TYPES
 from ledger.store import open_ledger
 from ledger.verbs import EXIT_NOT_FOUND, EXIT_REFUSED, discover_verbs
+from ledger.verbs.spec import set_spec
 
 PAD = " ".join(["alpha"] * 40)
 
@@ -1549,8 +1552,7 @@ def test_capping_never_changes_the_next_step(tmp_path: Path) -> None:
         "dc-1",
         "s-1",
     )
-    item = next(row for row in lg.items() if row["item_id"] == "dc-1")
-    full = project_item(lg, item)
+    full = project_item(lg, "dc-1")
     card = project_card(lg, "dc-1")
     text = format_card(card)
     assert word_count(text) <= WORD_LIMIT
@@ -1680,8 +1682,7 @@ def test_blocker_flood_step_keeps_count_and_question(tmp_path: Path) -> None:
     _append(
         lg, "item.state", {"status": "blocked", "blocked_by": blockers}, "dc-1", "s-1"
     )
-    item = next(row for row in lg.items() if row["item_id"] == "dc-1")
-    full = project_item(lg, item)
+    full = project_item(lg, "dc-1")
     card = project_card(lg, "dc-1")
     text = format_card(card)
     assert word_count(text) <= WORD_LIMIT
@@ -1825,8 +1826,7 @@ def test_fuzzed_cards_fit_and_keep_the_step(tmp_path: Path, seed: int) -> None:
                 state["owner"] = _words("o", rng.choice([1, 3, 40, 600]))
                 state["claim"] = _words("k", rng.choice([1, 3, 40, 600]))
             _append(lg, "item.state", state, "it", "s")
-        item = next(row for row in lg.items() if row["item_id"] == "it")
-        full = project_item(lg, item)
+        full = project_item(lg, "it")
         card = project_card(lg, "it")
         text = format_card(card)
         where = f"seed={seed} case={case}"
@@ -1897,8 +1897,7 @@ def test_cut_duplicated_by_links_come_back_from_the_printed_query(
         _append(
             lg, "item.linked", {"rel": "pr", "target": f"org/repo#{index}"}, "it-kept", f"pr-{index}"
         )
-    item = next(row for row in lg.items() if row["item_id"] == "it-kept")
-    full = project_item(lg, item)
+    full = project_item(lg, "it-kept")
     lg.close()
     text = _printed_card(monkeypatch, db, "it-kept")
     shown = {line for line in text.splitlines() if line.startswith("- ")}
@@ -1941,8 +1940,7 @@ def test_cut_blockers_come_back_from_the_printed_commands(tmp_path: Path, monkey
     # A blocks link to another item is not one of this card's rows.
     _create(lg, "it-y", "ticket")
     _append(lg, "item.linked", {"rel": "blocks", "target": "it-y"}, "blk-000", "b-y")
-    item = next(row for row in lg.items() if row["item_id"] == "it-x")
-    full = project_item(lg, item)
+    full = project_item(lg, "it-x")
     lg.close()
     text = _printed_card(monkeypatch, db, "it-x")
     body = text.split("\n## Blockers\n", 1)[1].split("\n\n", 1)[0]
@@ -2071,8 +2069,7 @@ def test_full_card_shows_every_row_and_no_cut_marker(tmp_path: Path, monkeypatch
     refs = [f"plans/plan-{n}.md" for n in range(3)]
     _append(lg, "item.stopped", {"point": point, "phase": "build", "refs": refs}, "it-f",
             "st-1")
-    item = next(row for row in lg.items() if row["item_id"] == "it-f")
-    full = project_item(lg, item, full=True)
+    full = project_item(lg, "it-f", full=True)
     bounded = project_card(lg, "it-f")
     lg.close()
 
@@ -2191,9 +2188,8 @@ def test_full_card_keeps_every_pointer_unclipped(tmp_path: Path) -> None:
     lg = open_ledger(_db(tmp_path))
     _create(lg, "it-p", "ticket")
     pointers = [{"ref": f"{_words('q', 20)}-{n}", "note": _words("m", 30)} for n in range(15)]
-    item = next(row for row in lg.items() if row["item_id"] == "it-p")
-    full = project_item(lg, item, pointers=lambda _item: pointers, full=True)
-    capped = project_item(lg, item, pointers=lambda _item: pointers)
+    full = project_item(lg, "it-p", pointers=lambda _item: pointers, full=True)
+    capped = project_item(lg, "it-p", pointers=lambda _item: pointers)
     lg.close()
     assert [row["ref"] for row in full.pointers] == [row["ref"] for row in pointers]
     assert [row["note"] for row in full.pointers] == [row["note"] for row in pointers]
@@ -2276,8 +2272,7 @@ def test_bounded_card_source_ids_unchanged_by_child_rows(tmp_path: Path) -> None
     lg = open_ledger(_db(tmp_path))
     parent, child, state, link = _child_ledger(lg)
     card = project_card(lg, "it-parent")
-    item = next(row for row in lg.items() if row["item_id"] == "it-parent")
-    unbounded = project_item(lg, item)
+    unbounded = project_item(lg, "it-parent")
     lg.close()
     assert [row["item_id"] for row in card.children] == ["it-child"]
     assert card.source_event_ids == (parent.id,)
@@ -2394,8 +2389,7 @@ def test_card_projection_keeps_a_callers_transaction(tmp_path: Path) -> None:
     assert conn.in_transaction
     bounded = project_card(lg, "it-parent")
     assert conn.in_transaction
-    item = next(row for row in lg.items() if row["item_id"] == "it-parent")
-    project_item(lg, item, full=True)
+    project_item(lg, "it-parent", full=True)
     assert conn.in_transaction
     conn.execute("ROLLBACK")
     lg.close()
@@ -2416,8 +2410,151 @@ def test_card_projection_ends_its_snapshot_on_an_exception(tmp_path: Path) -> No
     with pytest.raises(OSError, match="events read failed"):
         project_card(lg, "it-parent", full=True)
     assert not conn.in_transaction
-    item = next(row for row in lg.items() if row["item_id"] == "it-parent")
     with pytest.raises(OSError, match="events read failed"):
-        project_item(lg, item)
+        project_item(lg, "it-parent")
     assert not conn.in_transaction
     lg.close()
+
+
+def _append_after_item_read(lg, db, append):
+    """Make ``append`` land through a second connection right after the
+    caller's first ``item`` read, before any later read.
+
+    The injection is the test-local ledger's own ``item`` method; the writer
+    is another connection to the same file, as a concurrent process would be.
+    """
+    writer = open_ledger(db)
+    read = lg.item
+    landed = []
+
+    def item(*args, **kwargs):
+        row = read(*args, **kwargs)
+        if not landed:
+            landed.extend(append(writer))
+        return row
+
+    lg.item = item
+    return writer, landed
+
+
+def test_item_spec_moved_reads_one_snapshot(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    lg = open_ledger(db)
+    _create(lg, "it-s", "ticket", "spec")
+    set_spec(lg, "it-s", {"title": "T", "body_md": "one"}, harness="pytest")
+    _append(
+        lg,
+        "item.state",
+        {"status": "claimed", "owner": "tester", "spec_version": 1},
+        "it-s",
+        "s-claim",
+    )
+    # Before the writes: claimed against v1, and v1 is current.
+    assert item_spec_moved(lg, "it-s") is None
+
+    def release_then_move(w):
+        release = _append(w, "item.state", {"status": "open"}, "it-s", "s-release")
+        spec, created = set_spec(w, "it-s", {"title": "T", "body_md": "two"}, harness="pytest")
+        assert created
+        return [release, spec]
+
+    writer, landed = _append_after_item_read(lg, db, release_then_move)
+    moved = item_spec_moved(lg, "it-s")
+    assert len(landed) == 2
+    # Every state the store passed through says no line: claimed on v1 with
+    # v1 current, then released, then released with v2 current. The claimed
+    # row read before the writes with the v2 spec read after them would say
+    # "spec moved: v1 → v2", which matches none of them.
+    assert moved is None
+    del lg.item
+    assert item_spec_moved(lg, "it-s") is None
+    assert lg.item("it-s")["status"] == "open"
+    writer.close()
+    lg.close()
+
+
+def test_project_item_reads_its_row_in_the_snapshot(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    lg = open_ledger(db)
+    created = _create(lg, "it-r", "ticket", "row")
+    writer, landed = _append_after_item_read(
+        lg,
+        db,
+        lambda w: [
+            _append(w, "item.state", {"status": "claimed", "owner": "tester"}, "it-r", "s-race")
+        ],
+    )
+    card = project_item(lg, "it-r", full=True)
+    assert len(landed) == 1
+    state = landed[0]
+    # The claim committed right after the row read; the card is the state
+    # before it, row and events alike.
+    assert (card.status, card.owner) == ("open", None)
+    assert card.revision_id == created.id
+    assert card.source_event_ids == (created.id,)
+    del lg.item
+    after = project_item(lg, "it-r", full=True)
+    assert (after.status, after.owner) == ("claimed", "tester")
+    assert after.revision_id == state.id
+    assert after.source_event_ids == (created.id, state.id)
+    with pytest.raises(KeyError):
+        project_item(lg, "it-missing")
+    assert not lg._conn.in_transaction
+    writer.close()
+    lg.close()
+
+
+def test_full_card_names_the_blocks_link_behind_a_blockers_row(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    created = _create(lg, "it-a", "ticket", "a")
+    _create(lg, "it-b", "ticket", "b")
+    link = _append(lg, "item.linked", {"rel": "blocks", "target": "it-a"}, "it-b", "l-b")
+    state = _append(lg, "item.state", {"status": "claimed", "owner": "tester"}, "it-a", "s-a")
+    # Only it-b's link names the blocker.
+    card = project_card(lg, "it-a", full=True)
+    assert card.blockers == ("it-b",)
+    assert card.inbound_blockers == ("it-b",)
+    assert "\n## Blockers\n- it-b\n" in format_card(card)
+    assert link.id in card.source_event_ids
+    assert card.source_event_ids == (created.id, link.id, state.id)
+    # This item's own state names the blocker too: the link stays a source.
+    named = _append(
+        lg, "item.state", {"status": "blocked", "blocked_by": ["it-b"]}, "it-a", "s-named"
+    )
+    card = project_card(lg, "it-a", full=True)
+    assert card.blockers == ("it-b",)
+    assert card.inbound_blockers == ()
+    assert card.source_event_ids == (created.id, link.id, named.id)
+    # A later "blocked" state that does not restate the set carries it
+    # forward; the state that named the blocker stays a source.
+    carried = _append(lg, "item.state", {"status": "blocked"}, "it-a", "s-carried")
+    card = project_card(lg, "it-a", full=True)
+    assert card.blockers == ("it-b",)
+    assert card.source_event_ids == (created.id, link.id, named.id, carried.id)
+    # A closed blocker leaves the row, and its link leaves the sources.
+    _append(lg, "item.state", {"status": "closed"}, "it-b", "s-b-closed")
+    card = project_card(lg, "it-a", full=True)
+    assert card.blockers == ()
+    assert card.source_event_ids == (created.id, carried.id)
+    lg.close()
+
+
+def test_full_card_names_the_state_behind_a_named_blocker(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    created = _create(lg, "it-a", "ticket", "a")
+    named = _append(
+        lg, "item.state", {"status": "blocked", "blocked_by": ["it-x"]}, "it-a", "s-named"
+    )
+    carried = _append(lg, "item.state", {"status": "blocked"}, "it-a", "s-carried")
+    card = project_card(lg, "it-a", full=True)
+    assert card.blockers == ("it-x",)
+    assert card.source_event_ids == (created.id, named.id, carried.id)
+    lg.close()
+
+
+def test_a_blockers_row_without_a_source_is_refused() -> None:
+    sources = {"state_event_id": None, "link_event_ids": ()}
+    with pytest.raises(RuntimeError, match="blocker it-b of it-a has no source event"):
+        _blocker_source_ids("it-a", [("it-b", sources)])
+    named = {"state_event_id": 4, "link_event_ids": (3, 5)}
+    assert _blocker_source_ids("it-a", [("it-b", named)]) == {3, 4, 5}
