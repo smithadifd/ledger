@@ -33,7 +33,7 @@ JSON object on stdout:
 | 1 | not found | no such item or database, or an empty listing |
 | 2 | usage | bad flags or arguments |
 | 3 | refused | validation, synced path, shared database, missing `LEDGER_HARNESS`, capacity, a quote that does not match, export lag |
-| 4 | integrity | `verify` found a broken hash chain |
+| 4 | integrity | `verify` found a broken hash chain or a broken child-of forest |
 | 5 | stale | `--expect-revision` no longer matches the item's newest event |
 
 Error codes in the JSON envelope include `usage`, `missing_harness`,
@@ -372,6 +372,15 @@ exit code. Without `LEDGER_EXPORT_DIR`, `export` is omitted.
 
 **`verify [--system NAME]`** Walk the hash chain and re-validate every
 payload. With `--system`, also require the database's claim to be `NAME`.
+Then replay every event, in id order, through the child-of guard every write
+and `restore` use, each event seeing only the ones before it. The first
+`child-of` link that gives a child a second anchor without `moved_from`,
+links an item to itself, names an anchor that is not yet an item, or makes a
+cycle exits 4 with the message `event N CODE: ...`, where `CODE` (also the
+JSON error code) is `second_anchor`, `self_link`, `anchor_missing` or
+`cycle`. An event the guard cannot evaluate is reported the same way with
+`unevaluable`, never skipped. A store that passes prints `ok events=N` and
+exits 0, as before.
 
 **`export [--dir DIR] [--commit | --push | --check [--max-events N] [--max-hours H]]`**
 Write events after the watermark as canonical JSON files. `--commit` makes
@@ -414,3 +423,12 @@ stop recorded and so are not in `items` (0 when there are none, and 0 with
 ```json
 {"data": {"items": [], "open_without_stop": 2}, "error": null, "ok": true}
 ```
+
+## Contract
+
+**`contract`** Print the full agent contract
+([agent-contract.md](agent-contract.md)) from the installed package, so an
+agent that has only the package can read the whole page; `resume --brief`
+prints its short form and points here. It never opens the database, though
+`--db` or `LEDGER_DB` is still required, as for every verb. With `--json` the
+page is the `contract` field.

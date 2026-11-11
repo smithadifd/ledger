@@ -19,6 +19,7 @@ from ledger.verbs import capture
 from ledger.verbs import card
 from ledger.verbs import claim
 from ledger.verbs import context
+from ledger.verbs import contract
 from ledger.verbs import decisions
 from ledger.verbs import doctor
 from ledger.verbs import elect
@@ -54,6 +55,7 @@ MODULES = (
     card,
     claim,
     context,
+    contract,
     decisions,
     doctor,
     elect,
