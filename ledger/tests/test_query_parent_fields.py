@@ -64,6 +64,43 @@ def test_query_json_rows_carry_parent_id_and_children_open(tmp_path, monkeypatch
         assert type(row["children_open"]) is int and row["children_open"] >= 0
 
 
+def _ids(monkeypatch, db, *flags):
+    code, out, err = invoke(monkeypatch, ["--db", db, "--json", "query", *flags])
+    assert code == 0, err
+    return {row["item_id"] for row in json.loads(out)["data"]["items"]}
+
+
+def test_query_duplicate_of_and_blocks_keep_the_linking_items(tmp_path, monkeypatch):
+    db = str(tmp_path / "ledger.db")
+    for item_id in ("it-kept", "it-a", "it-b", "it-c", "it-d", "it-e"):
+        _new(monkeypatch, db, item_id)
+    code, _out, err = invoke(monkeypatch, ["--db", db, "new", "--id=-dash", "--type", "ticket",
+                                           "--title", "hyphen"])
+    assert code == 0, err
+    links = [
+        ("it-a", "duplicate-of", "it-kept"),
+        ("it-b", "blocks", "it-kept"),
+        ("it-c", "blocks", "it-kept"),
+        ("it-d", "blocks", "it-a"),
+        ("it-e", "blocks", "-dash"),
+    ]
+    for item, rel, target in links:
+        code, _out, err = invoke(
+            monkeypatch, ["--db", db, "link", item, "--rel", rel, f"--target={target}"]
+        )
+        assert code == 0, err
+    code, _out, err = invoke(monkeypatch, ["--db", db, "state", "it-c", "--status", "closed"])
+    assert code == 0, err
+
+    assert _ids(monkeypatch, db, "--duplicate-of=it-kept", "--all") == {"it-a"}
+    # Every item with a blocks link to the target, whatever its status.
+    assert _ids(monkeypatch, db, "--blocks=it-kept", "--all") == {"it-b", "it-c"}
+    assert _ids(monkeypatch, db, "--blocks=it-kept", "--status", "open") == {"it-b"}
+    assert _ids(monkeypatch, db, "--blocks=-dash") == {"it-e"}
+    code, _out, _err = invoke(monkeypatch, ["--db", db, "query", "--duplicate-of=it-b"])
+    assert code == 1
+
+
 def test_query_text_output_is_unchanged(tmp_path, monkeypatch):
     db = str(tmp_path / "ledger.db")
     for item_id in ("it-anchor", "it-a"):

@@ -1,4 +1,4 @@
-"""Render a bounded resume card for one item."""
+"""Render a bounded resume card for one item, or with ``--full`` every row of it."""
 from __future__ import annotations
 
 import os
@@ -17,6 +17,11 @@ def add_arguments(parser) -> None:
         metavar="PATH",
         help="write a human markdown copy to PATH (overwrites PATH if it exists)",
     )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="the same card unbounded: every row and every word, no caps and no cut markers",
+    )
 
 
 def run(args, ctx: Context) -> Result:
@@ -28,6 +33,7 @@ def run(args, ctx: Context) -> Result:
             args.item,
             pointers=sidecar_from_env(),
             program=invocation_prefix(ctx.program, str(lg.path), ctx.db_explicit),
+            full=args.full,
         )
         text = format_card(card)
         data = card.as_dict()

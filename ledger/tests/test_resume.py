@@ -78,6 +78,52 @@ def test_no_items_still_says_no_open_items(tmp_path, monkeypatch) -> None:
     assert out == "no open items\n"
 
 
+def test_json_counts_open_items_with_no_stop(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    seed(monkeypatch, db, "it-b")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
+    assert code == 0, err
+    data = json.loads(out)["data"]
+    assert data["items"] == []
+    assert data["open_without_stop"] == 2
+    # A stopped item is listed and no longer counted; the other still is.
+    _stop(monkeypatch, db, "it-a", "stop a")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume", "--brief"])
+    assert code == 0, err
+    data = json.loads(out)["data"]
+    assert [entry["item_id"] for entry in data["items"]] == ["it-a"]
+    assert data["open_without_stop"] == 1
+    # The text form is unchanged: it lists the stopped item only.
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert "no stop recorded" not in out
+
+
+def test_json_carries_zero_when_no_open_item_lacks_a_stop(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    # No database yet: an empty ledger.
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
+    assert code == 0, err
+    data = json.loads(out)["data"]
+    assert data == {"items": [], "open_without_stop": 0}
+    assert type(data["open_without_stop"]) is int
+    # A closed item with no stop is not open, so it is not counted.
+    seed(monkeypatch, db, "it-a")
+    code, _out, err = invoke(monkeypatch, ["--db", db, "state", "it-a", "--status", "closed"])
+    assert code == 0, err
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
+    assert code == 0, err
+    assert json.loads(out)["data"] == {"items": [], "open_without_stop": 0}
+    # --item shows the one item, stop or not, and counts nothing.
+    seed(monkeypatch, db, "it-b")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume", "--item", "it-b"])
+    assert code == 0, err
+    data = json.loads(out)["data"]
+    assert [entry["item_id"] for entry in data["items"]] == ["it-b"]
+    assert data["open_without_stop"] == 0
+
+
 def test_resume_commands_use_program_name_and_only_explicit_db(tmp_path, monkeypatch) -> None:
     db = _db(tmp_path)
     seed(monkeypatch, db, "it-a")
