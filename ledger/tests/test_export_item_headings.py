@@ -17,7 +17,9 @@ from pathlib import Path
 
 import pytest
 
+from ledger.export import _FENCE as export_fence
 from ledger.export import anchor_ticket_line, ticket_section, ticket_heading
+from ledger.search import _FENCE as search_fence
 from ledger.store import open_ledger
 
 LIB = Path(__file__).resolve().parents[2]
@@ -337,3 +339,146 @@ def test_a_line_under_a_section_heading_is_not_the_ticket_above():
 )
 def test_ticket_heading_grammar(text, in_tickets, expected):
     assert ticket_heading(text, in_tickets=in_tickets) == expected
+
+
+# --- fence indent: literal spaces only ----------------------------------------
+# CommonMark, which the importer follows, opens a fence on zero to three spaces
+# of indent. A tab or a non-breaking space before the run is not indent, so
+# the line is ordinary text and the heading below it is a ticket heading.
+
+
+def _indented_run_roadmap(indent: str) -> tuple[str, str, str]:
+    first = f"### Ticket: TB1 — first\n{indent}```\n"
+    second = f"### Ticket: TB2 — second\n{indent}```\n- Prompt: two.\n"
+    return "# Roadmap\n\n" + first + second, first, second
+
+
+@pytest.mark.parametrize("indent", ["\t", "\u00a0", "\t\t", " \t"])
+def test_a_run_after_a_tab_or_nbsp_opens_no_fence(indent):
+    text, first, second = _indented_run_roadmap(indent)
+
+    line = anchor_ticket_line(text, "TB2")
+
+    assert line == _line_of(text, second)
+    assert ticket_section(text, line) == second
+    assert ticket_section(text, _line_of(text, first)) == first
+
+
+@pytest.mark.parametrize("indent", ["", " ", "   "])
+def test_a_run_after_up_to_three_spaces_opens_a_fence(indent):
+    text, first, _second = _indented_run_roadmap(indent)
+
+    assert anchor_ticket_line(text, "TB2") is None
+    # The whole rest of the file is TB1's section: TB2 is fenced.
+    start = text.index(first)
+    assert ticket_section(text, _line_of(text, first)) == text[start:]
+
+
+@pytest.mark.parametrize(
+    "indent, fence",
+    [("", True), (" ", True), ("   ", True), ("    ", False),
+     ("\t", False), ("\u00a0", False), (" \t", False), ("\x0b", False)],
+)
+def test_search_and_export_fences_agree_on_indent(indent, fence):
+    # search.py keeps its own ``_FENCE``; export.py mirrors it, so the two
+    # agree on every indent.
+    for pattern in (export_fence, search_fence):
+        for run in ("```", "~~~"):
+            assert (pattern.match(f"{indent}{run}text") is not None) is fence
+
+
+def test_a_tab_indented_run_opens_no_fence_end_to_end(tmp_path):
+    text, _first, second = _indented_run_roadmap("\t")
+    root = tmp_path / "repo"
+    (root / "roadmaps").mkdir(parents=True)
+    (root / "roadmaps" / "tab.md").write_text(text, encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    db = tmp_path / "ledger.db"
+    _item(db, "tab-anchor", "row:TB2", "also at roadmaps/tab.md#TB2")
+
+    assert _ticket(db, root, "tab-anchor") == second
+
+
+# --- line numbers: by newline alone -------------------------------------------
+# The importer records a ticket's line by counting newline characters only.
+# ``str.splitlines`` also breaks on form feed, U+2028 and other separators, so
+# a roadmap holding one above a ticket would shift the view's line numbers.
+# Each separator line below holds three of them: a shift of three lines moves
+# a ticket's heading onto its neighbour's, so a miscount prints the wrong
+# ticket rather than a body line of the right one.
+
+FF1 = "### Ticket: FF1 — first\n- Prompt: one.\n\n"
+FF2 = "### Ticket: FF2 — second\n- Prompt: two.\n\n"
+FF3 = "### Ticket: FF3 — third\n- Prompt: three.\n"
+
+
+def _separator_roadmap(separator: str) -> str:
+    return (
+        "# Roadmap\n\n"
+        + separator.join(["page one", "page two", "page three", "page four"]) + "\n\n"
+        + FF1 + FF2 + FF3
+    )
+
+
+SEPARATORS = pytest.mark.parametrize(
+    "separator", ["\x0c", "\u2028"], ids=["form-feed", "line-separator"]
+)
+
+
+@pytest.fixture()
+def separator_repo(tmp_path: Path, request) -> tuple[Path, str, str]:
+    text = _separator_roadmap(request.param)
+    root = tmp_path / "repo"
+    (root / "roadmaps").mkdir(parents=True)
+    (root / "roadmaps" / "sep.md").write_bytes(text.encode("utf-8"))
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return root, _git(root, "rev-parse", "HEAD").strip(), text
+
+
+@pytest.mark.parametrize(
+    "separator_repo", ["\x0c", "\u2028"], ids=["form-feed", "line-separator"], indirect=True
+)
+def test_a_separator_above_a_ticket_keeps_the_line_locator(tmp_path, separator_repo):
+    root, sha, text = separator_repo
+    db = tmp_path / "ledger.db"
+    line = _line_of(text, FF2)
+    _item(db, "sep-line", f"roadmaps/sep.md:{line}@{sha}")
+
+    assert _ticket(db, root, "sep-line") == FF2
+
+
+@pytest.mark.parametrize(
+    "separator_repo", ["\x0c", "\u2028"], ids=["form-feed", "line-separator"], indirect=True
+)
+def test_a_separator_above_a_ticket_keeps_the_anchor(tmp_path, separator_repo):
+    root, _sha, _text = separator_repo
+    db = tmp_path / "ledger.db"
+    _item(db, "sep-anchor", "row:FF2", "also at roadmaps/sep.md#FF2")
+
+    assert _ticket(db, root, "sep-anchor") == FF2
+
+
+@SEPARATORS
+def test_lines_are_numbered_by_newline_alone(separator):
+    text = _separator_roadmap(separator)
+
+    for block in (FF1, FF2, FF3):
+        ticket_id = block.split()[2]
+        line = anchor_ticket_line(text, ticket_id)
+        assert line == _line_of(text, block)
+        assert ticket_section(text, line) == block
+
+
+def test_a_final_line_without_a_newline_is_the_last_line():
+    text = "# Roadmap\n\n### Ticket: END1 — t\n- last"
+
+    line = anchor_ticket_line(text, "END1")
+
+    assert line == 3
+    assert ticket_section(text, 4) == "### Ticket: END1 — t\n- last\n"
+    with pytest.raises(ValueError, match=f"^{SECTION_NOT_FOUND}$"):
+        ticket_section(text, 2)

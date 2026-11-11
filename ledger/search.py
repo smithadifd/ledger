@@ -135,7 +135,9 @@ SNIPPET_TOKENS = 16
 UTTERANCE_TITLE_CHARS = 80
 _LINK_KIND_PREFIXES = ("item.", "decision.")
 _MD_PATH = re.compile(r"(?:~/|/)?(?:[\w.@+-]+/)*[\w.@+-]+\.md(?![\w-])")
-_FENCE = re.compile(r"^\s{0,3}(`{3,}|~{3,})(.*)$")
+# Up to three literal spaces of indent (CommonMark); a tab or other
+# whitespace before the run is not indent. export.py ``_FENCE`` mirrors it.
+_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _TERM = re.compile(r"[\w][\w'-]*", re.UNICODE)
 _BARE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_TIME = re.compile(
