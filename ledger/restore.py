@@ -67,12 +67,13 @@ def check_document_event(event: Event) -> None:
     """Refuse a ``doc.attached`` event that would enter the store with a
     digest the ledger did not compute.
 
-    The payload must pass its schema. An inline document's bytes are
-    decoded and its ``size`` and ``sha256`` recomputed; a malformed
-    encoding, bytes over ``DOC_INLINE_LIMIT``, or a mismatch with the stored
-    values refuses with ``restore_doc_digest_mismatch`` naming the event. A
-    path document is restored as given: its bytes are not in the export,
-    and it is re-hashed at every show and verify. Other kinds pass.
+    The payload must pass its schema, which requires the inline bytes
+    (``content_b64``) and refuses any other key, a ``path`` included
+    (``unknown-key:path``): documents are inline-only. The bytes are decoded
+    and their ``size`` and ``sha256`` recomputed; a malformed encoding,
+    bytes over ``DOC_INLINE_LIMIT``, or a mismatch with the stored values
+    refuses with ``restore_doc_digest_mismatch`` naming the event. Other
+    kinds pass.
     """
     if event.kind != DOC_KIND:
         return
@@ -82,8 +83,6 @@ def check_document_event(event: Event) -> None:
         raise LedgerError(
             f"restore refuses event {event.id} ({event.kind}): {exc.reason}"
         ) from exc
-    if "content_b64" not in event.payload:
-        return
     try:
         data = inline_document_bytes(event.payload)
     except ValueError as exc:

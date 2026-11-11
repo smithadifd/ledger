@@ -1,30 +1,33 @@
 """Attach, show or verify an item's documents: content-addressed records.
 
 A document is one ``doc.attached`` event on an item. ``doc add`` reads the
-file's bytes, computes their sha256 and size, and stores the bytes inline
-(``content_b64``) when they fit under ``DOC_INLINE_LIMIT``, or the path where
-they live otherwise; ``--inline`` and ``--by-path`` force the choice. A
-stored path is absolute, or relative to the ledger home (the directory that
-holds the database), and is never resolved through a symlink.
+file's bytes once, computes their sha256 and size, and stores the bytes
+inline (``content_b64``). Documents are inline-only: a file over
+``DOC_INLINE_LIMIT`` is refused, because by-path documents are not
+supported yet.
 
-A symlink is never followed at the leaf: ``doc add`` refuses one
-(``doc_unreadable``), and a stored path that is now a symlink, a FIFO or
-anything but a regular file reads as ``missing``. Every filename and stored
-path is escaped before it reaches a refusal or the text output, so a name
-holding a terminal control sequence is never printed raw.
+``doc add`` refuses (``doc_unreadable``) a FILE whose path holds a symlink
+anywhere, leaf or parent: its resolved path must equal its absolute path,
+checked once before the open. The open itself never follows the leaf
+(``O_NOFOLLOW``; where the platform has no such flag, the leaf is
+``lstat``-ed first, anything but a regular file is refused there, and the
+opened file must be that same device and inode). It is non-blocking, so a
+FIFO cannot stall it, and the open descriptor must be a regular file. Every
+filename is escaped before it reaches a refusal, so a name holding a
+terminal control sequence is never printed raw.
 
-``doc show`` and ``doc verify`` are reads and run without ``LEDGER_HARNESS``;
-``doc add`` is the one write and refuses without it, as every write verb
-does.
+``doc show`` and ``doc verify`` read only the stored inline bytes and
+recompute their sha256 and size; they never touch the filesystem. They are
+reads and run without ``LEDGER_HARNESS``; ``doc add`` is the one write and
+refuses without it, as every write verb does.
 
 Adding the same item, role and sha256 again writes nothing and reports
 ``unchanged``; the idempotency key is derived from those three, so a retried
 add lands once. The same bytes under another role are a second document.
 
 Nothing is printed as a document's content, or reported ``ok``, unless its
-bytes hash to the stored sha256: ``show --content`` and ``verify`` re-read
-and re-hash every document each time (a path document from its file), and a
-mismatch or a missing file is refused, never printed.
+stored bytes hash to the stored sha256 and size: a mismatch is refused,
+never printed.
 
 ``attach_document`` is the only writer of ``doc.attached``: the store
 reserves the kind, so ``ledger append`` and ``append-many`` refuse it and
@@ -37,7 +40,6 @@ import hashlib
 import os
 import re
 import stat
-from pathlib import Path
 from typing import Any
 
 from ledger.restore import inline_document_bytes
@@ -62,8 +64,10 @@ MARKDOWN_MIME = "text/markdown"
 VERIFY_FAILED = "doc_verify_failed"
 STATUS_OK = "ok"
 STATUS_MISMATCH = "mismatch"
-STATUS_MISSING = "missing"
-_CHUNK = 1 << 20
+# Every document is stored inline; the row keeps the storage and path keys
+# so the ``doc show --json`` envelope stays the same shape.
+STORAGE_INLINE = "inline"
+_CHUNK = 1 << 16
 _EVENT_ID = re.compile(r"[1-9][0-9]{0,18}")
 _MAX_EVENT_ID = 2**63 - 1
 _ADD_ONLY = ("file", "role", "title", "mime")
@@ -77,24 +81,16 @@ def document_key(item_id: str, role: str, sha256: str) -> str:
     return f"doc:{item_id}:{role}:{sha256}"
 
 
-def ledger_home(lg: Ledger) -> Path:
-    """The directory that holds the database; a relative path is read from it."""
-    return Path(lg.path).parent
-
-
-def _resolve(stored: str, home: Path) -> Path:
-    return Path(stored) if os.path.isabs(stored) else home / stored
-
-
-def _open_regular(path: Path | str) -> int | None:
+def _open_regular(path: str) -> int | None:
     """An open descriptor on ``path`` when it is a regular file, else None.
 
     The leaf is never followed: it is opened ``O_NOFOLLOW``, so a symlink
     fails to open. Where the platform has no ``O_NOFOLLOW``, the leaf is
     ``lstat``-ed first (anything but a regular file, a symlink included, is
-    refused there) and the opened file must be that same device and inode.
-    Opened non-blocking so a FIFO cannot stall the read; the type is checked
-    on the open descriptor, so a swap after a check cannot slip in.
+    refused there, before any open) and the opened file must be that same
+    device and inode. Opened non-blocking so a FIFO cannot stall the read;
+    the type is checked on the open descriptor, so a swap after a check
+    cannot slip in.
     """
     nofollow = getattr(os, "O_NOFOLLOW", 0)
     leaf = None
@@ -121,31 +117,39 @@ def _open_regular(path: Path | str) -> int | None:
     return None
 
 
-def _hash_fd(fd: int, *, keep: int | None) -> tuple[str, int, bytes | None]:
-    """sha256 hex and size of everything ``fd`` reads, plus the bytes when
-    ``keep`` is None (keep all) or the size is at most ``keep``."""
-    digest = hashlib.sha256()
-    size = 0
-    kept = bytearray()
-    while True:
-        chunk = os.read(fd, _CHUNK)
+def _read_at_most(fd: int, limit: int) -> bytes:
+    """What ``fd`` reads, stopping once it holds more than ``limit`` bytes."""
+    data = bytearray()
+    while len(data) <= limit:
+        chunk = os.read(fd, min(_CHUNK, limit + 1 - len(data)))
         if not chunk:
             break
-        digest.update(chunk)
-        size += len(chunk)
-        if keep is None or len(kept) <= keep:
-            kept.extend(chunk)
-    if keep is not None and size > keep:
-        return digest.hexdigest(), size, None
-    return digest.hexdigest(), size, bytes(kept)
+        data.extend(chunk)
+    return bytes(data)
 
 
-def _read_input(name: str) -> tuple[str, int, bytes | None]:
-    """Hash the file named on the command line: sha256, size, and the bytes
-    when they fit inline. An unreadable input (missing, a symlink, a FIFO,
-    anything but a regular file) is refused ``doc_unreadable``; the name is
-    escaped in the message."""
-    fd = _open_regular(name)
+def _read_input(name: str) -> bytes:
+    """The bytes of the file named on the command line, read once.
+
+    Refused ``doc_unreadable`` when any component of its path is a symlink
+    (its resolved path is not its absolute path), and when it is not a
+    readable regular file (missing, a directory, a FIFO, a symlinked leaf).
+    A file over ``DOC_INLINE_LIMIT`` is a usage error. The name is escaped
+    in every refusal.
+    """
+    try:
+        absolute = os.path.abspath(name)
+        resolved = os.path.realpath(name)
+    except (OSError, ValueError):
+        absolute = resolved = None
+    if absolute is not None and resolved != absolute:
+        raise CliError(
+            f"cannot read {text_cell(name)}: its path goes through a symlink, "
+            "which is refused; pass the real path",
+            code="doc_unreadable",
+            exit_code=EXIT_REFUSED,
+        )
+    fd = _open_regular(absolute) if absolute is not None else None
     if fd is None:
         raise CliError(
             f"cannot read {text_cell(name)}: not a readable regular file",
@@ -153,34 +157,21 @@ def _read_input(name: str) -> tuple[str, int, bytes | None]:
             exit_code=EXIT_REFUSED,
         )
     try:
-        return _hash_fd(fd, keep=DOC_INLINE_LIMIT)
+        data = _read_at_most(fd, DOC_INLINE_LIMIT)
     except OSError as exc:
         raise CliError(
-            f"cannot read {text_cell(name)}: {exc.strerror or exc}",
+            f"cannot read {text_cell(name)}: {text_cell(exc.strerror or str(exc))}",
             code="doc_unreadable",
             exit_code=EXIT_REFUSED,
         ) from exc
     finally:
         os.close(fd)
-
-
-def _stored_path(name: str, home: Path) -> str:
-    """The path to store for a by-path document.
-
-    An absolute path is stored as given. A relative one is stored as given
-    when it names the same file from the ledger home, where it is read from
-    later; otherwise it is made absolute against the working directory
-    (lexically, never through a symlink), so it keeps naming the file that
-    was hashed.
-    """
-    if os.path.isabs(name):
-        return name
-    try:
-        if os.path.samefile(name, home / name):
-            return name
-    except OSError:
-        pass
-    return os.path.abspath(name)
+    if len(data) > DOC_INLINE_LIMIT:
+        raise UsageError(
+            f"{text_cell(name)} is over the {DOC_INLINE_LIMIT}-byte inline limit; "
+            "documents are stored inline, and by-path documents are not supported yet"
+        )
+    return data
 
 
 def default_mime(name: str) -> str:
@@ -195,41 +186,29 @@ def attach_document(
     role: str,
     mime: str | None = None,
     title: str | None = None,
-    storage: str | None = None,
     actor: str | None = None,
     harness: str | None = None,
     model: str | None = None,
     session: str | None = None,
 ) -> tuple[Event, bool]:
-    """Read ``name``, hash it, and attach it to ``item_id``.
+    """Read ``name``, hash it, and attach its bytes inline to ``item_id``.
 
-    ``storage`` is ``"inline"``, ``"path"`` or None (inline when the bytes
-    fit under ``DOC_INLINE_LIMIT``, by path otherwise). Returns ``(event,
-    created)``: the new event and True, or the stored document with the same
-    item, role and sha256 and False (nothing is written). The item check and
-    the duplicate check run inside the write transaction.
+    Returns ``(event, created)``: the new event and True, or the stored
+    document with the same item, role and sha256 and False (nothing is
+    written). The item check and the duplicate check run inside the write
+    transaction.
     """
-    if storage not in (None, "inline", "path"):
-        raise UsageError(f"unknown document storage: {storage!r}")
-    sha256, size, data = _read_input(name)
-    if storage == "inline" and size > DOC_INLINE_LIMIT:
-        raise UsageError(
-            f"--inline: {text_cell(name)} is {size} bytes, over the {DOC_INLINE_LIMIT}-byte "
-            "inline limit; store it with --by-path"
-        )
-    inline = storage == "inline" or (storage is None and size <= DOC_INLINE_LIMIT)
+    data = _read_input(name)
+    sha256 = hashlib.sha256(data).hexdigest()
     payload: dict[str, Any] = {
         "role": role,
         "sha256": sha256,
-        "size": size,
+        "size": len(data),
         "mime": mime if mime is not None else default_mime(name),
+        "content_b64": base64.b64encode(data).decode("ascii"),
     }
     if title is not None:
         payload["title"] = title
-    if inline:
-        payload["content_b64"] = base64.b64encode(data or b"").decode("ascii")
-    else:
-        payload["path"] = _stored_path(name, ledger_home(lg))
     with lg.transaction():
         if lg.item(item_id) is None:
             raise CliError(
@@ -255,7 +234,6 @@ def attach_document(
 def document_row(event: Event) -> dict[str, Any]:
     """One document as ``doc show --json`` prints it."""
     payload = event.payload
-    inline = "content_b64" in payload
     return {
         "event_id": event.id,
         "item_id": event.item_id,
@@ -264,112 +242,61 @@ def document_row(event: Event) -> dict[str, Any]:
         "mime": payload.get("mime"),
         "size": payload.get("size"),
         "sha256": payload.get("sha256"),
-        "storage": "inline" if inline else "path",
-        "path": None if inline else payload.get("path"),
+        "storage": STORAGE_INLINE,
+        "path": None,
     }
 
 
-def _matches(payload: dict[str, Any], sha256: str, size: int) -> bool:
-    return sha256 == payload.get("sha256") and size == payload.get("size")
-
-
-def verify_status(event: Event, home: Path) -> str:
-    """``ok`` when the document's bytes hash to its stored sha256 and size,
-    ``mismatch`` when they do not (or inline bytes do not decode), and
-    ``missing`` when a path document is not a readable regular file."""
+def _stored_bytes(event: Event) -> bytes | None:
+    """The document's stored inline bytes when they hash to its stored
+    sha256 and size; None when they do not, or do not decode."""
     payload = event.payload
-    if "content_b64" in payload:
-        try:
-            data = inline_document_bytes(payload)
-        except ValueError:
-            return STATUS_MISMATCH
-        sha256 = hashlib.sha256(data).hexdigest()
-        return STATUS_OK if _matches(payload, sha256, len(data)) else STATUS_MISMATCH
-    stored = payload.get("path")
-    if type(stored) is not str:
-        return STATUS_MISSING
-    fd = _open_regular(_resolve(stored, home))
-    if fd is None:
-        return STATUS_MISSING
     try:
-        sha256, size, _ = _hash_fd(fd, keep=0)
-    except OSError:
-        return STATUS_MISSING
-    finally:
-        os.close(fd)
-    return STATUS_OK if _matches(payload, sha256, size) else STATUS_MISMATCH
+        data = inline_document_bytes(payload)
+    except ValueError:
+        return None
+    if hashlib.sha256(data).hexdigest() != payload.get("sha256"):
+        return None
+    if len(data) != payload.get("size"):
+        return None
+    return data
 
 
-def _refuse(event: Event, status: str) -> CliError:
-    where = (
-        "inline bytes"
-        if "content_b64" in event.payload
-        else text_cell(event.payload.get("path"))
-    )
-    if status == STATUS_MISSING:
-        return CliError(
-            f"document {event.id}: {where} is missing or not a regular file; "
-            "nothing printed",
-            code="doc_missing",
+def verify_status(event: Event) -> str:
+    """``ok`` when the stored bytes hash to the stored sha256 and size, else
+    ``mismatch``. Reads the event only, never the filesystem."""
+    return STATUS_OK if _stored_bytes(event) is not None else STATUS_MISMATCH
+
+
+def verified_content(event: Event) -> bytes:
+    """The document's bytes, only after they hash to its stored sha256 and
+    size; otherwise refused ``doc_mismatch`` (exit 4) and no bytes are
+    returned."""
+    data = _stored_bytes(event)
+    if data is None:
+        raise CliError(
+            f"document {event.id}: its inline bytes do not hash to the stored "
+            "sha256; nothing printed",
+            code="doc_mismatch",
             exit_code=EXIT_INTEGRITY,
         )
-    return CliError(
-        f"document {event.id}: {where} does not hash to the stored sha256; "
-        "nothing printed",
-        code="doc_mismatch",
-        exit_code=EXIT_INTEGRITY,
-    )
-
-
-def verified_content(event: Event, home: Path) -> bytes:
-    """The document's bytes, only after they hash to its stored sha256.
-
-    Inline bytes are decoded; a path document's file is read. A mismatch is
-    refused ``doc_mismatch`` and a missing file ``doc_missing`` (exit 4), and
-    no bytes are returned.
-    """
-    payload = event.payload
-    if "content_b64" in payload:
-        try:
-            data = inline_document_bytes(payload)
-        except ValueError:
-            raise _refuse(event, STATUS_MISMATCH) from None
-        if not _matches(payload, hashlib.sha256(data).hexdigest(), len(data)):
-            raise _refuse(event, STATUS_MISMATCH)
-        return data
-    stored = payload.get("path")
-    fd = _open_regular(_resolve(stored, home)) if type(stored) is str else None
-    if fd is None:
-        raise _refuse(event, STATUS_MISSING)
-    try:
-        sha256, size, data = _hash_fd(fd, keep=None)
-    except OSError:
-        raise _refuse(event, STATUS_MISSING) from None
-    finally:
-        os.close(fd)
-    if not _matches(payload, sha256, size):
-        raise _refuse(event, STATUS_MISMATCH)
-    return data or b""
+    return data
 
 
 def add_arguments(parser) -> None:
     parser.add_argument("action", choices=ACTIONS)
     parser.add_argument("item", nargs="?", help="the item (verify: optional)")
-    parser.add_argument("file", nargs="?", help="add: the file to attach")
+    parser.add_argument(
+        "file",
+        nargs="?",
+        help=f"add: the file to attach, inline (at most {DOC_INLINE_LIMIT} bytes; "
+        "no symlink anywhere in its path)",
+    )
     parser.add_argument("--role", choices=DOC_ROLES, help="add: what the document is")
     parser.add_argument("--title", help="add: a one-line title")
     parser.add_argument(
         "--mime",
         help=f"add: the media type (default {DOC_DEFAULT_MIME}; {MARKDOWN_MIME} for .md)",
-    )
-    storage = parser.add_mutually_exclusive_group()
-    storage.add_argument(
-        "--inline",
-        action="store_true",
-        help=f"add: store the bytes inline (at most {DOC_INLINE_LIMIT} bytes)",
-    )
-    storage.add_argument(
-        "--by-path", action="store_true", help="add: store the path, not the bytes"
     )
     parser.add_argument("--id", dest="event_id", help="show, verify: one document by event id")
     parser.add_argument(
@@ -412,7 +339,6 @@ def _run_add(args, ctx: Context) -> Result:
         raise UsageError("doc add needs ITEM and FILE")
     if args.role is None:
         raise UsageError(f"doc add needs --role ({', '.join(DOC_ROLES)})")
-    storage = "inline" if args.inline else "path" if args.by_path else None
     lg = open_db(ctx, write=True)
     try:
         event, created = attach_document(
@@ -422,7 +348,6 @@ def _run_add(args, ctx: Context) -> Result:
             role=args.role,
             mime=args.mime,
             title=args.title,
-            storage=storage,
             **actor_kwargs(ctx),
         )
     finally:
@@ -456,7 +381,7 @@ def _show_line(row: dict[str, Any]) -> str:
         str(row["role"]),
         str(row["size"]),
         str(row["sha256"])[:12],
-        "inline" if row["storage"] == "inline" else text_cell(row["path"]),
+        str(row["storage"]),
     ]
     if row["title"] is not None:
         fields.append(str(row["title"]))
@@ -464,7 +389,7 @@ def _show_line(row: dict[str, Any]) -> str:
 
 
 def _run_show(args, ctx: Context) -> Result:
-    _refuse_flags(args, _ADD_ONLY + ("inline", "by_path"), "show")
+    _refuse_flags(args, _ADD_ONLY, "show")
     if args.item is None:
         raise UsageError("doc show needs ITEM")
     event_id = _parse_event_id(args.event_id)
@@ -472,13 +397,12 @@ def _run_show(args, ctx: Context) -> Result:
         raise UsageError("doc show --content needs --id N")
     lg = open_db(ctx, write=False)
     try:
-        home = ledger_home(lg)
         events = _documents(lg, args.item, event_id)
     finally:
         lg.close()
     if args.content:
         [event] = events
-        data = verified_content(event, home)
+        data = verified_content(event)
         document = {**document_row(event), "content_b64": base64.b64encode(data).decode("ascii")}
         return Result(data={"document": document}, raw=data)
     rows = [document_row(event) for event in events]
@@ -487,11 +411,10 @@ def _run_show(args, ctx: Context) -> Result:
 
 
 def _run_verify(args, ctx: Context) -> Result:
-    _refuse_flags(args, _ADD_ONLY + ("inline", "by_path", "content"), "verify")
+    _refuse_flags(args, _ADD_ONLY + ("content",), "verify")
     event_id = _parse_event_id(args.event_id)
     lg = open_db(ctx, write=False)
     try:
-        home = ledger_home(lg)
         events = _documents(lg, args.item, event_id)
     finally:
         lg.close()
@@ -500,7 +423,7 @@ def _run_verify(args, ctx: Context) -> Result:
             "event_id": event.id,
             "item_id": event.item_id,
             "sha256": event.payload.get("sha256"),
-            "status": verify_status(event, home),
+            "status": verify_status(event),
         }
         for event in events
     ]

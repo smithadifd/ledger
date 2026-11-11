@@ -33,14 +33,14 @@ JSON object on stdout:
 | 1 | not found | no such item or database, or an empty listing |
 | 2 | usage | bad flags or arguments |
 | 3 | refused | validation, synced path, shared database, missing `LEDGER_HARNESS`, capacity, a quote that does not match, export lag |
-| 4 | integrity | `verify` found a broken hash chain or a broken child-of forest; `doc verify` or `doc show --content` found a document whose bytes do not hash to its sha256, or are missing |
+| 4 | integrity | `verify` found a broken hash chain or a broken child-of forest; `doc verify` or `doc show --content` found a document whose stored bytes do not hash to its sha256 |
 | 5 | stale | `--expect-revision` no longer matches the item's newest event |
 
 Error codes in the JSON envelope include `usage`, `missing_harness`,
 `missing_db`, `not_found`, `empty`, `validation`, `conflict`, `capacity`,
 `shared_database`, `synced_path`, `stale_revision`, `integrity`, `unusable`,
 `quote_mismatch`, `lag`, `verb_collision`, `invalid_actor`, `doc_unreadable`,
-`doc_mismatch`, `doc_missing` and `doc_verify_failed`. A user error never
+`doc_mismatch` and `doc_verify_failed`. A user error never
 prints a stack trace.
 
 ## Environment
@@ -143,48 +143,48 @@ A claim stamps the spec version it was made against, and the card shows
 written only to move the source leaves the content hash as it was and prints
 nothing.
 
-**`doc add ITEM FILE --role ROLE [--title T] [--mime M] [--inline | --by-path]`**
+**`doc add ITEM FILE --role ROLE [--title T] [--mime M]`**
 Attach a document to an item as one `doc.attached` event. `ROLE` is one of
 `review-receipt`, `brief`, `packet`, `retro`, `other`. The ledger reads
-`FILE`'s bytes and computes their sha256 and size itself. Bytes of at most
-65536 are stored inline (base64); a larger file is stored by path, and the
-bytes are not copied. `--inline` and `--by-path` force the choice;
-`--inline` over the limit is a usage error (exit 2). A stored path is
-absolute, or relative to the directory that holds the database: a relative
-`FILE` is stored as given when it names the same file from there, and made
-absolute otherwise. A relative stored path resolves against the ledger home,
-so after a restore into a different directory `doc verify` may report
-`missing` for a file that still sits beside the original database. The media type defaults to `application/octet-stream`,
-and to `text/markdown` for a `.md` file. Adding the same item, role and
-sha256 again writes nothing and reports `unchanged`; the same bytes under
-another role are a second document. An unknown item is `not_found` (exit
-1); a `FILE` that is not a readable regular file, a symlink included (it is
-never followed), is `doc_unreadable` (exit 3). `ledger append` and
-`append-many` refuse the `doc.attached` kind. `doc add` is a write and needs
+`FILE`'s bytes once, computes their sha256 and size itself, and stores the
+bytes inline (base64) in the event. Documents are inline-only: a `FILE` over
+the 65536-byte inline limit is a usage error (exit 2). The media type
+defaults to `application/octet-stream`, and to `text/markdown` for a `.md`
+file. Adding the same item, role and sha256 again writes nothing and reports
+`unchanged`; the same bytes under another role are a second document. An
+unknown item is `not_found` (exit 1). `ledger append` and `append-many`
+refuse the `doc.attached` kind. `doc add` is a write and needs
 `LEDGER_HARNESS`; `doc show` and `doc verify` are reads and do not.
 
+A symlink anywhere in `FILE`'s path, the file itself or any directory above
+it, is refused `doc_unreadable` (exit 3) and never read: the path must
+resolve to itself. On macOS that includes paths under `/tmp`, `/var` and
+`/etc`, which are symlinks into `/private`, so pass the real path (for
+example `/private/tmp/brief.md`). A `FILE` that is not a readable regular
+file (missing, a directory, a FIFO) is `doc_unreadable` as well. A filename
+in a refusal is escaped as `events` escapes a text column.
+
 **`doc show ITEM [--id N] [--content]`** List the item's documents, oldest
-first: event id, role, size, the start of the sha256, `inline` or the path,
-and the title. `--id N` shows one. With `--json`:
+first: event id, role, size, the start of the sha256, `inline`, and the
+title. `--id N` shows one. With `--json`:
 
 ```json
 {"data": {"documents": [{"event_id": 7, "item_id": "it-1", "mime": "text/markdown", "path": null, "role": "brief", "sha256": "<64 hex>", "size": 120, "storage": "inline", "title": "The brief"}], "item_id": "it-1"}, "error": null, "ok": true}
 ```
 
-`storage` is `inline` or `path`, and `path` is null for an inline document.
-No documents is `documents: []` and exit 0. `--content` (with `--id`) reads
-the document's bytes (decoded inline bytes, or the file at its path) and
-hashes them first: when they match, it writes exactly those bytes to stdout
-with no trailing newline, and with `--json` it prints
+`storage` is always `inline` and `path` is always null; both keys stay so
+the envelope keeps its shape. No documents is `documents: []` and exit 0.
+`--content` (with `--id`) decodes the document's stored bytes and hashes
+them first: when they match the stored sha256 and size, it writes exactly
+those bytes to stdout with no trailing newline, and with `--json` it prints
 `{"document": {<the row>, "content_b64": ...}}`. A mismatch is refused
-`doc_mismatch` and a missing file `doc_missing` (exit 4), and nothing is
-printed; a stored path that is now a symlink, a FIFO or anything but a
-regular file is missing. A filename or path in a refusal or a text line is
-escaped as `events` escapes a text column.
+`doc_mismatch` (exit 4), and nothing is printed. `doc show` reads only the
+ledger, never the file the document came from.
 
-**`doc verify [ITEM] [--id N]`** Re-hash every document in scope (every
-document in the ledger when no item is given) and report each as `ok`,
-`mismatch` or `missing`. All `ok` prints `ok documents=N` and exits 0.
+**`doc verify [ITEM] [--id N]`** Re-hash every document's stored bytes in
+scope (every document in the ledger when no item is given) and report each
+as `ok` or `mismatch`; it reads only the ledger, never the file a document
+came from. All `ok` prints `ok documents=N` and exits 0.
 Otherwise it prints `doc verify failed: F of N documents` and one line per
 failing document, and exits 4; with `--json` the envelope reads
 `ok: false`, error code `doc_verify_failed`, and keeps every row in

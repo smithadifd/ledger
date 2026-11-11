@@ -43,7 +43,7 @@ SPEC_MERGE_CLASSES = ("MC-0", "MC-1", "MC-2", "MC-3", "MC-4")
 # itself are not content.
 SPEC_CONTENT_FIELDS = ("title", "body_md", "acceptance", "size", "merge_class")
 # A document attached to an item (verbs/doc.py): content-addressed, its
-# bytes inline when they fit under DOC_INLINE_LIMIT, or named by path.
+# bytes stored inline, at most DOC_INLINE_LIMIT of them.
 DOC_KIND = "doc.attached"
 DOC_ROLES = ("review-receipt", "brief", "packet", "retro", "other")
 DOC_INLINE_LIMIT = 65536
@@ -66,7 +66,6 @@ _SHA256_HEX = {"type": "string", "pattern": r"[0-9a-f]{64}"}
 # is validated, so a restored document holds none either.
 _DOC_TITLE = {"type": "string", "min_len": 1, "max_len": 300, "single_line": True,
               "no_control": True}
-_DOC_PATH = {"type": "string", "min_len": 1, "max_len": 4096, "no_control": True}
 _DOC_MIME = {
     "type": "string",
     "max_len": 127,
@@ -264,9 +263,9 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
     # A document attached to an item. sha256 and size are computed by the
     # ledger from the bytes it read: ``ledger doc add`` is the only live
     # writer (the store reserves the kind), and restore and replay recompute
-    # an inline document's digest before inserting it (restore.py). Exactly
-    # one of content_b64 (the bytes, base64, at most DOC_INLINE_LIMIT) and
-    # path (absolute, or relative to the ledger home, stored as given).
+    # the digest before inserting it (restore.py). Documents are inline-only:
+    # content_b64 (the bytes, base64, at most DOC_INLINE_LIMIT) is required,
+    # and any other key, a path included, is refused.
     (DOC_KIND, 1): {
         "item_id": "required",
         "required": {
@@ -274,13 +273,11 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
             "sha256": _SHA256_HEX,
             "size": {"type": "integer", "min": 0},
             "mime": _DOC_MIME,
+            "content_b64": {"type": "string"},
         },
         "optional": {
             "title": _DOC_TITLE,
-            "content_b64": {"type": "string"},
-            "path": _DOC_PATH,
         },
-        "exactly_one": (("content_b64", "path"),),
     },
     ("decision.asked", 1): {
         "item_id": "required",
@@ -914,10 +911,6 @@ def validate_payload(kind: str, payload: Any, payload_version: int = 1) -> dict[
         present = [key for key in group if key in payload]
         if present and len(present) != len(group):
             _fail(f"incomplete-group:{','.join(group)}")
-    # Keys of which exactly one must appear.
-    for group in schema.get("exactly_one", ()):
-        if sum(1 for key in group if key in payload) != 1:
-            _fail(f"exactly-one-of:{','.join(group)}")
     return payload
 
 

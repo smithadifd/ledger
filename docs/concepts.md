@@ -32,7 +32,7 @@ Event kinds (`ledger/schema.py`):
 |------|---------|------------|
 | `item.created`, `item.state`, `item.note`, `item.linked` | the item and its status, notes and links | durable |
 | `item.spec` | one version of the item's spec (written only by `spec set`) | durable |
-| `doc.attached` | a document attached to the item, inline or by path (written only by `doc add`) | durable |
+| `doc.attached` | a document attached to the item, its bytes inline (written only by `doc add`) | durable |
 | `item.tried`, `item.stopped` | what was tried, and where work stopped | durable |
 | `item.progress` | progress bookkeeping; may extend a claim's lease | ephemeral |
 | `decision.asked`, `decision.elected`, `decision.held` | open questions, their answers, and a hold on a question | durable |
@@ -63,14 +63,18 @@ itself. The anchor's card lists its children with a `closed/total` count, and
 A *document* is a file attached to an item as one `doc.attached` event
 (`ledger doc add`). It is content-addressed: the ledger computes its sha256
 and size from the bytes it read, and a caller never supplies them, which is
-why `append` refuses the kind. A small document (at most 64 KiB) is stored
-inline, base64 in the event, so the hash chain covers its bytes; a larger
-one is stored by path, and the ledger records where it lives without copying
-it. Every read verifies: `doc show --content` prints a document's bytes and
-`doc verify` reports it `ok` only when they still hash to the stored sha256,
-so a file changed or removed after it was attached shows as `mismatch` or
-`missing`, never as content. Restore recomputes an inline document's digest
-before inserting it, so an export cannot bring in a forged one.
+why `append` refuses the kind. Documents are inline-only: the bytes are
+stored base64 in the event, so the hash chain covers them, and a file over
+the 64 KiB inline limit is refused. `doc add` refuses a file whose path
+holds a symlink anywhere, the file or a directory above it (on macOS that
+includes `/tmp`, `/var` and `/etc`, so pass the real path), and never reads
+through one. Every read verifies the stored bytes and touches nothing else:
+`doc show --content` prints a document's bytes and `doc verify` reports it
+`ok` only when they hash to the stored sha256 and size; otherwise it is a
+`mismatch`, never content. The file a document came from can change or go
+away without affecting it. Restore and replay recompute every document's
+digest before inserting it and refuse a document that names a path, so an
+export cannot bring in a forged one.
 
 The views (`ledger/migrations/`) include `v_items` (current state per item),
 `v_ready` (open items with no open blocker, including claims whose lease has
