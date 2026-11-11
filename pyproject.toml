@@ -30,7 +30,7 @@ include = ["ledger", "ledger.*"]
 exclude = ["ledger.tests", "ledger.tests.*"]
 
 [tool.setuptools.package-data]
-ledger = ["migrations/*.sql"]
+ledger = ["migrations/*.sql", "agent_contract.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["ledger/tests", "tests"]
