@@ -40,6 +40,7 @@ Error codes in the JSON envelope include `usage`, `missing_harness`,
 `missing_db`, `not_found`, `empty`, `validation`, `conflict`, `capacity`,
 `shared_database`, `synced_path`, `stale_revision`, `integrity`, `unusable`,
 `quote_mismatch`, `lag`, `verb_collision`, `invalid_actor`, `doc_unreadable`,
+`doc_credential_shape`, `export_doc_credential`, `restore_doc_credential`,
 `doc_mismatch` and `doc_verify_failed`. A user error never
 prints a stack trace.
 

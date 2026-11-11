@@ -90,9 +90,11 @@ header, a GitHub, AWS, `sk-` or Slack token) unless it is given
 `--allow-credential-shapes`, which marks the event `credential_override:
 true`. Restore and replay refuse a document holding one without the marker
 (`restore_doc_credential`), and `ledger export` refuses to write one
-(`export_doc_credential`), so an unmarked one never enters the store or an
-export file. `export --commit` and `export --push` do not run the scan. The
-scan is a tripwire for common shapes, not a secret detector.
+(`export_doc_credential`), so a document's bytes holding an unmarked one
+never enter the store or an export file. The scan reads a document's bytes
+only: a `--title`, like other text fields, is not scanned.
+`export --commit` and `export --push` do not run the scan. The scan is a
+tripwire for common shapes, not a secret detector.
 
 Every read verifies the stored bytes and touches nothing else:
 `doc show --content` prints a document's bytes and `doc verify` reports it

@@ -26,6 +26,13 @@ NEAR_MISSES: dict[str, bytes] = {
     "aws-15": b"AK" + b"IA" + b"QWERTYUIOP23456",
     "github-35": b"gh" + b"p_" + b"A1b2C3d4" * 4 + b"E5f",
     "public-key": b"-----BEGIN " + b"PUBLIC KEY-----",
+    # one short of each documented minimum length
+    "openai-19": b"s" + b"k-" + b"A" * 19,
+    "slack-9": b"xo" + b"xb-" + b"123456789",
+    "github-pat-21": b"git" + b"hub_pat_" + b"A_b" * 7,
+    # a letter outside each documented prefix set, at full length
+    "slack-xoxc": b"xo" + b"xc-" + b"0123456789",
+    "github-ghx": b"gh" + b"x_" + b"A1b2C3d4" * 4 + b"E5f6",
 }
 
 
@@ -61,6 +68,8 @@ def test_near_misses_are_not_found(name):
         b"OPENSSH PRIVATE KEY",
         b"ENCRYPTED PRIVATE KEY",
         b"PRIVATE KEY",
+        # two words: the rule is zero or more words, not zero or one
+        b"FOO BAR PRIVATE KEY",
     ],
 )
 def test_every_private_key_header_is_found(header):

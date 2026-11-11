@@ -173,6 +173,29 @@ def test_show_lists_documents_oldest_first_and_id_shows_one(db, tmp_path, monkey
     assert [row["role"] for row in shown["data"]["documents"]] == ["retro"]
 
 
+def test_show_escapes_a_line_separator_in_the_title_one_line_per_document(
+    db, tmp_path, monkeypatch
+):
+    title = "real\u2028event=999 forged"
+    code, first, err = add(monkeypatch, db, write(tmp_path / "a.txt", b"one"), "--title", title)
+    assert code == 0, err
+    code, second, err = add(
+        monkeypatch, db, write(tmp_path / "b.txt", b"two"), "--title", "plain"
+    )
+    assert code == 0, err
+    one, two = first["data"]["document"], second["data"]["document"]
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM)
+    assert code == 0, err
+    assert "\u2028" not in out
+    assert out.splitlines() == [
+        f"{one['event_id']}\tbrief\t3\t{one['sha256'][:12]}\tinline\treal\\u2028event=999 forged",
+        f"{two['event_id']}\tbrief\t3\t{two['sha256'][:12]}\tinline\tplain",
+    ]
+    code, shown, err = cli_json(monkeypatch, db, "doc", "show", ITEM)
+    assert code == 0, err
+    assert [row["title"] for row in shown["data"]["documents"]] == [title, "plain"]
+
+
 def test_show_of_an_item_with_no_documents_is_empty_and_exit_0(db, monkeypatch):
     code, shown, err = cli_json(monkeypatch, db, "doc", "show", ITEM)
     assert code == 0, err

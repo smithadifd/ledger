@@ -557,7 +557,15 @@ def _documents(lg: Ledger, item_id: str | None, event_id: int | None) -> list[Ev
     return chosen
 
 
+def item_documents(lg: Ledger, item_id: str) -> list[Event]:
+    """The item's documents, oldest first, read as ``doc show`` reads
+    them; refused ``not_found`` when the item does not exist."""
+    return _documents(lg, item_id, None)
+
+
 def _show_line(row: dict[str, Any]) -> str:
+    """One document as ``doc show`` prints it; the stored title is escaped
+    (``text_cell``), so it never splits the line or a column."""
     fields = [
         str(row["event_id"]),
         str(row["role"]),
@@ -566,7 +574,7 @@ def _show_line(row: dict[str, Any]) -> str:
         str(row["storage"]),
     ]
     if row["title"] is not None:
-        fields.append(str(row["title"]))
+        fields.append(text_cell(row["title"]))
     if row["credential_override"]:
         fields.append("credential-override")
     return "\t".join(fields)
