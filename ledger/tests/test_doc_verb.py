@@ -1,19 +1,26 @@
 """Documents (LC5): ``doc.attached`` and ``ledger doc add|show|verify``.
 
 A document is a content-addressed record on an item: the ledger computes its
-sha256 and size from the bytes it read and stores the bytes inline. Documents
-are inline-only, so no read after ``doc add`` touches the filesystem, and
-``doc add`` refuses a file whose path holds a symlink anywhere; a file with a
-second hard link is a regular file and is attached. Nothing is printed as a
-document's content, or reported ``ok``, unless its stored bytes hash to the
-stored sha256. Only ``attach_document`` writes the kind; restore and replay
-recompute the digest before inserting it and refuse a ``path``. Bytes holding
-a credential shape are refused at add unless the override flag marks them,
-and an unmarked one is refused at restore, at replay and at export.
+sha256 and size from the bytes it read and stores the bytes inline, or with
+``--by-path`` a stored path under the database's document root. No read of an
+inline document touches the filesystem; a by-path document is re-walked from
+the root, without following a symlink, on every read. ``doc add`` refuses a
+file whose path holds a symlink anywhere; a file with a second hard link is a
+regular file and is attached. Nothing is printed as a document's content, or
+reported ``ok``, unless the bytes read in that call hash to the stored sha256
+and size. Only ``attach_document`` writes the kind; restore and replay
+recompute an inline digest before inserting it and check a by-path document's
+schema, opening no file. Bytes or a stored path holding a credential shape
+are refused at add unless the override flag marks them, and an unmarked one is
+refused at restore, at replay and at export. A by-path add stores each
+component only as its directory's entry list spells it.
+
+The by-path tests are named for the design's T1 to T22 in their comments.
 """
 from __future__ import annotations
 
 import base64
+import builtins
 import dataclasses
 import errno
 import hashlib
@@ -35,12 +42,19 @@ from ledger.export import (
     hash_body,
     load_export,
     read_watermark,
+    refuse_unmarked_credentials,
     write_event_files,
     write_stream_digest,
     write_watermark,
 )
 from ledger.restore import replay_events, restore_export
-from ledger.schema import DOC_INLINE_LIMIT, DOC_KIND, ValidationError, validate_payload
+from ledger.schema import (
+    DOC_INLINE_LIMIT,
+    DOC_KIND,
+    DOC_PATH_LIMIT,
+    ValidationError,
+    validate_payload,
+)
 from ledger.store import LedgerError, canonical_dumps, event_digest, open_ledger
 from ledger.verbs import CliError
 from ledger.verbs import doc as doc_verb
@@ -278,7 +292,7 @@ def test_over_the_inline_limit_refuses_and_writes_nothing(db, tmp_path, monkeypa
     assert code == 2
     assert refused["error"]["code"] == "usage"
     assert "over the 65536-byte inline limit" in refused["error"]["message"]
-    assert "by-path documents are not supported yet" in refused["error"]["message"]
+    assert "pass --by-path to store it by path" in refused["error"]["message"]
     assert doc_events(db) == []
 
 
@@ -362,9 +376,10 @@ def test_content_without_id_and_bad_flags_are_usage_errors(db, tmp_path, monkeyp
         ("doc", "verify", ITEM, "--content"),
         ("doc", "add", ITEM, str(source)),
         ("doc", "add", ITEM, str(source), "--role", "nonsense"),
-        # Documents are inline-only: the storage flags are gone.
-        ("doc", "add", ITEM, str(source), "--role", "brief", "--by-path"),
+        # Inline is the default storage, not a flag; --by-path belongs to add.
         ("doc", "add", ITEM, str(source), "--role", "brief", "--inline"),
+        ("doc", "show", ITEM, "--by-path"),
+        ("doc", "verify", "--by-path"),
     ):
         code, refused, _err = cli_json(monkeypatch, db, *argv)
         assert code == 2, argv
@@ -388,14 +403,15 @@ def test_a_control_character_in_the_title_is_refused(db, tmp_path, monkeypatch):
     assert doc_events(db) == []
 
 
-def test_the_schema_requires_inline_bytes_and_refuses_a_path():
+def test_the_schema_takes_exactly_one_of_inline_bytes_and_a_stored_path():
     base = {"role": "brief", "sha256": "a" * 64, "size": 0, "mime": "text/plain"}
     validate_payload(DOC_KIND, {**base, "content_b64": ""})
-    with pytest.raises(ValidationError, match="missing-key:content_b64"):
-        validate_payload(DOC_KIND, base)
-    for payload in ({**base, "path": "/x"}, {**base, "content_b64": "", "path": "/x"}):
-        with pytest.raises(ValidationError, match="unknown-key:path"):
+    validate_payload(DOC_KIND, {**base, "path": "x.md"})
+    for payload in (base, {**base, "content_b64": "", "path": "x.md"}):
+        with pytest.raises(ValidationError, match="^exactly-one-of:content_b64,path$"):
             validate_payload(DOC_KIND, payload)
+    with pytest.raises(ValidationError, match="^bad-doc-path:path$"):
+        validate_payload(DOC_KIND, {**base, "path": "/x"})
 
 
 # ---- the chain check -----------------------------------------------------------
@@ -586,12 +602,14 @@ def test_a_document_whose_item_exists_restores_and_replays(db, tmp_path, monkeyp
         assert [e.id for e in split_db.events(kind=DOC_KIND)] == [document.id]
 
 
-# ---- a path field is refused everywhere: at add, on restore, on replay --------
+# ---- an inline add stores no path; a malformed path is refused everywhere -----
 
 
-def test_an_event_carrying_a_path_cannot_be_built_at_add(db, tmp_path, monkeypatch):
-    # doc add stores no path (whatever FILE is named), and the writer cannot
-    # be given one.
+def test_an_inline_add_stores_no_path_and_the_writer_refuses_a_malformed_one(
+    db, tmp_path, monkeypatch
+):
+    # An inline doc add stores no path (whatever FILE is named), and the
+    # writer refuses both storage keys at once, or an absolute path.
     evil = write(tmp_path / "evil\x1b[2Jname.txt", b"bytes")
     code, added, err = add(monkeypatch, db, evil)
     assert code == 0, err
@@ -599,22 +617,30 @@ def test_an_event_carrying_a_path_cannot_be_built_at_add(db, tmp_path, monkeypat
     assert set(stored.payload) == PAYLOAD_KEYS
     assert "evil" not in json.dumps(stored.payload)
     with open_ledger(db, create=False) as lg:
-        with pytest.raises(ValidationError, match="unknown-key:path"):
-            lg._append_doc_event(
-                doc_verb._DOC_WRITER_CAPABILITY, kind=DOC_KIND,
-                payload={**stored.payload, "path": str(evil)}, item_id=ITEM,
-                idempotency_key="with-a-path",
-            )
+        for payload, reason in (
+            ({**stored.payload, "path": "evil.txt"}, "exactly-one-of:content_b64,path"),
+            ({**{k: v for k, v in stored.payload.items() if k != "content_b64"},
+              "path": str(evil)}, "bad-doc-path:path"),
+        ):
+            with pytest.raises(ValidationError, match=f"^{reason}$"):
+                lg._append_doc_event(
+                    doc_verb._DOC_WRITER_CAPABILITY, kind=DOC_KIND,
+                    payload=payload, item_id=ITEM, idempotency_key="with-a-path",
+                )
     assert len(doc_events(db)) == 1
 
 
-@pytest.mark.parametrize("shape", ["inline-and-path", "path-only"])
-def test_a_restore_or_replay_of_a_document_carrying_a_path_is_refused(
-    db, tmp_path, monkeypatch, shape
+@pytest.mark.parametrize(
+    ("shape", "reason"),
+    [("inline-and-path", "exactly-one-of:content_b64,path"),
+     ("absolute-path-only", "bad-doc-path:path")],
+)
+def test_a_restore_or_replay_of_a_document_with_a_malformed_path_is_refused(
+    db, tmp_path, monkeypatch, shape, reason
 ):
     assert add(monkeypatch, db, write(tmp_path / "clean.txt", b"clean"))[0] == 0
     # The last event of a valid export, a path added (and, for path-only, the
-    # inline bytes dropped, as a by-path document had them) and its hash
+    # inline bytes dropped, as a by-path document has them) and its hash
     # recomputed, so the chain still verifies.
     export = tmp_path / "export"
     with open_ledger(db, create=False) as lg:
@@ -622,23 +648,25 @@ def test_a_restore_or_replay_of_a_document_carrying_a_path_is_refused(
         events = lg.events()
     document = events[-1]
     assert document.kind == DOC_KIND
-    payload = {**document.payload, "path": str(tmp_path / "elsewhere.txt")}
-    if shape == "path-only":
+    if shape == "absolute-path-only":
+        payload = {**document.payload, "path": str(tmp_path / "elsewhere.txt")}
         del payload["content_b64"]
+    else:
+        payload = {**document.payload, "path": "elsewhere.txt"}
     forged = dataclasses.replace(document, payload=payload)
     forged = dataclasses.replace(forged, hash=event_digest(hash_body(forged)))
     (export / event_filename(forged.id)).write_text(
         canonical_dumps(event_record(forged)) + "\n", encoding="utf-8"
     )
     dest = tmp_path / "restored" / "ledger.db"
-    with pytest.raises((ValidationError, LedgerError), match="unknown-key:path"):
+    with pytest.raises((ValidationError, LedgerError), match=reason):
         restore_export(export, dest, system="home")
     assert not any(dest.parent.glob("ledger.db*")), "a refused restore left files behind"
     replaced = [forged if event.id == forged.id else event for event in events]
     with open_ledger(tmp_path / "fresh.db") as fresh:
         with pytest.raises(
             LedgerError,
-            match=r"restore refuses event \d+ \(doc\.attached\): unknown-key:path",
+            match=rf"restore refuses event \d+ \(doc\.attached\): {reason}$",
         ):
             replay_events(fresh, replaced)
         assert fresh.events() == [], "a refused replay inserted events"
@@ -1606,3 +1634,1028 @@ def test_export_refuses_a_document_whose_inline_bytes_cannot_be_scanned(db, tmp_
             export_events(lg, export)
     assert not any(export.glob("*.json")), "a refused export wrote a file"
     assert event_id > 0
+
+
+# ---- by-path documents: the document root and the no-follow walk -----------------
+
+
+def doc_root(db: str) -> Path:
+    """The document root of the database at ``db``: beside it, named after it
+    with the ``.documents`` suffix."""
+    return Path(db).parent / (Path(db).name + ".documents")
+
+
+def error_code(envelope: dict | None) -> str | None:
+    """The envelope's error code, or None when it carries no error."""
+    return ((envelope or {}).get("error") or {}).get("code")
+
+
+def under_root(db: str, rel: str, data: bytes) -> Path:
+    path = doc_root(db) / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return write(path, data)
+
+
+def add_by_path(monkeypatch, db: str, file: Path | str, *extra: str, role: str = "brief"):
+    return add(monkeypatch, db, file, "--by-path", *extra, role=role)
+
+
+def added_id(monkeypatch, db: str, file: Path | str, *extra: str, role: str = "brief") -> int:
+    code, added, err = add_by_path(monkeypatch, db, file, *extra, role=role)
+    assert code == 0, (added, err)
+    return added["data"]["document"]["event_id"]
+
+
+def statuses(monkeypatch, db: str, *argv: str) -> tuple[int, list[str], dict]:
+    """``doc verify``'s exit code, its row statuses, and its envelope."""
+    code, verified, err = cli_json(monkeypatch, db, "doc", "verify", *argv)
+    assert verified is not None, err
+    return code, [row["status"] for row in verified["data"]["documents"]], verified
+
+
+def show_content(monkeypatch, db: str, event_id: int):
+    return cli_json(monkeypatch, db, "doc", "show", ITEM, "--id", str(event_id), "--content")
+
+
+def _assert_read_refused(
+    monkeypatch, db: str, event_id: int, status: str, code: str, *, child: bool = True
+) -> None:
+    """``doc verify`` reports ``status`` (exit 4, ``doc_verify_failed``, the row
+    kept) and ``doc show --content`` refuses ``code`` (exit 4) with nothing
+    printed, in JSON, in text, and (``child``) through the real CLI in a
+    child process, which does not see this process's patches."""
+    exit_code, found, verified = statuses(monkeypatch, db, ITEM, "--id", str(event_id))
+    assert (exit_code, found) == (4, [status]), verified
+    assert verified["error"]["code"] == "doc_verify_failed"
+    exit_code, shown, _err = show_content(monkeypatch, db, event_id)
+    assert (exit_code, shown["ok"], error_code(shown), shown["data"]) == (
+        4, False, code, None
+    ), shown
+    exit_code, out, err = cli(
+        monkeypatch, db, "doc", "show", ITEM, "--id", str(event_id), "--content"
+    )
+    assert (exit_code, out) == (4, ""), err
+    if child:
+        raw = run_module(db, "doc", "show", ITEM, "--id", str(event_id), "--content")
+        assert (raw.returncode, raw.stdout) == (4, b""), raw.stderr
+
+
+def test_a_by_path_add_verifies_ok_and_show_content_prints_the_files_bytes(db, monkeypatch):
+    # T1
+    body = b"# Packet\n\nstored by path\n"
+    source = under_root(db, "packets/p1.md", body)
+    code, added, err = add_by_path(monkeypatch, db, source, "--title", "The packet")
+    assert code == 0, err
+    document = added["data"]["document"]
+    event_id = document["event_id"]
+    assert set(document) == ROW_KEYS
+    assert (document["storage"], document["path"]) == ("path", "packets/p1.md")
+    assert (document["size"], document["sha256"]) == (len(body), hashlib.sha256(body).hexdigest())
+    assert document["mime"] == "text/markdown"
+    [event] = doc_events(db)
+    assert set(event.payload) == {"role", "sha256", "size", "mime", "path", "title"}
+    assert event.payload["path"] == "packets/p1.md"
+    assert body not in _store_bytes(db) and base64.b64encode(body) not in _store_bytes(db)
+
+    code, found, verified = statuses(monkeypatch, db)
+    assert (code, found) == (0, ["ok"]), verified
+    code, shown, err = cli_json(monkeypatch, db, "doc", "show", ITEM)
+    assert code == 0, err
+    assert shown["data"]["documents"] == [document]
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM)
+    assert (code, out) == (0, (
+        f"{event_id}\tbrief\t{len(body)}\t{document['sha256'][:12]}\t"
+        "path\tpackets/p1.md\tThe packet\n"
+    )), err
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM, "--id", str(event_id), "--content")
+    assert (code, out) == (0, body.decode()), err
+    raw = run_module(db, "doc", "show", ITEM, "--id", str(event_id), "--content")
+    assert (raw.returncode, raw.stdout) == (0, body), raw.stderr
+    code, shown, err = show_content(monkeypatch, db, event_id)
+    assert code == 0, err
+    assert set(shown["data"]["document"]) == ROW_KEYS | {"content_b64"}
+    assert base64.b64decode(shown["data"]["document"]["content_b64"]) == body
+    code, out, err = cli(
+        monkeypatch, db, "doc", "add", ITEM, str(source), "--role", "brief", "--by-path"
+    )
+    assert (code, out) == (0, f"doc\t{ITEM}\tbrief\tpath\tunchanged event={event_id}\n"), err
+
+
+def test_one_byte_changed_at_the_same_size_is_a_mismatch_and_prints_nothing(db, monkeypatch):
+    # T2
+    source = under_root(db, "same-size.md", b"abcdef")
+    event_id = added_id(monkeypatch, db, source)
+    source.write_bytes(b"abcdeF")
+    _assert_read_refused(monkeypatch, db, event_id, "mismatch", "doc_mismatch")
+    code, out, _err = cli(monkeypatch, db, "doc", "verify")
+    assert (code, out) == (4, f"doc verify failed: 1 of 1 documents\n{event_id}\tmismatch\t{ITEM}\n")
+
+
+def test_one_byte_appended_is_a_mismatch(db, monkeypatch):
+    # T3
+    source = under_root(db, "grown.md", b"abcdef")
+    event_id = added_id(monkeypatch, db, source)
+    source.write_bytes(b"abcdefg")
+    _assert_read_refused(monkeypatch, db, event_id, "mismatch", "doc_mismatch")
+
+
+def test_a_deleted_file_a_deleted_directory_or_a_deleted_root_is_missing(db, tmp_path, monkeypatch):
+    # T4
+    gone = under_root(db, "gone.md", b"deleted later")
+    gone_id = added_id(monkeypatch, db, gone)
+    deep = under_root(db, "sub/deep.md", b"its directory moves")
+    deep_id = added_id(monkeypatch, db, deep)
+    gone.unlink()
+    _assert_read_refused(monkeypatch, db, gone_id, "missing", "doc_missing")
+    code, found, _ = statuses(monkeypatch, db, ITEM, "--id", str(deep_id))
+    assert (code, found) == (0, ["ok"])
+    (doc_root(db) / "sub").rename(tmp_path / "sub-moved")
+    _assert_read_refused(monkeypatch, db, deep_id, "missing", "doc_missing")
+    doc_root(db).rename(tmp_path / "root-moved")
+    code, found, _ = statuses(monkeypatch, db)
+    assert (code, found) == (4, ["missing", "missing"])
+    _assert_read_refused(monkeypatch, db, gone_id, "missing", "doc_missing")
+
+
+def test_a_symlinked_leaf_is_refused_at_add_and_reads_refused_after_a_swap(
+    db, tmp_path, monkeypatch
+):
+    # T5
+    secret = write(tmp_path / "credentials", SECRET)
+    doc_root(db).mkdir()
+    link = doc_root(db) / "innocent.md"
+    link.symlink_to(secret)
+    code, refused, err = add_by_path(monkeypatch, db, link)
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert "goes through a symlink" in refused["error"]["message"]
+    assert not _output_holds_secret(json.dumps(refused), err)
+    assert doc_events(db) == []
+    # After an add, the leaf is replaced by a symlink to a file holding the
+    # same bytes: only the walk can tell, and it refuses.
+    body = b"the brief as added"
+    source = under_root(db, "brief.md", body)
+    event_id = added_id(monkeypatch, db, source)
+    twin = write(tmp_path / "twin.md", body)
+    source.unlink()
+    source.symlink_to(twin)
+    _assert_read_refused(monkeypatch, db, event_id, "refused", "doc_refused")
+
+
+def test_a_symlinked_parent_is_refused_at_add_and_reads_refused_after_a_swap(
+    db, tmp_path, monkeypatch
+):
+    # T6
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    write(elsewhere / "secret.md", SECRET)
+    doc_root(db).mkdir()
+    (doc_root(db) / "linked").symlink_to(elsewhere, target_is_directory=True)
+    code, refused, err = add_by_path(monkeypatch, db, doc_root(db) / "linked" / "secret.md")
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert "goes through a symlink" in refused["error"]["message"]
+    assert not _output_holds_secret(json.dumps(refused), err)
+    assert doc_events(db) == []
+    # The swap between add and read: the parent becomes a symlink to a
+    # directory holding a file with the same bytes.
+    body = b"in the real parent"
+    under_root(db, "sub/p.md", body)
+    event_id = added_id(monkeypatch, db, doc_root(db) / "sub" / "p.md")
+    other = tmp_path / "other"
+    other.mkdir()
+    write(other / "p.md", body)
+    (doc_root(db) / "sub").rename(tmp_path / "sub-moved")
+    (doc_root(db) / "sub").symlink_to(other, target_is_directory=True)
+    _assert_read_refused(monkeypatch, db, event_id, "refused", "doc_refused")
+
+
+def test_a_fifo_leaf_is_refused_at_add_and_reads_refused_after_a_swap_without_blocking(
+    db, monkeypatch
+):
+    # T7
+    doc_root(db).mkdir()
+    fifo = doc_root(db) / "input.fifo"
+    os.mkfifo(fifo)
+    code, refused = bounded_json(db, "doc", "add", ITEM, str(fifo), "--role", "brief", "--by-path")
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), refused
+    assert doc_events(db) == []
+    source = under_root(db, "swap.md", b"a regular file first")
+    event_id = added_id(monkeypatch, db, source)
+    source.unlink()
+    os.mkfifo(source)
+    code, verified = bounded_json(db, "doc", "verify", ITEM)
+    assert (code, [row["status"] for row in verified["data"]["documents"]]) == (4, ["refused"])
+    code, shown = bounded_json(db, "doc", "show", ITEM, "--id", str(event_id), "--content")
+    assert (code, error_code(shown)) == (4, "doc_refused"), shown
+
+
+def test_a_parent_swapped_mid_walk_is_refused_at_read_and_at_add(db, tmp_path, monkeypatch):
+    # T8: the walk has opened the root; the parent becomes a symlink to a
+    # directory holding a file with the same bytes before the walk opens it.
+    root = doc_root(db)
+    body = b"identical bytes on both sides"
+    other = tmp_path / "walk-other"
+    other.mkdir()
+    write(other / "packet.md", body)
+    under_root(db, "walk-read/packet.md", body)
+    under_root(db, "walk-add/packet.md", body)
+    event_id = added_id(monkeypatch, db, root / "walk-read" / "packet.md")
+
+    def swapper(name: str):
+        def swap() -> None:
+            (root / name).rename(tmp_path / f"{name}-moved")
+            (root / name).symlink_to(other, target_is_directory=True)
+        return swap
+
+    ran = _swap_after_opening(monkeypatch, root.name, swapper("walk-read"))
+    code, found, verified = statuses(monkeypatch, db, ITEM, "--id", str(event_id))
+    assert ran == [root.name] and (root / "walk-read").is_symlink(), "the swap did not run"
+    assert (code, found) == (4, ["refused"]), verified
+
+    ran = _swap_after_opening(monkeypatch, root.name, swapper("walk-add"))
+    code, refused, err = add_by_path(
+        monkeypatch, db, root / "walk-add" / "packet.md", role="retro"
+    )
+    assert ran == [root.name] and (root / "walk-add").is_symlink(), "the swap did not run"
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert "goes through a symlink" in refused["error"]["message"]
+    assert len(doc_events(db)) == 1
+
+
+def test_a_file_replaced_between_the_cwd_walk_and_the_root_walk_is_refused_at_add(
+    db, monkeypatch
+):
+    # T8: a relative FILE is walked from the working directory, then its
+    # stored path from the root; a file with the same bytes put in its place
+    # between the two walks is another file, and the add is refused.
+    body = b"the same bytes before and after"
+    source = under_root(db, "packet.md", body)
+    monkeypatch.chdir(Path(db).parent)
+    relative = f"{doc_root(db).name}/packet.md"
+
+    def swap() -> None:
+        source.unlink()
+        write(source, body)
+
+    ran = _swap_after_opening(monkeypatch, "packet.md", swap)
+    code, refused, err = add_by_path(monkeypatch, db, relative)
+    assert ran == ["packet.md"], "the swap did not run"
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert "it changed while it was being added" in refused["error"]["message"]
+    assert doc_events(db) == []
+    # The control: with nothing swapped, the same add lands.
+    code, added, err = add_by_path(monkeypatch, db, relative)
+    assert code == 0, (added, err)
+    assert added["data"]["document"]["path"] == "packet.md"
+
+
+def test_a_symlinked_document_root_is_refused_at_add_and_reads_refused(
+    db, tmp_path, monkeypatch
+):
+    # T9
+    body = b"behind a symlinked root"
+    real = tmp_path / "real-documents"
+    real.mkdir()
+    write(real / "a.md", body)
+    doc_root(db).symlink_to(real, target_is_directory=True)
+    code, refused, err = add_by_path(monkeypatch, db, doc_root(db) / "a.md")
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    monkeypatch.chdir(Path(db).parent)
+    code, refused, err = add_by_path(monkeypatch, db, f"{doc_root(db).name}/a.md")
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert doc_events(db) == []
+    doc_root(db).unlink()
+    event_id = added_id(monkeypatch, db, under_root(db, "a.md", body))
+    doc_root(db).rename(tmp_path / "root-moved")
+    doc_root(db).symlink_to(real, target_is_directory=True)
+    _assert_read_refused(monkeypatch, db, event_id, "refused", "doc_refused")
+
+
+def test_an_absolute_file_is_placed_under_the_root_in_either_spelling_and_nowhere_else(
+    db, tmp_path, monkeypatch
+):
+    # T10: the alias stands in for macOS's /tmp, /var and /etc.
+    home = Path(db).parent
+    alias = tmp_path / "alias"
+    alias.symlink_to(home, target_is_directory=True)
+    spelled_db = str(alias / Path(db).name)
+    spelled_root = alias / doc_root(db).name
+    body = b"one file, two spellings"
+    under_root(db, "notes/n.md", body)
+    code, physical, err = add_by_path(monkeypatch, db, doc_root(db) / "notes" / "n.md")
+    assert code == 0, err
+    code, spelled, err = add_by_path(
+        monkeypatch, spelled_db, spelled_root / "notes" / "n.md", role="retro"
+    )
+    assert code == 0, (spelled, err)
+    assert physical["data"]["document"]["path"] == spelled["data"]["document"]["path"] == (
+        "notes/n.md"
+    )
+    assert physical["data"]["document"]["event_id"] != spelled["data"]["document"]["event_id"]
+    # The physical spelling is accepted with the database named through the
+    # alias too; the alias spelling is not accepted when the database was
+    # named physically.
+    code, again, err = add_by_path(monkeypatch, spelled_db, doc_root(db) / "notes" / "n.md")
+    assert (code, again["data"]["unchanged"]) == (0, True), (again, err)
+    sibling = home / (doc_root(db).name + "2") / "n.md"
+    sibling.parent.mkdir()
+    write(sibling, body)
+    outside = write(tmp_path / "outside.md", body)
+    for given in (spelled_root / "notes" / "n.md", outside, sibling):
+        code, refused, err = add_by_path(monkeypatch, db, given, role="packet")
+        assert (code, error_code(refused)) == (3, "doc_outside_root"), (given, refused, err)
+        assert f"not under the document root {doc_root(db)}" in refused["error"]["message"]
+    assert len(doc_events(db)) == 2
+
+
+def test_a_relative_file_is_placed_from_the_physical_working_directory(
+    db, tmp_path, monkeypatch
+):
+    # T11
+    body = b"relative"
+    under_root(db, "sub/r.md", body)
+    write(tmp_path / "r.md", body)
+    monkeypatch.chdir(tmp_path)
+    code, refused, err = add_by_path(monkeypatch, db, "r.md")
+    assert (code, error_code(refused)) == (3, "doc_outside_root"), (refused, err)
+    monkeypatch.chdir(Path(db).parent)
+    code, added, err = add_by_path(monkeypatch, db, f"{doc_root(db).name}/sub/r.md")
+    assert code == 0, err
+    assert added["data"]["document"]["path"] == "sub/r.md"
+    monkeypatch.chdir(doc_root(db) / "sub")
+    code, again, err = add_by_path(monkeypatch, db, "r.md", role="retro")
+    assert code == 0, err
+    assert again["data"]["document"]["path"] == "sub/r.md"
+
+
+def test_a_relative_by_path_file_from_a_deleted_working_directory_is_refused(
+    db, tmp_path, monkeypatch
+):
+    # T11: with no working directory to read, a relative FILE has no place.
+    gone = tmp_path / "gone-cwd"
+    gone.mkdir()
+    monkeypatch.chdir(gone)
+    gone.rmdir()
+    code, refused, err = add_by_path(monkeypatch, db, "a.md")
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert "the working directory cannot be read" in refused["error"]["message"]
+    assert doc_events(db) == []
+
+
+@pytest.mark.parametrize(
+    ("given", "reason"),
+    [
+        ("", "it is empty"),
+        ("{root}/sub/../a.md", "'..' component"),
+        ("{root}/../{name}/a.md", "'..' component"),
+        ("{root}/a.md/", "it names a directory"),
+        ("{root}/sub/.", "it names a directory"),
+        ("{root}", "it names the document root"),
+        ("{root}/", "it names a directory"),
+        ("{root}/bad\udcff.md", "its name is not UTF-8"),
+        ("{root}/a\x1b[2J.md", "holds a control character"),
+        ("{root}/" + "é" * 128, "has a component over 255 bytes"),
+    ],
+)
+def test_a_by_path_file_with_no_stored_spelling_is_refused(db, monkeypatch, given, reason):
+    # T12
+    under_root(db, "a.md", b"a")
+    (doc_root(db) / "sub").mkdir()
+    given = given.format(root=doc_root(db), name=doc_root(db).name)
+    code, refused, err = add_by_path(monkeypatch, db, given)
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert reason in refused["error"]["message"]
+    assert "\x1b" not in refused["error"]["message"] + err
+    assert doc_events(db) == []
+
+
+def test_doubled_slashes_and_dot_components_are_dropped_from_the_stored_path(db, monkeypatch):
+    # T12
+    under_root(db, "sub/deep/a.md", b"dropped")
+    root = doc_root(db)
+    for role, given in (("brief", f"{root}//sub/.//deep/./a.md"), ("retro", f"/{root}/./sub/deep/a.md")):
+        code, added, err = add_by_path(monkeypatch, db, given, role=role)
+        assert code == 0, (given, err)
+        assert added["data"]["document"]["path"] == "sub/deep/a.md", given
+
+
+def test_by_path_from_standard_input_and_a_file_over_the_limit_are_usage_errors(
+    db, monkeypatch
+):
+    # T13
+    code, refused, err = add_by_path(monkeypatch, db, "-")
+    assert (code, error_code(refused)) == (2, "usage"), (refused, err)
+    assert "standard input has no path to store" in refused["error"]["message"]
+    doc_root(db).mkdir()
+    big = doc_root(db) / "big.bin"
+    with open(big, "wb") as handle:
+        handle.truncate(DOC_PATH_LIMIT + 1)
+    code, refused, err = add_by_path(monkeypatch, db, big)
+    assert (code, error_code(refused)) == (2, "usage"), (refused, err)
+    assert "over the 16777216-byte by-path limit" in refused["error"]["message"]
+    assert doc_events(db) == []
+    exact = doc_root(db) / "exact.bin"
+    with open(exact, "wb") as handle:
+        handle.truncate(DOC_PATH_LIMIT)
+    code, added, err = add_by_path(monkeypatch, db, exact)
+    assert code == 0, err
+    assert added["data"]["document"]["size"] == DOC_PATH_LIMIT
+
+
+def test_a_credential_shape_in_a_by_path_file_is_refused_unless_the_flag_marks_it(
+    db, monkeypatch
+):
+    # T14
+    sample = SAMPLES["github-token"]
+    body = wrap(sample)
+    source = under_root(db, "notes.md", body)
+    code, refused, err = add_by_path(monkeypatch, db, source)
+    assert (code, error_code(refused)) == (3, "doc_credential_shape"), (refused, err)
+    assert refused["error"]["message"] == _refusal(str(source), "github-token", body.index(sample))
+    _assert_no_sample(sample, json.dumps(refused), err)
+    assert doc_events(db) == []
+    code, added, err = add_by_path(monkeypatch, db, source, "--allow-credential-shapes")
+    assert code == 0, err
+    assert added["data"]["credential_override"] is True
+    [stored] = doc_events(db)
+    assert stored.payload["credential_override"] is True
+    assert stored.payload["path"] == "notes.md" and "content_b64" not in stored.payload
+
+
+def test_the_same_bytes_and_role_by_path_or_inline_are_one_document(db, tmp_path, monkeypatch):
+    # T15
+    body = b"the same bytes"
+    first = under_root(db, "one.md", body)
+    second = under_root(db, "two.md", body)
+    event_id = added_id(monkeypatch, db, first)
+    for given in (first, second):
+        code, again, err = add_by_path(monkeypatch, db, given)
+        assert code == 0, err
+        assert again["data"]["unchanged"] is True, given
+        assert again["data"]["document"]["event_id"] == event_id
+        assert again["data"]["document"]["path"] == "one.md"
+    inline_body = b"inline first"
+    code, inline, err = add(monkeypatch, db, write(tmp_path / "inline.md", inline_body))
+    assert code == 0, err
+    code, by_path, err = add_by_path(monkeypatch, db, under_root(db, "three.md", inline_body))
+    assert code == 0, err
+    assert by_path["data"]["unchanged"] is True
+    assert by_path["data"]["document"] == inline["data"]["document"]
+    assert by_path["data"]["document"]["storage"] == "inline"
+    assert len(doc_events(db)) == 2
+
+
+BAD_STORED_PATHS = {
+    "absolute": "/etc/passwd",
+    "empty": "",
+    "trailing-slash": "a/",
+    "doubled-slash": "a//b.md",
+    "single-dot": "a/./b.md",
+    "leading-single-dot": "./b.md",
+    "double-dot": "a/../b.md",
+    "leading-double-dot": "../b.md",
+    "control-character": "a\x1bb.md",
+    "nul": "a\x00b.md",
+    "over-1024-bytes": "/".join(["abcd"] * 206),
+    "component-over-255-bytes": "é" * 128,
+    "not-utf-8": "a\udcff.md",
+}
+
+
+def _path_payload(**changes) -> dict:
+    payload = {"role": "brief", "sha256": "a" * 64, "size": 3, "mime": "text/plain",
+               "path": "a.md"}
+    payload.update(changes)
+    return payload
+
+
+@pytest.mark.parametrize("name", sorted(BAD_STORED_PATHS))
+def test_validate_payload_refuses_a_malformed_stored_path(name):
+    # T16
+    with pytest.raises(ValidationError, match="^bad-doc-path:path$"):
+        validate_payload(DOC_KIND, _path_payload(path=BAD_STORED_PATHS[name]))
+
+
+def test_validate_payload_takes_the_boundaries_and_refuses_the_storage_shapes_and_size():
+    # T16
+    assert len("/".join(["abcd"] * 205).encode()) == 1024
+    validate_payload(DOC_KIND, _path_payload(path="/".join(["abcd"] * 205)))
+    validate_payload(DOC_KIND, _path_payload(path="x" * 255 + "/" + "é" * 127))
+    validate_payload(DOC_KIND, _path_payload(size=DOC_PATH_LIMIT))
+    with pytest.raises(ValidationError, match="^bad-type:path$"):
+        validate_payload(DOC_KIND, _path_payload(path=7))
+    inline = {k: v for k, v in _path_payload().items() if k != "path"}
+    for payload in (inline, {**_path_payload(), "content_b64": ""}):
+        with pytest.raises(ValidationError, match="^exactly-one-of:content_b64,path$"):
+            validate_payload(DOC_KIND, payload)
+    for payload in (_path_payload(size=DOC_PATH_LIMIT + 1),
+                    {**inline, "content_b64": "", "size": DOC_PATH_LIMIT + 1}):
+        with pytest.raises(ValidationError, match="^too-large:size$"):
+            validate_payload(DOC_KIND, payload)
+
+
+@pytest.mark.parametrize("name", [*sorted(BAD_STORED_PATHS), "both", "neither", "oversize"])
+def test_replay_events_refuses_a_malformed_by_path_document(db, tmp_path, monkeypatch, name):
+    # T16
+    body = b"replayed"
+    added_id(monkeypatch, db, under_root(db, "a.md", body))
+    with open_ledger(db, create=False) as lg:
+        events = lg.events()
+    document = events[-1]
+    assert document.kind == DOC_KIND
+    payload = dict(document.payload)
+    if name == "both":
+        payload["content_b64"] = base64.b64encode(body).decode("ascii")
+        reason = "exactly-one-of:content_b64,path"
+    elif name == "neither":
+        del payload["path"]
+        reason = "exactly-one-of:content_b64,path"
+    elif name == "oversize":
+        payload["size"] = DOC_PATH_LIMIT + 1
+        reason = "too-large:size"
+    else:
+        payload["path"] = BAD_STORED_PATHS[name]
+        reason = "bad-doc-path:path"
+    forged = [*events[:-1], dataclasses.replace(document, payload=payload)]
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        with pytest.raises(
+            LedgerError,
+            match=rf"^restore refuses event {document.id} \(doc\.attached\): {reason}$",
+        ):
+            replay_events(fresh, forged)
+        assert fresh.events() == [], "a refused replay inserted events"
+
+
+def test_a_restored_by_path_document_reads_under_the_restoring_databases_root(
+    db, tmp_path, monkeypatch
+):
+    # T17
+    body = b"restored as a reference\n"
+    source = under_root(db, "r/doc.md", body)
+    event_id = added_id(monkeypatch, db, source)
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, tmp_path / "export")
+    dest = tmp_path / "restored" / "ledger.db"
+    restore_export(tmp_path / "export", dest, system="home")
+    assert [e.payload for e in doc_events(str(dest))] == [e.payload for e in doc_events(db)]
+    assert not doc_root(str(dest)).exists()
+    # The source root still holds the file; the restored ledger never reads it.
+    assert source.read_bytes() == body
+    _assert_read_refused(monkeypatch, str(dest), event_id, "missing", "doc_missing")
+    under_root(str(dest), "r/doc.md", body)
+    code, found, verified = statuses(monkeypatch, str(dest))
+    assert (code, found) == (0, ["ok"]), verified
+    code, out, err = cli(
+        monkeypatch, str(dest), "doc", "show", ITEM, "--id", str(event_id), "--content"
+    )
+    assert (code, out) == (0, body.decode()), err
+
+
+def _record_file_opens(monkeypatch) -> list[tuple[str, object]]:
+    """Every ``os.open`` and ``io.open`` of a path, as ``(path, dir_fd)``."""
+    opened: list[tuple[str, object]] = []
+    real_os_open = os.open
+    real_io_open = io.open
+
+    def recording_os_open(path, *args, **kwargs):
+        opened.append((os.fsdecode(path), kwargs.get("dir_fd")))
+        return real_os_open(path, *args, **kwargs)
+
+    def recording_io_open(file, *args, **kwargs):
+        if isinstance(file, (str, bytes, os.PathLike)):
+            opened.append((os.fsdecode(file), None))
+        return real_io_open(file, *args, **kwargs)
+
+    _patch_open(monkeypatch, recording_os_open)
+    monkeypatch.setattr(io, "open", recording_io_open)
+    monkeypatch.setattr(builtins, "open", recording_io_open)
+    return opened
+
+
+def _opened_under(opened: list[tuple[str, object]], *roots: Path) -> list:
+    """The opens that reached a document file: any descriptor-relative open
+    (the walk's), and any path at or under one of ``roots``."""
+    return [
+        (path, dir_fd) for path, dir_fd in opened
+        if dir_fd is not None
+        or any(path == str(root) or path.startswith(f"{root}/") for root in roots)
+    ]
+
+
+def test_restore_replay_and_export_open_no_document_file(db, tmp_path, monkeypatch):
+    # T18
+    source = under_root(db, "r/doc.md", b"clean when it was added\n")
+    event_id = added_id(monkeypatch, db, source)
+    sample = SAMPLES["openai-key"]
+    source.write_bytes(wrap(sample))
+    export = tmp_path / "export"
+    dest = tmp_path / "restored" / "ledger.db"
+    fresh_db = tmp_path / "fresh" / "ledger.db"
+    fresh_db.parent.mkdir()
+    under_root(str(dest), "r/doc.md", b"placed under the restored root")
+    under_root(str(fresh_db), "r/doc.md", b"placed under the fresh root")
+    with monkeypatch.context() as hook:
+        opened = _record_file_opens(hook)
+        with open_ledger(db, create=False) as lg:
+            export_events(lg, export)
+            events = lg.events()
+        restore_export(export, dest, system="home")
+        with open_ledger(fresh_db) as fresh:
+            replay_events(fresh, events)
+    assert any(path.startswith(f"{export}/") for path, _fd in opened), "the hook saw no write"
+    assert _opened_under(opened, doc_root(db), doc_root(str(dest)), doc_root(str(fresh_db))) == []
+    text = (export / event_filename(event_id)).read_text(encoding="utf-8")
+    record = json.loads(text)
+    assert record["payload"]["path"] == "r/doc.md"
+    assert "content_b64" not in record["payload"]
+    _assert_no_sample(sample, text)
+    assert [e.payload for e in doc_events(str(dest))] == [record["payload"]]
+    assert [e.payload for e in doc_events(str(fresh_db))] == [record["payload"]]
+
+
+def test_show_and_the_context_card_list_a_by_path_document_whose_file_is_gone(
+    db, monkeypatch
+):
+    # T19: both read events only, and open no document file.
+    source = under_root(db, "gone.md", b"soon gone")
+    event_id = added_id(monkeypatch, db, source, "--title", "Gone")
+    source.unlink()
+    with monkeypatch.context() as hook:
+        opened = _record_file_opens(hook)
+        code, shown, err = cli_json(monkeypatch, db, "doc", "show", ITEM)
+        assert code == 0, err
+        code, out, err = cli(monkeypatch, db, "doc", "show", ITEM)
+        assert code == 0, err
+        code, card, err = invoke(monkeypatch, ["--db", db, "context", ITEM])
+        assert code == 0, err
+    assert _opened_under(opened, doc_root(db)) == []
+    [row] = shown["data"]["documents"]
+    assert (row["event_id"], row["storage"], row["path"]) == (event_id, "path", "gone.md")
+    assert out.endswith("\tpath\tgone.md\tGone\n")
+    assert f"event={event_id} brief: Gone" in card
+
+
+def test_a_platform_without_no_follow_refuses_a_by_path_add_and_reads_refused(
+    db, monkeypatch
+):
+    # T20
+    event_id = added_id(monkeypatch, db, under_root(db, "p.md", b"added on a capable platform"))
+    other = under_root(db, "q.md", b"never added")
+    with monkeypatch.context() as platform:
+        platform.delattr(os, "O_NOFOLLOW")
+        code, refused, err = add_by_path(monkeypatch, db, other)
+        assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+        assert "cannot open a path without following symlinks" in refused["error"]["message"]
+        _assert_read_refused(monkeypatch, db, event_id, "refused", "doc_refused", child=False)
+    assert len(doc_events(db)) == 1
+    # The control: the same read on a capable platform is ok.
+    code, found, verified = statuses(monkeypatch, db)
+    assert (code, found) == (0, ["ok"]), verified
+
+
+def test_the_by_path_walk_leaks_no_descriptor_accepted_or_refused(db, tmp_path, monkeypatch):
+    # T21
+    root = doc_verb.document_root(db)
+    nested = doc_root(db) / "a" / "b"
+    nested.mkdir(parents=True)
+    write(nested / "doc.md", b"counted")
+    (doc_root(db) / "a" / "link").symlink_to(nested, target_is_directory=True)
+    (doc_root(db) / "a" / "leaf-link.md").symlink_to(nested / "doc.md")
+    os.mkfifo(doc_root(db) / "a" / "pipe")
+    write(tmp_path / "outside.md", b"counted")
+    monkeypatch.chdir(Path(db).parent)
+    name = doc_root(db).name
+    before = _open_descriptors()
+    for accepted in (str(nested / "doc.md"), f"{name}/a/b/doc.md"):
+        assert doc_verb._read_by_path(accepted, root) == ("a/b/doc.md", b"counted")
+        assert _open_descriptors() == before, accepted
+    for refused in (
+        str(doc_root(db) / "a" / "link" / "doc.md"),
+        f"{name}/a/link/doc.md",
+        str(doc_root(db) / "a" / "leaf-link.md"),
+        f"{name}/a/leaf-link.md",
+        str(doc_root(db) / "a" / "missing" / "doc.md"),
+        str(nested),
+        str(doc_root(db) / "a" / "pipe"),
+        f"{name}/a/pipe",
+        str(tmp_path / "outside.md"),
+        f"{name}/a/../a/b/doc.md",
+    ):
+        with pytest.raises(CliError) as caught:
+            doc_verb._read_by_path(refused, root)
+        assert caught.value.code in ("doc_unreadable", "doc_outside_root"), refused
+        assert _open_descriptors() == before, refused
+    added_id(monkeypatch, db, nested / "doc.md")
+    [event] = doc_events(db)
+    before = _open_descriptors()
+    for stored, status in (
+        ("a/b/doc.md", "ok"),
+        ("a/link/doc.md", "refused"),
+        ("a/leaf-link.md", "refused"),
+        ("a/missing/doc.md", "missing"),
+        ("a/b", "refused"),
+        ("a/pipe", "refused"),
+    ):
+        probe = dataclasses.replace(event, payload={**event.payload, "path": stored})
+        assert doc_verb.document_status(probe, root)[0] == status, stored
+        assert _open_descriptors() == before, stored
+
+
+def test_a_file_replaced_by_a_hard_link_to_identical_bytes_reads_ok(db, tmp_path, monkeypatch):
+    # T22, the boundary pinned: a hard link is a second name for a regular
+    # file, not a symlink, so the walk reads it like any other file.
+    body = b"the boundary: a hard link is a regular file"
+    source = under_root(db, "h.md", body)
+    event_id = added_id(monkeypatch, db, source)
+    elsewhere = write(tmp_path / "elsewhere.md", body)
+    source.unlink()
+    os.link(elsewhere, source)
+    assert os.stat(source).st_nlink == 2 and not source.is_symlink()
+    code, found, verified = statuses(monkeypatch, db)
+    assert (code, found) == (0, ["ok"]), verified
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM, "--id", str(event_id), "--content")
+    assert (code, out) == (0, body.decode()), err
+
+
+def test_stored_paths_and_filenames_are_escaped_in_show_and_in_refusals(
+    db, tmp_path, monkeypatch
+):
+    under_root(db, "line sep.md", b"escaped")
+    added_id(monkeypatch, db, doc_root(db) / "line sep.md")
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM)
+    assert code == 0, err
+    assert " " not in out and out.endswith("\tpath\tline\\u2028sep.md\n")
+    outside = tmp_path / f"out{OSC52}.md"
+    code, out, err = cli(
+        monkeypatch, db, "doc", "add", ITEM, str(outside), "--role", "retro", "--by-path"
+    )
+    assert code == 3
+    _assert_escaped(out, err, f"out{OSC52_ESCAPED}.md by path: it is not under the document root")
+
+
+# ---- the stored path is scanned for credential shapes ---------------------------------
+#
+# The bytes in these tests are clean: only the stored path holds a shape, so
+# only a scan of the path can refuse it. A shape in the path never reaches a
+# message: the refusal names the shape and says it was in the path.
+
+
+def _shaped_dir(sample: bytes) -> str:
+    """A directory name that is ``sample`` itself, so the stored path holds it."""
+    return sample.decode()
+
+
+def _path_refusal(shape: str) -> str:
+    return (
+        f"the path to store holds a credential shape ({shape} in the path); the path "
+        "is not shown, and nothing was written. Pass --allow-credential-shapes to "
+        "attach it anyway"
+    )
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_a_credential_shape_in_the_stored_path_is_refused_at_add_unless_the_flag_marks_it(
+    db, monkeypatch, shape
+):
+    sample = SAMPLES[shape]
+    source = under_root(db, f"{_shaped_dir(sample)}/notes.md", b"clean notes\n")
+    with monkeypatch.context() as hook:
+        opened = _record_file_opens(hook)
+        code, refused, err = add_by_path(monkeypatch, db, source)
+    assert (code, error_code(refused)) == (3, "doc_credential_shape"), (refused, err)
+    assert refused["error"]["message"] == _path_refusal(shape)
+    _assert_no_sample(sample, json.dumps(refused), err)
+    assert _opened_under(opened, doc_root(db)) == [], "a file was opened before the scan"
+    code, out, err = cli(
+        monkeypatch, db, "doc", "add", ITEM, str(source), "--role", "brief", "--by-path"
+    )
+    assert (code, out) == (3, "")
+    assert _path_refusal(shape) in err
+    _assert_no_sample(sample, out, err)
+    # A relative FILE that does not spell the shape: the stored path still
+    # holds it, and the stored path is what is scanned.
+    monkeypatch.chdir(source.parent)
+    code, refused, err = add_by_path(monkeypatch, db, "notes.md")
+    assert (code, error_code(refused)) == (3, "doc_credential_shape"), (refused, err)
+    assert refused["error"]["message"] == _path_refusal(shape)
+    assert doc_events(db) == []
+    code, added, err = add_by_path(monkeypatch, db, source, "--allow-credential-shapes")
+    assert code == 0, err
+    assert added["data"]["credential_override"] is True
+    [stored] = doc_events(db)
+    assert stored.payload["credential_override"] is True
+    assert stored.payload["path"] == f"{_shaped_dir(sample)}/notes.md"
+
+
+def test_a_clean_stored_path_with_the_flag_writes_no_marker(db, monkeypatch):
+    code, added, err = add_by_path(
+        monkeypatch, db, under_root(db, "plain/notes.md", b"clean"), "--allow-credential-shapes"
+    )
+    assert code == 0, err
+    assert added["data"]["credential_override"] is False
+    [stored] = doc_events(db)
+    assert "credential_override" not in stored.payload
+
+
+def _path_credential_refused(event_id: int, shape: str) -> str:
+    return re.escape(
+        f"restore refuses event {event_id} (doc.attached): restore_doc_credential: "
+        f"its stored path holds a credential shape ({shape} in the path) and it carries "
+        "no credential_override; the path is not shown"
+    )
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_restore_and_replay_refuse_an_unmarked_credential_in_a_stored_path(
+    db, tmp_path, monkeypatch, shape
+):
+    sample = SAMPLES[shape]
+    event_id = added_id(
+        monkeypatch, db, under_root(db, f"{_shaped_dir(sample)}/n.md", b"clean\n"),
+        "--allow-credential-shapes",
+    )
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, export)
+        events = lg.events()
+    # The control: marked, it restores and replays.
+    restore_export(export, tmp_path / "marked" / "ledger.db", system="home")
+    with open_ledger(tmp_path / "marked-replay.db") as fresh:
+        replay_events(fresh, events)
+    document = events[-1]
+    assert (document.id, document.kind) == (event_id, DOC_KIND)
+    payload = {k: v for k, v in document.payload.items() if k != "credential_override"}
+    forged = dataclasses.replace(document, payload=payload)
+    forged = dataclasses.replace(forged, hash=event_digest(hash_body(forged)))
+    (export / event_filename(forged.id)).write_text(
+        canonical_dumps(event_record(forged)) + "\n", encoding="utf-8"
+    )
+    dest = tmp_path / "restored" / "ledger.db"
+    with pytest.raises(LedgerError, match=_path_credential_refused(event_id, shape)) as caught:
+        restore_export(export, dest, system="home")
+    _assert_no_sample(sample, str(caught.value))
+    assert not any(dest.parent.glob("ledger.db*")), "a refused restore left files behind"
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        with pytest.raises(LedgerError, match=_path_credential_refused(event_id, shape)) as caught:
+            replay_events(fresh, [*events[:-1], forged])
+        assert fresh.events() == [], "a refused replay inserted events"
+    _assert_no_sample(sample, str(caught.value))
+
+
+def _store_unmarked_path(db: str, path: str) -> int:
+    """Store a by-path document with ``path`` and no marker, through the
+    writer's own capability: the add-time scan is bypassed, as a store an
+    older ledger left behind. Returns its id."""
+    body = b"clean\n"
+    payload = {
+        "role": "brief",
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "size": len(body),
+        "mime": "text/plain",
+        "path": path,
+    }
+    with open_ledger(db, create=False) as lg:
+        event = lg._append_doc_event(
+            doc_verb._DOC_WRITER_CAPABILITY, kind=DOC_KIND, payload=payload,
+            item_id=ITEM, idempotency_key="unmarked-path",
+        )
+    return event.id
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_export_refuses_an_unmarked_credential_in_a_stored_path_and_writes_nothing(
+    db, tmp_path, monkeypatch, shape
+):
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, export)
+    before = _export_state(export)
+    watermark = read_watermark(export)
+    sample = SAMPLES[shape]
+    event_id = _store_unmarked_path(db, f"{_shaped_dir(sample)}/n.md")
+    message = (
+        f"export refuses event {event_id} (doc.attached) on item {ITEM}: "
+        f"export_doc_credential: its stored path holds a credential shape ({shape} in "
+        "the path) and it carries no credential_override; the path is not shown, and "
+        "nothing was written"
+    )
+    with open_ledger(db, create=False) as lg:
+        with pytest.raises(ExportDocCredential) as caught:
+            export_events(lg, export)
+    assert str(caught.value) == message
+    _assert_no_sample(sample, str(caught.value))
+    assert _export_state(export) == before, "a refused export wrote a file"
+    assert read_watermark(export) == watermark
+    code, refused, err = cli_json(monkeypatch, db, "export", "--dir", str(export))
+    assert (code, error_code(refused)) == (3, "export_doc_credential"), (refused, err)
+    assert refused["error"]["message"] == message
+    _assert_no_sample(sample, json.dumps(refused), err)
+    assert _export_state(export) == before, "a refused export wrote a file"
+
+
+def test_a_marked_credential_in_a_stored_path_exports(db, tmp_path, monkeypatch):
+    sample = SAMPLES["slack-token"]
+    event_id = added_id(
+        monkeypatch, db, under_root(db, f"{_shaped_dir(sample)}/n.md", b"clean\n"),
+        "--allow-credential-shapes",
+    )
+    export = tmp_path / "export"
+    code, exported, err = cli_json(monkeypatch, db, "export", "--dir", str(export))
+    assert code == 0, (exported, err)
+    record = json.loads((export / event_filename(event_id)).read_text(encoding="utf-8"))
+    assert record["payload"]["credential_override"] is True
+    assert record["payload"]["path"] == f"{_shaped_dir(sample)}/n.md"
+
+
+@pytest.mark.parametrize("path", [7, None, "a\udcff.md"])
+def test_export_refuses_a_stored_path_it_cannot_scan(db, monkeypatch, path):
+    # Fail closed: a stored path that is not UTF-8 text cannot be scanned,
+    # so it is not exported either. The schema keeps such a path out of the
+    # store; this pins the export scan on its own.
+    event_id = added_id(monkeypatch, db, under_root(db, "n.md", b"clean\n"))
+    [document] = doc_events(db)
+    forged = dataclasses.replace(document, payload={**document.payload, "path": path})
+    with pytest.raises(
+        ExportDocCredential,
+        match=re.escape(
+            f"export refuses event {event_id} (doc.attached) on item {ITEM}: "
+            "export_doc_credential: its stored path is not UTF-8 text, so it cannot be "
+            "scanned for credential shapes; nothing was written"
+        ),
+    ):
+        refuse_unmarked_credentials([forged])
+    refuse_unmarked_credentials([document])
+
+
+# ---- the stored spelling is the spelling on disk ------------------------------------
+
+
+def _case_folding_open(monkeypatch) -> None:
+    """Make a descriptor-relative ``os.open`` fold case as a case-insensitive
+    volume does, so the test sees the same on every volume: a name that an
+    entry matches only in another case opens that entry."""
+    real_open = os.open
+
+    def folding_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None:
+            name = os.fspath(path)
+            entries = os.listdir(dir_fd)
+            if name not in entries:
+                folded = [entry for entry in entries if entry.lower() == name.lower()]
+                if folded:
+                    path = folded[0]
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    _patch_open(monkeypatch, folding_open)
+
+
+def test_a_by_path_file_spelled_otherwise_than_its_name_on_disk_is_refused(
+    db, monkeypatch
+):
+    body = b"one file, one stored spelling\n"
+    under_root(db, "Notes/Packet.md", body)
+    root = doc_root(db)
+    document_root = doc_verb.document_root(db)
+    monkeypatch.chdir(Path(db).parent)
+    with monkeypatch.context() as volume:
+        _case_folding_open(volume)
+        # The simulated volume opens a name in another case.
+        root_fd = os.open(root, os.O_RDONLY)
+        try:
+            notes_fd = os.open("notes", os.O_RDONLY, dir_fd=root_fd)
+            try:
+                leaf_fd = os.open("packet.md", os.O_RDONLY, dir_fd=notes_fd)
+                try:
+                    assert os.read(leaf_fd, 100) == body
+                finally:
+                    os.close(leaf_fd)
+            finally:
+                os.close(notes_fd)
+        finally:
+            os.close(root_fd)
+        before = _open_descriptors()
+        for given in (
+            str(root / "notes" / "Packet.md"),
+            str(root / "Notes" / "packet.md"),
+            str(root / "NOTES" / "PACKET.MD"),
+            f"{root.name}/notes/Packet.md",
+            f"{root.name}/Notes/packet.md",
+        ):
+            with pytest.raises(CliError) as caught:
+                doc_verb._read_by_path(given, document_root)
+            assert caught.value.code == "doc_unreadable", given
+            assert "differs from the name on disk" in str(caught.value), given
+            assert _open_descriptors() == before, given
+        code, refused, err = add_by_path(monkeypatch, db, root / "notes" / "Packet.md")
+        assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+        assert "differs from the name on disk" in refused["error"]["message"]
+        assert doc_events(db) == []
+        code, added, err = add_by_path(monkeypatch, db, root / "Notes" / "Packet.md")
+        assert code == 0, err
+        assert added["data"]["document"]["path"] == "Notes/Packet.md"
+    # On the real volume, case-sensitive or not, another spelling is refused
+    # doc_unreadable (absent there, or a spelling that differs from the disk).
+    code, refused, err = add_by_path(monkeypatch, db, root / "notes" / "packet.md", role="retro")
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert len(doc_events(db)) == 1
+    code, found, verified = statuses(monkeypatch, db)
+    assert (code, found) == (0, ["ok"]), verified

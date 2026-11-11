@@ -32,7 +32,7 @@ Event kinds (`ledger/schema.py`):
 |------|---------|------------|
 | `item.created`, `item.state`, `item.note`, `item.linked` | the item and its status, notes and links | durable |
 | `item.spec` | one version of the item's spec (written only by `spec set`) | durable |
-| `doc.attached` | a document attached to the item, its bytes inline (written only by `doc add`) | durable |
+| `doc.attached` | a document attached to the item, its bytes inline or its path under the document root (written only by `doc add`) | durable |
 | `item.tried`, `item.stopped` | what was tried, and where work stopped | durable |
 | `item.progress` | progress bookkeeping; may extend a claim's lease | ephemeral |
 | `decision.asked`, `decision.elected`, `decision.held` | open questions, their answers, and a hold on a question | durable |
@@ -63,9 +63,15 @@ itself. The anchor's card lists its children with a `closed/total` count, and
 A *document* is a file attached to an item as one `doc.attached` event
 (`ledger doc add`). It is content-addressed: the ledger computes its sha256
 and size from the bytes it read, and a caller never supplies them, which is
-why `append` refuses the kind. Documents are inline-only: the bytes are
-stored base64 in the event, so the hash chain covers them, and a file over
-the 64 KiB inline limit is refused. `doc add` opens the file one path
+why `append` refuses the kind. A document has one of two storages. *Inline*
+(the default): the bytes are stored base64 in the event, so the hash chain
+covers them, and a file over the 64 KiB inline limit is refused. *By path*
+(`doc add --by-path`, up to 16 MiB): the event stores the file's path
+relative to the database's *document root*, the directory beside the
+database file named as the database file plus `.documents`
+(`work.db.documents` beside `work.db`), and the file stays where the caller
+put it; the hash chain covers the path, sha256 and size, not the bytes. The
+ledger never writes under the root. `doc add` opens the file one path
 component at a time, from `/` (or from the current directory for a relative
 path), each open relative to the directory opened before it and none
 following a symlink. A symlink at any component not yet opened is refused
@@ -73,37 +79,58 @@ rather than followed, including one swapped in while the walk runs. A
 directory replaced after the walk opened it does not redirect the walk,
 because later opens are relative to the descriptor already held. A `..`
 component is refused too. On macOS `/tmp`, `/var` and `/etc` are symlinks,
-so pass the real path. `-` reads standard input instead of a file, a
-convenience for piping generated text.
+so pass the real path; a by-path `FILE` may also be spelled through the
+same directory the database path was spelled through. A by-path `FILE` must
+lie under the document root (`doc_outside_root` otherwise), and its walk
+starts at the root, opened without following a symlink. Each component below
+the root must also match its directory's entry byte for byte, so on a
+case-insensitive volume a name spelled otherwise than on disk is refused
+(`doc_unreadable`), never stored in a second spelling. `-` reads standard
+input instead of a file (inline only), a convenience for piping generated
+text.
 
 `doc add` attaches whatever bytes the file holds and does not vouch for
 where they came from. The ledger runs as the caller's operating-system user,
 so any process that can run `ledger doc add` with `LEDGER_HARNESS` set (an
 agent lane included) can attach any file that user can read: by its own
 path, through a hard link, or through a copy. No check at `doc add` can tell
-those apart, and none tries. What the ledger does guarantee is that the
-stored sha256 is the digest of the stored bytes, and that a document's bytes
-are never printed or reported `ok` unless they still match it.
+those apart, and none tries; any process running as that user can also put
+any file it can read under the document root, by copy or by hard link. What
+the ledger does guarantee is that the stored sha256 is the digest of the
+bytes it read, and that a document's bytes are never printed or reported
+`ok` unless the bytes read in that call still match it.
 
 `doc add` refuses bytes holding a known credential shape (a private-key
 header, a GitHub, AWS, `sk-` or Slack token) unless it is given
 `--allow-credential-shapes`, which marks the event `credential_override:
-true`. Restore and replay refuse a document holding one without the marker
-(`restore_doc_credential`), and `ledger export` refuses to write one
-(`export_doc_credential`), so a document's bytes holding an unmarked one
-never enter the store or an export file. The scan reads a document's bytes
-only: a `--title`, like other text fields, is not scanned.
+true`; the scan runs on the bytes it read, inline and by path alike, and
+for a by-path add also on the stored path, before any file is opened.
+Restore and replay refuse a document holding one without the marker, in its
+inline bytes or its stored path (`restore_doc_credential`), and `ledger
+export` refuses to write one (`export_doc_credential`), so an unmarked one
+never enters the store or an export file. A by-path document's event holds
+no bytes, so restore, replay and export scan its stored path and open no
+file. A hit in a stored path is named by its shape and said to be in the
+path; the path itself is not shown. A `--title`, like other text fields, is
+not scanned.
 `export --commit` and `export --push` do not run the scan. The scan is a
 tripwire for common shapes, not a secret detector.
 
-Every read verifies the stored bytes and touches nothing else:
-`doc show --content` prints a document's bytes and `doc verify` reports it
-`ok` only when they hash to the stored sha256 and size; otherwise it is a
-`mismatch`, never content. The file a document came from can change or go
-away without affecting it. Restore and replay recompute every document's
-digest before inserting it and refuse a document that names a path, so an
-export cannot bring in a forged one. They also refuse a document whose item
-is neither in the destination nor created earlier in the same batch
+Every read verifies the bytes it read: `doc show --content` prints a
+document's bytes and `doc verify` reports it `ok` only when they hash to the
+stored sha256 and size; otherwise it is never content. An inline document is
+read from the event alone, so the file it came from can change or go away
+without affecting it. A by-path document is read by walking its stored path
+from the document root of the database being read, again on every call,
+without following a symlink at the root or below it: an absent file is
+`missing`, a symlink or a non-regular file `refused`, other bytes a
+`mismatch`. Restore and replay recompute every inline document's digest
+before inserting it, so an export cannot bring in a forged one, and check a
+by-path document's stored path against its grammar (relative to the root,
+no `..`, no control character); its sha256 is the export's claim until a
+read hashes the file, and its path resolves under the restored database's
+own root, never the source's. They also refuse a document whose item is
+neither in the destination nor created earlier in the same batch
 (`restore_doc_item_missing`), and roll back the whole batch.
 
 The views (`ledger/migrations/`) include `v_items` (current state per item),
@@ -358,6 +385,12 @@ or `--max-hours` hours (24) are waiting, for a scheduled alert.
 online backup API (never a file copy of a live database), writes
 `FILE.partial`, runs `PRAGMA integrity_check`, and renames it only when the
 check passes.
+
+Neither the export nor the backup holds a by-path document's bytes, only its
+stored path, sha256 and size: the bytes live only under the database's
+document root (`<name>.documents` beside the database file). Copy that
+directory as well, and after a restore put its tree beside the restored
+database, named after the restored database file, then run `doc verify`.
 
 **Restore** (`ledger/restore.py`). `ledger restore --db NEW --dir DIR
 --system NAME` verifies the export, refuses an export another system
