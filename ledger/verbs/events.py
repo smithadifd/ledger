@@ -8,7 +8,9 @@ by name (``not_found``, exit 1) with nothing printed.
 The text form is one event per line, tab-separated. A text column (kind,
 item, actor) prints ``-`` when empty and escapes every non-printable
 character (tab, newline, other controls) the way ``repr`` writes it, so a
-stored value never splits a line or a column.
+stored value never splits a line or a column. The payload summary goes
+through the same escaping, so no character that ``str.splitlines`` splits
+on (for example U+2028, U+2029 or U+0085) is ever printed raw.
 """
 from __future__ import annotations
 
@@ -45,6 +47,10 @@ _COLUMNS = (
     "SELECT id, kind, item_id, actor, harness, model, session, "
     "recorded_at, payload FROM v_events"
 )
+# Every character ``str.splitlines`` splits a line on. All of them are
+# non-printable today; naming them keeps text output on one line per event
+# even if ``str.isprintable`` ever changes its answer for one.
+LINE_BOUNDARIES = frozenset("\n\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029")
 
 
 def add_arguments(parser) -> None:
@@ -111,8 +117,19 @@ def _payload_summary(payload: object) -> str:
     compact = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
     compact = compact.replace("\n", " ").replace("\r", " ")
     if len(compact) > PAYLOAD_WIDTH:
-        return compact[:PAYLOAD_WIDTH] + "…"
-    return compact
+        compact = compact[:PAYLOAD_WIDTH] + "…"
+    # JSON escapes the C0 controls but leaves U+0085, U+2028 and U+2029 raw;
+    # escape after truncating so an escape is never cut in half.
+    return _escaped(compact)
+
+
+def _escaped(text: str) -> str:
+    """``text`` with every non-printable or line-boundary character escaped
+    as ``repr`` writes it (a tab as ``\\t``, U+2028 as ``\\u2028``)."""
+    return "".join(
+        ch if ch.isprintable() and ch not in LINE_BOUNDARIES else repr(ch)[1:-1]
+        for ch in text
+    )
 
 
 def text_cell(value: object) -> str:
@@ -122,7 +139,7 @@ def text_cell(value: object) -> str:
     if value is None or value == "":
         return "-"
     text = value if isinstance(value, str) else str(value)
-    return "".join(ch if ch.isprintable() else repr(ch)[1:-1] for ch in text)
+    return _escaped(text)
 
 
 def _line(event: dict) -> str:
