@@ -360,6 +360,23 @@ def test_changelog_0_1_16_names_the_pipx_docs_and_the_start_here_page() -> None:
     assert "pipx" in body and "docs/start-here.md" in body
 
 
+def _readme_verb_rows() -> set[str]:
+    """The verb names that have a row in the README's ``## Verbs`` table."""
+    text = README.read_text(encoding="utf-8")
+    section = text.split("\n## Verbs\n", 1)[1].split("\n## ", 1)[0]
+    return set(re.findall(r"^\| `([^`]+)` \|", section, flags=re.MULTILINE))
+
+
+def test_readme_verb_table_has_a_row_for_every_registered_verb() -> None:
+    """A new verb module fails here until its README row exists."""
+    from ledger.verbs import discover_verbs
+
+    registered = set(discover_verbs())
+    assert registered, "the verb registry is empty"
+    missing = sorted(registered - _readme_verb_rows())
+    assert not missing, f"README verb table has no row for: {', '.join(missing)}"
+
+
 DATED_HEADING = re.compile(r"(\d+\.\d+\.\d+) \u2014 \d{4}-\d{2}-\d{2}")
 
 
