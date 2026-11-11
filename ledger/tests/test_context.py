@@ -467,6 +467,18 @@ def test_attached_documents_are_listed_oldest_first(graph, monkeypatch, tmp_path
     assert all(len(entry["sha256"]) == 64 for entry in section["entries"])
 
 
+def test_a_collapsed_documents_section_has_no_entries(graph, monkeypatch, tmp_path) -> None:
+    db, _ids = graph
+    _attach(monkeypatch, db, TARGET, tmp_path / "brief.md", b"# Brief\n", "brief")
+    _attach(monkeypatch, db, TARGET, tmp_path / "retro.md", b"# Retro\n", "retro")
+    code, raw, err = ctx(monkeypatch, db, TARGET, "--json", "--budget", "40")
+    assert code == 0, err
+    section = _documents_section(json.loads(raw)["data"])
+    assert section["rows"] == 2
+    assert section["collapsed"] is True
+    assert (section["lines"], section["entries"]) == ([], [])
+
+
 def test_an_item_with_no_documents_lists_none(graph, monkeypatch, tmp_path) -> None:
     db, _ids = graph
     _attach(monkeypatch, db, "it-a", tmp_path / "other.md", b"elsewhere\n", "brief")

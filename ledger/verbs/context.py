@@ -42,8 +42,10 @@ Depth 2 excludes the target and every depth-1 item, so a cycle ends there.
 
 A linked document reads ``event=<id> <role>: <title> · sha256 <12 hex>``,
 read as ``doc show`` reads the item's documents; the title is escaped as
-``doc show`` escapes it (``-`` when it has none), and the digest is the
-first 12 hex digits of the stored sha256. With ``--json`` the section also
+``doc show`` escapes it (``-`` when it has none) and, as with the other
+free-text rows here, clipped to 30 words with the full-text pointer
+(``doc show`` does not clip), and the digest is the first 12 hex digits of
+the stored sha256. With ``--json`` the section also
 carries ``entries``, one ``{event_id, role, title, sha256}`` per document
 with the full digest, empty when the section is collapsed.
 
