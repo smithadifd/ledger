@@ -2,8 +2,9 @@
 
 The index is ``search.db`` in the ledger database's own directory. It is a
 disposable projection, never a source: ``home.db`` stays events only (ADR
-0034 decision 1), the index is rebuilt from scratch every time, and nothing
-exports or commits it. The ledger is opened with ``open_ledger_readonly``
+0034 decision 1), the index is rebuilt from scratch whenever anything but the
+event log's tail changed (``refresh_index``), and nothing exports or commits
+it. The ledger is opened with ``open_ledger_readonly``
 (``mode=ro``; ``immutable=1`` only when no WAL sidecar exists), so building
 the index never writes the ledger database.
 
@@ -52,6 +53,22 @@ index before it reads, filtered or not. The only ranker is BM25 (``RANKER``);
 it is named in the manifest so a second ranker can be added later and an
 index built by another, or by a version that named none, reads as stale.
 
+When the only difference is events appended after the build (``behind``),
+``refresh_index`` brings the index up to date without re-reading any markdown:
+on a copy of the index, it recomputes the ledger's documents from one read
+snapshot, deletes the indexed ledger documents that no longer match, inserts
+the new ones, and swaps the copy in. The markdown side is kept as it is, which
+is correct only because the manifest's sources (paths, mtimes and sizes),
+roots, format, ranker and database all still match. Anything else, or any
+error on the way, takes the full rebuild instead.
+
+``index_status`` also gives a ``severity`` a reader can colour by: ``ok`` for
+``current``; ``info`` for ``behind``, ``stale`` or ``missing``, which the next
+search or ``ledger index`` brings up to date on its own; ``warn`` when the
+index cannot be built where it is (inside a git work tree, a directory at the
+index path, an index path that cannot be examined, an unusable configuration),
+with that reason added to ``reasons``. Any other status is ``warn``.
+
 The index is opened only when ``lstat`` shows a regular file at its path. A
 FIFO, socket, device, directory or symlink there is never opened (a read-only
 SQLite open blocks on a FIFO): ``index_status`` calls it ``missing`` and names
@@ -66,6 +83,7 @@ import re
 import sqlite3
 import stat
 import tempfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -84,6 +102,12 @@ INDEX_FORMAT = 3
 # ranker (or by a version that recorded none) is stale and gets rebuilt.
 RANKER = "bm25"
 DOC_TYPES = ("item", "decision", "utterance", "standard", "adr", "doc")
+# The document types built from the event log; the rest come from markdown.
+LEDGER_DOC_TYPES = ("item", "decision", "utterance")
+# How a reader colours an index status. ``ok``: current. ``info``: the next
+# search or ``ledger index`` brings it up to date on its own. Any status not
+# named here (``unknown`` included) is ``warn``.
+SEVERITIES = {"current": "ok", "behind": "info", "stale": "info", "missing": "info"}
 UTTERANCE_CAVEAT = "recalled words are evidence, never an origin"
 MAX_LIMIT = 1000
 # One weight per column: doc_type, doc_id, title, content. The two
@@ -701,15 +725,60 @@ def manifest_differences(stored: Mapping[str, Any], current: Mapping[str, Any]) 
     return reasons
 
 
+def severity_for(status: str) -> str:
+    """``ok``, ``info`` or ``warn`` for an index status; an unnamed status is ``warn``."""
+    return SEVERITIES.get(status, "warn")
+
+
+def _build_blocker(
+    resolved: Path, index: Path, fallback_root: FallbackRoot | None
+) -> str | None:
+    """Why building the index at ``index`` would refuse, or ``None``."""
+    if _inside_git(index.parent):
+        return f"refusing to use {SEARCH_DB_NAME} inside a git work tree: {index.parent}"
+    try:
+        found = _lstat_index(index)
+        if found is not None and stat.S_ISDIR(found.st_mode):
+            # A rename cannot replace a directory. Worded as the missing
+            # reason is, so ``index_status`` names it once.
+            return f"{SEARCH_DB_NAME} is a directory, not a regular file: {index}"
+        resolve_roots(load_config(resolved), fallback_root)
+    except SearchError as exc:
+        return str(exc)
+    return None
+
+
 def index_status(db: Path | str, fallback_root: FallbackRoot | None = None) -> dict[str, Any]:
-    """``missing``, ``stale`` (with reasons), ``behind`` or ``current``. Writes nothing.
+    """``missing``, ``stale`` (with reasons), ``behind`` or ``current``, and a
+    ``severity``. Writes nothing.
 
     ``behind`` means the index matches everything it recorded and only newer
     events exist; ``stale`` is a real mismatch (format, ranker, database, roots,
     source files, or an event log that no longer matches what was indexed).
+    ``severity`` is ``severity_for(status)``, or ``warn`` when a rebuild would
+    refuse, with that reason in ``reasons`` (added unless already there). An
+    index whose state cannot be computed because the configuration is unusable
+    reads ``unknown`` (so ``warn``) with the reason, instead of raising.
     """
     resolved = resolve_db_path(db)
     index = search_db_path(resolved)
+    try:
+        result = _index_state(resolved, index, fallback_root)
+    except SearchError as exc:
+        result = {"path": str(index), "status": "unknown", "reasons": [str(exc)]}
+    blocker = _build_blocker(resolved, index, fallback_root)
+    if blocker is None:
+        result["severity"] = severity_for(result["status"])
+    else:
+        if blocker not in result["reasons"]:
+            result["reasons"] = [*result["reasons"], blocker]
+        result["severity"] = "warn"
+    return result
+
+
+def _index_state(
+    resolved: Path, index: Path, fallback_root: FallbackRoot | None
+) -> dict[str, Any]:
     try:
         stored = stored_manifest(index)
     except IndexUnavailable as exc:
@@ -742,6 +811,25 @@ def index_status(db: Path | str, fallback_root: FallbackRoot | None = None) -> d
 # --- build ------------------------------------------------------------------
 
 
+def _insert_doc(conn: sqlite3.Connection, rowid: int, doc: Doc) -> None:
+    conn.execute(
+        "INSERT INTO fts_corpus (rowid, doc_type, doc_id, title, content) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (rowid, doc.doc_type, doc.doc_id, doc.title, doc.content),
+    )
+    if doc.path is not None:
+        conn.execute("INSERT INTO doc_path (rowid, path) VALUES (?, ?)", (rowid, doc.path))
+    conn.execute(
+        "INSERT INTO doc_meta (rowid, item_id, status, date, ts) VALUES (?, ?, ?, ?, ?)",
+        (rowid, doc.item_id, doc.status, doc.date, doc.ts),
+    )
+
+
+def _delete_doc(conn: sqlite3.Connection, rowid: int) -> None:
+    for table in ("fts_corpus", "doc_path", "doc_meta"):
+        conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (rowid,))
+
+
 def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> dict[str, Any]:
     """Rebuild ``search.db`` from scratch and swap it in atomically."""
     resolved = resolve_db_path(db)
@@ -770,18 +858,7 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
             for statement in SCHEMA_SQL:
                 conn.execute(statement)
             for rowid, doc in enumerate(corpus, start=1):
-                conn.execute(
-                    "INSERT INTO fts_corpus (rowid, doc_type, doc_id, title, content) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (rowid, doc.doc_type, doc.doc_id, doc.title, doc.content),
-                )
-                if doc.path is not None:
-                    conn.execute("INSERT INTO doc_path (rowid, path) VALUES (?, ?)", (rowid, doc.path))
-                conn.execute(
-                    "INSERT INTO doc_meta (rowid, item_id, status, date, ts) "
-                    "VALUES (?, ?, ?, ?, ?)",
-                    (rowid, doc.item_id, doc.status, doc.date, doc.ts),
-                )
+                _insert_doc(conn, rowid, doc)
             conn.executemany(
                 "INSERT INTO item_link (item_id, initiative) VALUES (?, ?)", sorted(links)
             )
@@ -820,6 +897,141 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
         "sources": len(manifest["sources"]),
         "note": note,
     }
+
+
+# --- refresh ----------------------------------------------------------------
+
+
+def _indexed_ledger_docs(conn: sqlite3.Connection) -> list[tuple[int, Doc]]:
+    """Every ledger document in the index, with its rowid."""
+    rows = conn.execute(
+        "SELECT fts_corpus.rowid, fts_corpus.doc_type, fts_corpus.doc_id, "
+        "fts_corpus.title, fts_corpus.content, doc_path.path, doc_meta.item_id, "
+        "doc_meta.status, doc_meta.date, doc_meta.ts FROM fts_corpus "
+        "LEFT JOIN doc_path ON doc_path.rowid = fts_corpus.rowid "
+        "LEFT JOIN doc_meta ON doc_meta.rowid = fts_corpus.rowid "
+        f"WHERE fts_corpus.doc_type IN ({', '.join('?' for _ in LEDGER_DOC_TYPES)})",
+        LEDGER_DOC_TYPES,
+    ).fetchall()
+    return [(row[0], Doc(*row[1:])) for row in rows]
+
+
+def _append_into(
+    conn: sqlite3.Connection, resolved: Path, fallback_root: FallbackRoot | None
+) -> dict[str, Any] | None:
+    """Bring the index open on ``conn`` (a private copy) up to the ledger's
+    tail. ``None`` when the copy is anything but behind: the caller rebuilds.
+
+    The stored manifest is read from the copy itself, so the check and the
+    write see the same index.
+    """
+    row = conn.execute("SELECT value FROM manifest WHERE key = 'manifest'").fetchone()
+    if row is None:
+        return None
+    stored = json.loads(row[0])
+    if not isinstance(stored, dict):
+        return None
+    roots, note = resolve_roots(load_config(resolved), fallback_root)
+    last, items, events = _read_ledger(resolved)
+    sources = collect_sources(roots, linked_refs(events))
+    current = _manifest(resolved, last, events, roots, sources)
+    new_events, _reason = trailing_events(stored, events)
+    # Only the clean-prefix case with something new; any other difference
+    # (format, ranker, database, roots, a source, a rewritten log) rebuilds.
+    if manifest_differences(stored, current) or not new_events:
+        return None
+    # The ledger side is recomputed exactly as a full build would, and the
+    # index is made to hold that multiset: documents the tail changed (an
+    # item's notes, status or date; the status on its questions) are deleted
+    # and re-inserted, new ones are inserted, the rest stay.
+    wanted = Counter(ledger_docs(items, events))
+    for rowid, doc in _indexed_ledger_docs(conn):
+        if wanted[doc] > 0:
+            wanted[doc] -= 1
+        else:
+            _delete_doc(conn, rowid)
+    rowid = conn.execute("SELECT COALESCE(MAX(rowid), 0) FROM fts_corpus").fetchone()[0]
+    for doc in wanted.elements():
+        rowid += 1
+        _insert_doc(conn, rowid, doc)
+    conn.execute("DELETE FROM item_link")
+    conn.executemany(
+        "INSERT INTO item_link (item_id, initiative) VALUES (?, ?)",
+        sorted(initiative_links(events)),
+    )
+    conn.execute(
+        "UPDATE manifest SET value = ? WHERE key = 'manifest'",
+        (json.dumps(current, sort_keys=True),),
+    )
+    counts = dict(conn.execute(
+        "SELECT doc_type, COUNT(*) FROM fts_corpus GROUP BY doc_type ORDER BY doc_type"
+    ).fetchall())
+    return {
+        "docs": sum(counts.values()),
+        "by_type": counts,
+        "last_event_id": last,
+        "roots": current["roots"],
+        "sources": len(current["sources"]),
+        "note": note,
+        "refresh": "append",
+        "new_events": new_events,
+    }
+
+
+def _append_trailing(
+    resolved: Path, index: Path, fallback_root: FallbackRoot | None
+) -> dict[str, Any] | None:
+    """Append the ledger's tail to a behind index on a copy and swap the copy
+    in, as ``build_index`` swaps a new index in. ``None`` when there is no
+    index to start from or it is not behind."""
+    try:
+        source = _open_index(index)
+    except SearchError:
+        return None
+    tmp: Path | None = None
+    try:
+        fd, tmp_name = tempfile.mkstemp(
+            prefix=f".{SEARCH_DB_NAME}.", suffix=".partial", dir=index.parent
+        )
+        os.close(fd)
+        tmp = Path(tmp_name)
+        conn = sqlite3.connect(tmp)
+        try:
+            source.backup(conn)
+            source.close()
+            summary = _append_into(conn, resolved, fallback_root)
+            if summary is None:
+                return None
+            conn.commit()
+        finally:
+            conn.close()
+        os.replace(tmp, index)
+        tmp = None
+    finally:
+        source.close()
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)
+    return {"path": str(index), **summary}
+
+
+def refresh_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> dict[str, Any]:
+    """Bring ``search.db`` up to date: append the ledger's tail to a behind
+    index, otherwise rebuild it from scratch.
+
+    The summary is ``build_index``'s plus ``refresh`` (``append`` or
+    ``rebuild``); an append also gives ``new_events``. Any doubt or error in
+    the append takes the full rebuild, which reports its own errors, so a
+    partial index is never swapped in as current.
+    """
+    resolved = resolve_db_path(db)
+    refuse_inside_git(resolved)
+    try:
+        summary = _append_trailing(resolved, search_db_path(resolved), fallback_root)
+    except Exception:  # fail closed: the full rebuild decides
+        summary = None
+    if summary is not None:
+        return summary
+    return {**build_index(resolved, fallback_root), "refresh": "rebuild"}
 
 
 # --- query ------------------------------------------------------------------
@@ -882,7 +1094,7 @@ def search(
     until: datetime | None = None,
     fallback_root: FallbackRoot | None = None,
 ) -> dict[str, Any]:
-    """Refresh the index when it is missing or stale, then rank hits.
+    """Refresh the index when it is not current, then rank hits.
 
     The filters narrow the text match in the same query; ``since`` and
     ``until`` are inclusive and must be timezone-aware.
@@ -906,7 +1118,7 @@ def search(
     refreshed = index_state["status"] != "current"
     if refreshed:
         try:
-            build_index(resolved, fallback_root)
+            refresh_index(resolved, fallback_root)
         except (OSError, sqlite3.Error) as exc:
             # Never answer from the out-of-date index it could not replace.
             raise SearchError(

@@ -107,6 +107,11 @@ _REF_TARGET_PATTERN = "|".join((
     r"event:[1-9][0-9]*",
 ))
 _REF_TARGET = {**_REF, "pattern": f"(?:{_REF_TARGET_PATTERN})"}
+# A directory path, absolute or with at least one "/", no :line suffix: the
+# only ref whose one trailing slash the writing verbs strip.
+_DIRECTORY_REF = re.compile(
+    rf"/(?:{_PATH_SEGMENT}/)*{_PATH_SEGMENT}|(?:{_PATH_SEGMENT}/)+{_PATH_SEGMENT}"
+)
 _SKILL = {
     "type": "string",
     "min_len": 1,
@@ -825,6 +830,36 @@ def _check_object(
     for key, spec in optional.items():
         if key in obj:
             _check_field(obj[key], spec, f"{path}.{key}" if path else key)
+
+
+def strip_directory_ref_slash(kind: str, payload: Any, payload_version: int = 1) -> Any:
+    """``payload`` with one trailing slash stripped from each directory ref.
+
+    The writing verbs call this before validation, so ``some/dir/`` in a
+    ``refs`` list is stored as ``some/dir``. Only a ref that is a directory
+    path once the slash is gone is changed; every other value, kind and
+    payload is returned as given, and validation then refuses what it refused
+    before.
+    """
+    schema = SCHEMAS.get((kind, payload_version))
+    if schema is None or type(payload) is not dict:
+        return payload
+    out = payload
+    for key, spec in (*schema["required"].items(), *schema["optional"].items()):
+        value = payload.get(key)
+        if spec.get("type") != "array" or spec.get("items") is not _REF_TARGET:
+            continue
+        if type(value) is not list:
+            continue
+        refs = [
+            ref[:-1]
+            if type(ref) is str and ref.endswith("/") and _DIRECTORY_REF.fullmatch(ref[:-1])
+            else ref
+            for ref in value
+        ]
+        if refs != value:
+            out = {**out, key: refs}
+    return out
 
 
 def validate_payload(kind: str, payload: Any, payload_version: int = 1) -> dict[str, Any]:
