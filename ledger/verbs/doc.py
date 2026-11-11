@@ -32,7 +32,11 @@ FILE --by-path`` first places FILE under the root, component by component
 opens the root from the database's directory without following a symlink at
 the root, walks the stored path from there, and reads the bytes from that
 walk's leaf. For a relative FILE it also walks FILE from the working
-directory and refuses unless both walks reached the same file.
+directory and refuses unless both walks reached the same file. Each
+component of the stored path must also appear byte for byte in its parent
+directory's entry list, read from the parent's descriptor, so a name a
+case-insensitive volume would open under another spelling is refused rather
+than stored in a second spelling.
 
 ``doc show --content`` and ``doc verify`` read an inline document's stored
 bytes. They read a by-path document by walking its stored path from the root
@@ -56,12 +60,15 @@ attach a file. Every filename and stored path is escaped before it reaches a
 message, so a name holding a terminal control sequence is never printed raw.
 
 Before anything is written, ``doc add`` scans the bytes it read for
-credential shapes (``ledger.credscan``), inline and by path alike. A hit is
-refused ``doc_credential_shape`` unless ``--allow-credential-shapes`` is
-given, which writes the event with ``credential_override: true``. The scan
-runs before the idempotency check, so repeating an overridden add without
-the flag is refused, not reported ``unchanged``. No message carries the
-matched bytes.
+credential shapes (``ledger.credscan``), inline and by path alike, and for a
+by-path add also the UTF-8 bytes of the stored path, before any file is
+opened. A hit in either is refused ``doc_credential_shape`` unless
+``--allow-credential-shapes`` is given, which writes the event with
+``credential_override: true``. The scan runs before the idempotency check,
+so repeating an overridden add without the flag is refused, not reported
+``unchanged``. No message carries the matched bytes: a hit in the stored
+path is named by its shape and the words "in the path", and that refusal
+does not name FILE.
 
 Adding the same item, role and sha256 again writes nothing and reports
 ``unchanged``, whatever the storage; the idempotency key is derived from
@@ -88,6 +95,7 @@ from typing import Any
 
 from ledger.credscan import describe as describe_credentials
 from ledger.credscan import scan as scan_credentials
+from ledger.credscan import shape_names
 from ledger.restore import inline_document_bytes
 from ledger.schema import (
     DOC_CREDENTIAL_OVERRIDE,
@@ -148,6 +156,7 @@ def document_key(item_id: str, role: str, sha256: str) -> str:
 _NOT_REGULAR = "not a readable regular file"
 _THROUGH_SYMLINK = "its path goes through a symlink, which is refused; pass the real path"
 _NO_NOFOLLOW = "this platform cannot open a path without following symlinks"
+_NO_FD_LISTING = "this platform cannot list a directory from its descriptor"
 
 
 def _unreadable(name: str, reason: str) -> CliError:
@@ -283,6 +292,30 @@ def _open_component(part: str, flags: int, dir_fd: int) -> int:
     raise _WalkFailure(_THROUGH_SYMLINK if _is_symlink(part, dir_fd) else _NOT_REGULAR, error)
 
 
+def _check_spelling(part: str, dir_fd: int) -> None:
+    """Refuse unless ``part`` is, byte for byte, an entry of the directory
+    open at ``dir_fd``, as listed from that descriptor.
+
+    On a case-insensitive (or normalisation-insensitive) volume an open
+    succeeds for a name spelled otherwise than the entry on disk, which
+    would give one file two stored spellings. The listing is the disk's own
+    spelling, so a name that is not in it is refused, never rewritten. A
+    platform that cannot list a directory from its descriptor is refused
+    too. Raises ``_WalkFailure`` (never ``missing``)."""
+    if os.listdir not in os.supports_fd:
+        raise _WalkFailure(_NO_FD_LISTING, None)
+    try:
+        names = os.listdir(dir_fd)
+    except (OSError, ValueError):
+        raise _WalkFailure(_NOT_REGULAR, None) from None
+    if part not in names:
+        raise _WalkFailure(
+            f"its spelling of {text_cell(part)} differs from the name on disk; "
+            "pass the name as it is spelled on disk",
+            None,
+        )
+
+
 def _leaf_refusal(fd: int) -> str | None:
     """Why the walk's leaf is refused, or None: the ``fstat`` of the leaf
     descriptor must show a regular file. Nothing else is checked."""
@@ -296,7 +329,12 @@ def _leaf_refusal(fd: int) -> str | None:
 
 
 def _walk(
-    base_fd: int, directories: Sequence[str], leaf: str, flags: tuple[int, int]
+    base_fd: int,
+    directories: Sequence[str],
+    leaf: str,
+    flags: tuple[int, int],
+    *,
+    exact_spelling: bool = False,
 ) -> int:
     """An open descriptor on ``leaf``, reached from ``base_fd`` through
     ``directories`` without following a symlink at any of them or at the
@@ -309,13 +347,21 @@ def _walk(
     descriptor the walk opened is closed on every failure. ``base_fd`` is
     the caller's and is never closed here. The leaf descriptor's ``fstat``
     must show a regular file before it is returned (``_leaf_refusal``); no
-    byte is read here.
+    byte is read here. With ``exact_spelling`` (``doc add --by-path``), each
+    component once opened must also appear byte for byte in its parent's
+    entry list (``_check_spelling``), else the walk fails.
     """
     nofollow, directory = flags
     fd = base_fd
     try:
         for part in directories:
             child = _open_component(part, os.O_RDONLY | directory | nofollow, fd)
+            if exact_spelling:
+                try:
+                    _check_spelling(part, fd)
+                except _WalkFailure:
+                    os.close(child)
+                    raise
             if fd != base_fd:
                 os.close(fd)
             fd = child
@@ -327,6 +373,8 @@ def _walk(
             refusal = _leaf_refusal(leaf_fd)
             if refusal is not None:
                 raise _WalkFailure(refusal, None)
+            if exact_spelling:
+                _check_spelling(leaf, fd)
             verified = True
             return leaf_fd
         finally:
@@ -356,13 +404,16 @@ def _open_root(root: DocumentRoot, flags: tuple[int, int]) -> int:
         os.close(home_fd)
 
 
-def _open_stored(root: DocumentRoot, stored: str, flags: tuple[int, int]) -> int:
+def _open_stored(
+    root: DocumentRoot, stored: str, flags: tuple[int, int], *, exact_spelling: bool = False
+) -> int:
     """An open descriptor on a stored path's leaf, walked from the root's
-    descriptor (``_walk``). Raises ``_WalkFailure``."""
+    descriptor (``_walk``, with ``exact_spelling`` at add). Raises
+    ``_WalkFailure``."""
     parts = stored.split("/")
     root_fd = _open_root(root, flags)
     try:
-        return _walk(root_fd, parts[:-1], parts[-1], flags)
+        return _walk(root_fd, parts[:-1], parts[-1], flags, exact_spelling=exact_spelling)
     finally:
         os.close(root_fd)
 
@@ -527,20 +578,33 @@ def _place_under_root(
     )
 
 
-def _read_by_path(name: str, root: DocumentRoot) -> tuple[str, bytes]:
+def _path_credentials(stored: str) -> tuple:
+    """The credential shapes (``ledger.credscan``) in a stored path's UTF-8
+    bytes."""
+    return scan_credentials(stored.encode("utf-8"))
+
+
+def _read_by_path(
+    name: str, root: DocumentRoot, *, allow_credential_shapes: bool = False
+) -> tuple[str, bytes]:
     """``(stored path, bytes)`` for ``doc add FILE --by-path``.
 
     In order: FILE's grammar (``_walk_plan``; a name that is not UTF-8 has
     no stored spelling and is refused too), its placement under the root
-    (``_place_under_root``), and the stored path's grammar; all before any
-    open. A platform with no no-follow opens is refused next. A relative
-    FILE is then walked from the working directory (descriptor A). The
-    stored path is walked from the root's descriptor (descriptor B); for a
-    relative FILE, A and B must be the same file (``st_dev`` and
-    ``st_ino``), else it changed while it was being added. The bytes are
-    read from B, at most ``DOC_PATH_LIMIT`` plus one; over the limit is a
-    usage error. Every walk failure is ``doc_unreadable`` naming FILE
-    escaped, and every descriptor is closed on every path.
+    (``_place_under_root``), the credential scan of the stored path, and the
+    stored path's grammar; all before any open. A credential shape in the
+    stored path is refused ``doc_credential_shape`` unless
+    ``allow_credential_shapes`` is set; the refusal names the shapes and says
+    they are in the path, and names neither FILE nor the path. A platform
+    with no no-follow opens is refused next. A relative FILE is then walked
+    from the working directory (descriptor A). The stored path is walked
+    from the root's descriptor (descriptor B), each component checked
+    against the spelling on disk (``_check_spelling``); for a relative FILE,
+    A and B must be the same file (``st_dev`` and ``st_ino``), else it
+    changed while it was being added. The bytes are read from B, at most
+    ``DOC_PATH_LIMIT`` plus one; over the limit is a usage error. Every walk
+    failure is ``doc_unreadable`` naming FILE escaped, and every descriptor
+    is closed on every path.
     """
     if name == STDIN:
         raise UsageError("doc add --by-path needs a FILE: standard input has no path to store")
@@ -550,6 +614,15 @@ def _read_by_path(name: str, root: DocumentRoot) -> tuple[str, bytes]:
     except UnicodeEncodeError:
         raise _unreadable(name, "its name is not UTF-8, so it has no stored spelling") from None
     stored = "/".join(_place_under_root(name, root, absolute, [*directories, leaf]))
+    path_hits = _path_credentials(stored)
+    if path_hits and not allow_credential_shapes:
+        raise CliError(
+            "the path to store holds a credential shape "
+            f"({shape_names(path_hits)} in the path); the path is not shown, and "
+            "nothing was written. Pass --allow-credential-shapes to attach it anyway",
+            code=CREDENTIAL_SHAPE,
+            exit_code=EXIT_REFUSED,
+        )
     problem = doc_path_problem(stored)
     if problem is not None:
         raise _unreadable(name, f"its path under the document root {problem}")
@@ -557,7 +630,7 @@ def _read_by_path(name: str, root: DocumentRoot) -> tuple[str, bytes]:
     given_fd = None if absolute else _open_by_walk(name)
     try:
         try:
-            fd = _open_stored(root, stored, flags)
+            fd = _open_stored(root, stored, flags, exact_spelling=True)
         except _WalkFailure as failure:
             raise _unreadable(name, failure.reason) from None
         try:
@@ -609,16 +682,25 @@ def attach_document(
     inside the write transaction.
 
     The bytes read are scanned for credential shapes first, before the
-    duplicate check and before any write, whatever the storage. A hit is
-    refused ``doc_credential_shape``, naming FILE and each shape with its
-    byte offset but never the matched bytes, unless
-    ``allow_credential_shapes`` is set; then the event carries
-    ``credential_override: true``. The flag on bytes with no hit writes no
-    marker.
+    duplicate check and before any write, whatever the storage; a by-path
+    add also scans the stored path's UTF-8 bytes, before any open
+    (``_read_by_path``). A hit in the bytes is refused
+    ``doc_credential_shape``, naming FILE and each shape with its byte
+    offset but never the matched bytes; a hit in the stored path is refused
+    with the same code, naming the shapes as in the path and not naming FILE
+    or the path. With ``allow_credential_shapes`` neither is refused and the
+    event carries ``credential_override: true``. The flag on bytes and a
+    path with no hit writes no marker.
     """
     stored: str | None = None
+    path_hits: tuple = ()
     if by_path:
-        stored, data = _read_by_path(name, document_root(lg.path, spelled_db))
+        stored, data = _read_by_path(
+            name,
+            document_root(lg.path, spelled_db),
+            allow_credential_shapes=allow_credential_shapes,
+        )
+        path_hits = _path_credentials(stored)
     else:
         data = _read_input(name)
     hits = scan_credentials(data)
@@ -643,7 +725,7 @@ def attach_document(
         payload["content_b64"] = base64.b64encode(data).decode("ascii")
     if title is not None:
         payload["title"] = title
-    if hits:
+    if hits or path_hits:
         payload[DOC_CREDENTIAL_OVERRIDE] = True
     with lg.transaction():
         if lg.item(item_id) is None:

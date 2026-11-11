@@ -207,8 +207,13 @@ the database's directory without following a symlink, walks the stored path
 from it as above, and reads the bytes from that walk; a relative `FILE` is
 also walked from the working directory, and refused `doc_unreadable` unless
 both walks reach the same file. A symlink at the root or anywhere below it is
-refused. The credential scan below runs on the bytes read, as for an inline
-add.
+refused. Each component below the root must also appear byte for byte in its
+directory's entry list, read from that directory's descriptor: on a
+case-insensitive volume a name spelled otherwise than on disk would open, and
+store one file under a second spelling, so it is refused `doc_unreadable`
+(its spelling differs from the name on disk) and never rewritten. The
+credential scan below runs on the bytes read, as for an inline add, and on
+the stored path.
 
 `FILE` given as a single hyphen (`-`) reads standard input, up to the same
 inline limit (over it is a usage error, exit 2); the media type defaults to
@@ -237,10 +242,13 @@ private-key header matches only at the start of the bytes or after a byte
 that is not an ASCII letter, digit or underscore, so `risk-free` is not an
 `sk-` key. A hit is refused `doc_credential_shape` (exit 3), naming `FILE`
 and each shape with its byte offset, never the matched bytes, and nothing is
-written. `--allow-credential-shapes` attaches it anyway and marks the event
+written. With `--by-path` the UTF-8 bytes of the stored path are scanned
+too, before any file is opened; a hit there is refused `doc_credential_shape`
+naming each shape as in the path, and the refusal names neither `FILE` nor
+the path. `--allow-credential-shapes` attaches it anyway and marks the event
 `credential_override: true`; the result says so (`credential-override` in
 text, `data.credential_override: true` with `--json`). The flag on bytes
-with no hit writes no marker. The scan runs before the `unchanged` check, so
+and a path with no hit writes no marker. The scan runs before the `unchanged` check, so
 repeating an overridden add without the flag is refused. The scan is a
 tripwire for these common shapes, not a secret detector: a credential in any
 other shape passes it.
@@ -629,19 +637,25 @@ credential shapes `doc add` refuses. A document holding one without the
 nothing is written, the watermark does not move, and `--commit` does not
 run. A document attached with `--allow-credential-shapes` is exported. A
 by-path document's event file carries its stored path, sha256 and size and
-no bytes, so it is not scanned, and export never opens a document file.
+no bytes, so export never opens a document file; it scans the stored path
+instead, and an unmarked hit there refuses `export_doc_credential` the same
+way, naming the shapes as in the path and never the path.
 `--commit` and `--push` do not run the credential scan: they commit or push
 whatever the export directory and its history hold, so a file placed there
 by hand, or a commit made by hand or by an older ledger, leaves the machine
 without passing it.
 
-**`backup --to FILE`** Online backup with `PRAGMA integrity_check`.
+**`backup --to FILE`** Online backup with `PRAGMA integrity_check`. The
+backup holds the database only: a by-path document's bytes live under its
+document root, so copy that directory too, and put it beside the restored
+database (see `restore`).
 
 **`restore --dir DIR --system NAME [--accept-loop-events]`** Replay an
 export into the new database named by `--db`, then verify it. The target
-must not exist. A document holding a credential shape without the
-`credential_override` marker refuses the whole restore
-`restore_doc_credential`, and nothing is inserted. By-path documents restore
+must not exist. A document holding a credential shape in its inline bytes or
+its stored path without the `credential_override` marker refuses the whole
+restore `restore_doc_credential` (a hit in a stored path is named by its
+shape as in the path, never the path), and nothing is inserted. By-path documents restore
 as references: restore checks their stored path, storage and size against
 the schema and never opens a file. Their paths resolve against the restored
 database's own document root (`<name>.documents` beside the database `--db`

@@ -10,9 +10,10 @@ regular file and is attached. Nothing is printed as a document's content, or
 reported ``ok``, unless the bytes read in that call hash to the stored sha256
 and size. Only ``attach_document`` writes the kind; restore and replay
 recompute an inline digest before inserting it and check a by-path document's
-schema, opening no file. Bytes holding a credential shape are refused at add
-unless the override flag marks them, and an unmarked inline one is refused at
-restore, at replay and at export.
+schema, opening no file. Bytes or a stored path holding a credential shape
+are refused at add unless the override flag marks them, and an unmarked one is
+refused at restore, at replay and at export. A by-path add stores each
+component only as its directory's entry list spells it.
 
 The by-path tests are named for the design's T1 to T22 in their comments.
 """
@@ -41,6 +42,7 @@ from ledger.export import (
     hash_body,
     load_export,
     read_watermark,
+    refuse_unmarked_credentials,
     write_event_files,
     write_stream_digest,
     write_watermark,
@@ -2388,3 +2390,272 @@ def test_stored_paths_and_filenames_are_escaped_in_show_and_in_refusals(
     )
     assert code == 3
     _assert_escaped(out, err, f"out{OSC52_ESCAPED}.md by path: it is not under the document root")
+
+
+# ---- the stored path is scanned for credential shapes ---------------------------------
+#
+# The bytes in these tests are clean: only the stored path holds a shape, so
+# only a scan of the path can refuse it. A shape in the path never reaches a
+# message: the refusal names the shape and says it was in the path.
+
+
+def _shaped_dir(sample: bytes) -> str:
+    """A directory name that is ``sample`` itself, so the stored path holds it."""
+    return sample.decode()
+
+
+def _path_refusal(shape: str) -> str:
+    return (
+        f"the path to store holds a credential shape ({shape} in the path); the path "
+        "is not shown, and nothing was written. Pass --allow-credential-shapes to "
+        "attach it anyway"
+    )
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_a_credential_shape_in_the_stored_path_is_refused_at_add_unless_the_flag_marks_it(
+    db, monkeypatch, shape
+):
+    sample = SAMPLES[shape]
+    source = under_root(db, f"{_shaped_dir(sample)}/notes.md", b"clean notes\n")
+    with monkeypatch.context() as hook:
+        opened = _record_file_opens(hook)
+        code, refused, err = add_by_path(monkeypatch, db, source)
+    assert (code, error_code(refused)) == (3, "doc_credential_shape"), (refused, err)
+    assert refused["error"]["message"] == _path_refusal(shape)
+    _assert_no_sample(sample, json.dumps(refused), err)
+    assert _opened_under(opened, doc_root(db)) == [], "a file was opened before the scan"
+    code, out, err = cli(
+        monkeypatch, db, "doc", "add", ITEM, str(source), "--role", "brief", "--by-path"
+    )
+    assert (code, out) == (3, "")
+    assert _path_refusal(shape) in err
+    _assert_no_sample(sample, out, err)
+    # A relative FILE that does not spell the shape: the stored path still
+    # holds it, and the stored path is what is scanned.
+    monkeypatch.chdir(source.parent)
+    code, refused, err = add_by_path(monkeypatch, db, "notes.md")
+    assert (code, error_code(refused)) == (3, "doc_credential_shape"), (refused, err)
+    assert refused["error"]["message"] == _path_refusal(shape)
+    assert doc_events(db) == []
+    code, added, err = add_by_path(monkeypatch, db, source, "--allow-credential-shapes")
+    assert code == 0, err
+    assert added["data"]["credential_override"] is True
+    [stored] = doc_events(db)
+    assert stored.payload["credential_override"] is True
+    assert stored.payload["path"] == f"{_shaped_dir(sample)}/notes.md"
+
+
+def test_a_clean_stored_path_with_the_flag_writes_no_marker(db, monkeypatch):
+    code, added, err = add_by_path(
+        monkeypatch, db, under_root(db, "plain/notes.md", b"clean"), "--allow-credential-shapes"
+    )
+    assert code == 0, err
+    assert added["data"]["credential_override"] is False
+    [stored] = doc_events(db)
+    assert "credential_override" not in stored.payload
+
+
+def _path_credential_refused(event_id: int, shape: str) -> str:
+    return re.escape(
+        f"restore refuses event {event_id} (doc.attached): restore_doc_credential: "
+        f"its stored path holds a credential shape ({shape} in the path) and it carries "
+        "no credential_override; the path is not shown"
+    )
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_restore_and_replay_refuse_an_unmarked_credential_in_a_stored_path(
+    db, tmp_path, monkeypatch, shape
+):
+    sample = SAMPLES[shape]
+    event_id = added_id(
+        monkeypatch, db, under_root(db, f"{_shaped_dir(sample)}/n.md", b"clean\n"),
+        "--allow-credential-shapes",
+    )
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, export)
+        events = lg.events()
+    # The control: marked, it restores and replays.
+    restore_export(export, tmp_path / "marked" / "ledger.db", system="home")
+    with open_ledger(tmp_path / "marked-replay.db") as fresh:
+        replay_events(fresh, events)
+    document = events[-1]
+    assert (document.id, document.kind) == (event_id, DOC_KIND)
+    payload = {k: v for k, v in document.payload.items() if k != "credential_override"}
+    forged = dataclasses.replace(document, payload=payload)
+    forged = dataclasses.replace(forged, hash=event_digest(hash_body(forged)))
+    (export / event_filename(forged.id)).write_text(
+        canonical_dumps(event_record(forged)) + "\n", encoding="utf-8"
+    )
+    dest = tmp_path / "restored" / "ledger.db"
+    with pytest.raises(LedgerError, match=_path_credential_refused(event_id, shape)) as caught:
+        restore_export(export, dest, system="home")
+    _assert_no_sample(sample, str(caught.value))
+    assert not any(dest.parent.glob("ledger.db*")), "a refused restore left files behind"
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        with pytest.raises(LedgerError, match=_path_credential_refused(event_id, shape)) as caught:
+            replay_events(fresh, [*events[:-1], forged])
+        assert fresh.events() == [], "a refused replay inserted events"
+    _assert_no_sample(sample, str(caught.value))
+
+
+def _store_unmarked_path(db: str, path: str) -> int:
+    """Store a by-path document with ``path`` and no marker, through the
+    writer's own capability: the add-time scan is bypassed, as a store an
+    older ledger left behind. Returns its id."""
+    body = b"clean\n"
+    payload = {
+        "role": "brief",
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "size": len(body),
+        "mime": "text/plain",
+        "path": path,
+    }
+    with open_ledger(db, create=False) as lg:
+        event = lg._append_doc_event(
+            doc_verb._DOC_WRITER_CAPABILITY, kind=DOC_KIND, payload=payload,
+            item_id=ITEM, idempotency_key="unmarked-path",
+        )
+    return event.id
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_export_refuses_an_unmarked_credential_in_a_stored_path_and_writes_nothing(
+    db, tmp_path, monkeypatch, shape
+):
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, export)
+    before = _export_state(export)
+    watermark = read_watermark(export)
+    sample = SAMPLES[shape]
+    event_id = _store_unmarked_path(db, f"{_shaped_dir(sample)}/n.md")
+    message = (
+        f"export refuses event {event_id} (doc.attached) on item {ITEM}: "
+        f"export_doc_credential: its stored path holds a credential shape ({shape} in "
+        "the path) and it carries no credential_override; the path is not shown, and "
+        "nothing was written"
+    )
+    with open_ledger(db, create=False) as lg:
+        with pytest.raises(ExportDocCredential) as caught:
+            export_events(lg, export)
+    assert str(caught.value) == message
+    _assert_no_sample(sample, str(caught.value))
+    assert _export_state(export) == before, "a refused export wrote a file"
+    assert read_watermark(export) == watermark
+    code, refused, err = cli_json(monkeypatch, db, "export", "--dir", str(export))
+    assert (code, error_code(refused)) == (3, "export_doc_credential"), (refused, err)
+    assert refused["error"]["message"] == message
+    _assert_no_sample(sample, json.dumps(refused), err)
+    assert _export_state(export) == before, "a refused export wrote a file"
+
+
+def test_a_marked_credential_in_a_stored_path_exports(db, tmp_path, monkeypatch):
+    sample = SAMPLES["slack-token"]
+    event_id = added_id(
+        monkeypatch, db, under_root(db, f"{_shaped_dir(sample)}/n.md", b"clean\n"),
+        "--allow-credential-shapes",
+    )
+    export = tmp_path / "export"
+    code, exported, err = cli_json(monkeypatch, db, "export", "--dir", str(export))
+    assert code == 0, (exported, err)
+    record = json.loads((export / event_filename(event_id)).read_text(encoding="utf-8"))
+    assert record["payload"]["credential_override"] is True
+    assert record["payload"]["path"] == f"{_shaped_dir(sample)}/n.md"
+
+
+@pytest.mark.parametrize("path", [7, None, "a\udcff.md"])
+def test_export_refuses_a_stored_path_it_cannot_scan(db, monkeypatch, path):
+    # Fail closed: a stored path that is not UTF-8 text cannot be scanned,
+    # so it is not exported either. The schema keeps such a path out of the
+    # store; this pins the export scan on its own.
+    event_id = added_id(monkeypatch, db, under_root(db, "n.md", b"clean\n"))
+    [document] = doc_events(db)
+    forged = dataclasses.replace(document, payload={**document.payload, "path": path})
+    with pytest.raises(
+        ExportDocCredential,
+        match=re.escape(
+            f"export refuses event {event_id} (doc.attached) on item {ITEM}: "
+            "export_doc_credential: its stored path is not UTF-8 text, so it cannot be "
+            "scanned for credential shapes; nothing was written"
+        ),
+    ):
+        refuse_unmarked_credentials([forged])
+    refuse_unmarked_credentials([document])
+
+
+# ---- the stored spelling is the spelling on disk ------------------------------------
+
+
+def _case_folding_open(monkeypatch) -> None:
+    """Make a descriptor-relative ``os.open`` fold case as a case-insensitive
+    volume does, so the test sees the same on every volume: a name that an
+    entry matches only in another case opens that entry."""
+    real_open = os.open
+
+    def folding_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is not None:
+            name = os.fspath(path)
+            entries = os.listdir(dir_fd)
+            if name not in entries:
+                folded = [entry for entry in entries if entry.lower() == name.lower()]
+                if folded:
+                    path = folded[0]
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    _patch_open(monkeypatch, folding_open)
+
+
+def test_a_by_path_file_spelled_otherwise_than_its_name_on_disk_is_refused(
+    db, monkeypatch
+):
+    body = b"one file, one stored spelling\n"
+    under_root(db, "Notes/Packet.md", body)
+    root = doc_root(db)
+    document_root = doc_verb.document_root(db)
+    monkeypatch.chdir(Path(db).parent)
+    with monkeypatch.context() as volume:
+        _case_folding_open(volume)
+        # The simulated volume opens a name in another case.
+        root_fd = os.open(root, os.O_RDONLY)
+        try:
+            notes_fd = os.open("notes", os.O_RDONLY, dir_fd=root_fd)
+            try:
+                leaf_fd = os.open("packet.md", os.O_RDONLY, dir_fd=notes_fd)
+                try:
+                    assert os.read(leaf_fd, 100) == body
+                finally:
+                    os.close(leaf_fd)
+            finally:
+                os.close(notes_fd)
+        finally:
+            os.close(root_fd)
+        before = _open_descriptors()
+        for given in (
+            str(root / "notes" / "Packet.md"),
+            str(root / "Notes" / "packet.md"),
+            str(root / "NOTES" / "PACKET.MD"),
+            f"{root.name}/notes/Packet.md",
+            f"{root.name}/Notes/packet.md",
+        ):
+            with pytest.raises(CliError) as caught:
+                doc_verb._read_by_path(given, document_root)
+            assert caught.value.code == "doc_unreadable", given
+            assert "differs from the name on disk" in str(caught.value), given
+            assert _open_descriptors() == before, given
+        code, refused, err = add_by_path(monkeypatch, db, root / "notes" / "Packet.md")
+        assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+        assert "differs from the name on disk" in refused["error"]["message"]
+        assert doc_events(db) == []
+        code, added, err = add_by_path(monkeypatch, db, root / "Notes" / "Packet.md")
+        assert code == 0, err
+        assert added["data"]["document"]["path"] == "Notes/Packet.md"
+    # On the real volume, case-sensitive or not, another spelling is refused
+    # doc_unreadable (absent there, or a spelling that differs from the disk).
+    code, refused, err = add_by_path(monkeypatch, db, root / "notes" / "packet.md", role="retro")
+    assert (code, error_code(refused)) == (3, "doc_unreadable"), (refused, err)
+    assert len(doc_events(db)) == 1
+    code, found, verified = statuses(monkeypatch, db)
+    assert (code, found) == (0, ["ok"]), verified

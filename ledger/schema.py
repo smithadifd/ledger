@@ -56,8 +56,9 @@ DOC_PATH_COMPONENT_MAX_BYTES = 255
 # The reason a stored path that breaks its grammar is refused with.
 DOC_PATH_REFUSAL = "bad-doc-path"
 DOC_DEFAULT_MIME = "application/octet-stream"
-# Set, only as true, on a document whose bytes hold a credential shape
-# (ledger/credscan.py) and that ``doc add --allow-credential-shapes`` attached.
+# Set, only as true, on a document whose bytes or stored path hold a
+# credential shape (ledger/credscan.py) and that
+# ``doc add --allow-credential-shapes`` attached.
 DOC_CREDENTIAL_OVERRIDE = "credential_override"
 # Channels only `ledger capture` (verbs/capture.py) writes: the harness's
 # record of a submitted prompt and of a question-picker answer. The store
@@ -279,10 +280,10 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
     # present; both or neither is refused (exactly-one-of). size is at most
     # DOC_PATH_LIMIT for every document. Restore and replay recompute an
     # inline document's digest before inserting it; a by-path document holds
-    # no bytes, so they check its schema only (restore.py).
-    # credential_override is present only as true: doc add sets it when
-    # --allow-credential-shapes attached bytes holding a credential shape,
-    # and any other value is refused.
+    # no bytes, so they check its schema and scan its stored path
+    # (restore.py). credential_override is present only as true: doc add sets
+    # it when --allow-credential-shapes attached bytes or a stored path
+    # holding a credential shape, and any other value is refused.
     (DOC_KIND, 1): {
         "item_id": "required",
         "required": {
@@ -726,7 +727,9 @@ def doc_path_problem(value: Any) -> str | None:
     leading, trailing or doubled ``/``, and never absolute), none ``.`` and
     none ``..``, with no control character anywhere (``control_character``,
     which covers NUL). It is relative to the database's document root, and
-    one file has one stored spelling.
+    one file has one stored spelling: ``doc add`` stores each component only
+    as its directory's entry list spells it, refusing any other spelling a
+    case-insensitive volume would open (``ledger/verbs/doc.py``).
     """
     if type(value) is not str:
         return "not a string"

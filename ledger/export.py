@@ -342,20 +342,42 @@ def refuse_unmarked_credentials(events: Sequence[Event]) -> None:
     the shapes, never the matched bytes. A document whose inline bytes do
     not decode cannot be scanned, and is refused the same way.
 
-    A by-path document (one carrying ``path`` and no ``content_b64``) is
-    skipped: its event file holds no bytes, so none leave in it, and its
-    file is never opened here. An event carrying both keys is scanned as
+    A by-path document (one carrying ``path`` and no ``content_b64``) holds
+    no bytes, so its file is never opened here; its event file carries the
+    stored path, so the path's UTF-8 bytes are scanned instead, and an
+    unmarked hit is refused the same way, naming the shapes as in the path
+    and never the path. A stored path that is not UTF-8 text cannot be
+    scanned and is refused too. An event carrying both keys is scanned as
     inline (the schema refuses that shape, so it is never stored)."""
     from .restore import inline_document_bytes
 
     for event in events:
         if event.kind != DOC_KIND:
             continue
-        if "path" in event.payload and "content_b64" not in event.payload:
-            continue
         if event.payload.get(DOC_CREDENTIAL_OVERRIDE) is True:
             continue
         where = f"export refuses event {event.id} ({event.kind}) on item {event.item_id}"
+        if "path" in event.payload and "content_b64" not in event.payload:
+            path = event.payload["path"]
+            try:
+                encoded = path.encode("utf-8") if type(path) is str else None
+            except UnicodeEncodeError:
+                encoded = None
+            if encoded is None:
+                raise ExportDocCredential(
+                    f"{where}: {EXPORT_DOC_CREDENTIAL}: its stored path is not UTF-8 "
+                    "text, so it cannot be scanned for credential shapes; nothing was "
+                    "written"
+                )
+            path_hits = scan_credentials(encoded)
+            if path_hits:
+                raise ExportDocCredential(
+                    f"{where}: {EXPORT_DOC_CREDENTIAL}: its stored path holds a "
+                    f"credential shape ({shape_names(path_hits)} in the path) and it "
+                    "carries no credential_override; the path is not shown, and "
+                    "nothing was written"
+                )
+            continue
         try:
             data = inline_document_bytes(event.payload)
         except ValueError:

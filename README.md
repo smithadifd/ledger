@@ -103,9 +103,12 @@ flowchart LR
 The CLI is the only door. Writes land in the `events` table and nowhere
 else; items, open questions, leases and decision records are SQL views over
 it. Cards and the search index are built from the events and can be thrown
-away. The export is the durable copy: one canonical JSON file per event,
-committed to a git repository of its own, and `restore` replays it into a
-fresh database and checks the chain.
+away. The export is the durable copy of the events: one canonical JSON file
+per event, committed to a git repository of its own, and `restore` replays it
+into a fresh database and checks the chain. A document stored by path
+(`doc add --by-path`) is the exception: its event holds the path and digest,
+not the bytes, which live only under the database's document root, so a
+restore needs that directory copied beside the restored database.
 
 ## Install
 

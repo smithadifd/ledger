@@ -82,7 +82,10 @@ component is refused too. On macOS `/tmp`, `/var` and `/etc` are symlinks,
 so pass the real path; a by-path `FILE` may also be spelled through the
 same directory the database path was spelled through. A by-path `FILE` must
 lie under the document root (`doc_outside_root` otherwise), and its walk
-starts at the root, opened without following a symlink. `-` reads standard
+starts at the root, opened without following a symlink. Each component below
+the root must also match its directory's entry byte for byte, so on a
+case-insensitive volume a name spelled otherwise than on disk is refused
+(`doc_unreadable`), never stored in a second spelling. `-` reads standard
 input instead of a file (inline only), a convenience for piping generated
 text.
 
@@ -100,14 +103,16 @@ bytes it read, and that a document's bytes are never printed or reported
 `doc add` refuses bytes holding a known credential shape (a private-key
 header, a GitHub, AWS, `sk-` or Slack token) unless it is given
 `--allow-credential-shapes`, which marks the event `credential_override:
-true`; the scan runs on the bytes it read, inline and by path alike.
-Restore and replay refuse an inline document holding one without the marker
-(`restore_doc_credential`), and `ledger export` refuses to write one
-(`export_doc_credential`), so a document's bytes holding an unmarked one
-never enter the store or an export file. A by-path document's event holds no
-bytes, so restore, replay and export have nothing to scan and open no file.
-The scan reads a document's bytes only: a `--title` or a stored path, like
-other text fields, is not scanned.
+true`; the scan runs on the bytes it read, inline and by path alike, and
+for a by-path add also on the stored path, before any file is opened.
+Restore and replay refuse a document holding one without the marker, in its
+inline bytes or its stored path (`restore_doc_credential`), and `ledger
+export` refuses to write one (`export_doc_credential`), so an unmarked one
+never enters the store or an export file. A by-path document's event holds
+no bytes, so restore, replay and export scan its stored path and open no
+file. A hit in a stored path is named by its shape and said to be in the
+path; the path itself is not shown. A `--title`, like other text fields, is
+not scanned.
 `export --commit` and `export --push` do not run the scan. The scan is a
 tripwire for common shapes, not a secret detector.
 
@@ -380,6 +385,12 @@ or `--max-hours` hours (24) are waiting, for a scheduled alert.
 online backup API (never a file copy of a live database), writes
 `FILE.partial`, runs `PRAGMA integrity_check`, and renames it only when the
 check passes.
+
+Neither the export nor the backup holds a by-path document's bytes, only its
+stored path, sha256 and size: the bytes live only under the database's
+document root (`<name>.documents` beside the database file). Copy that
+directory as well, and after a restore put its tree beside the restored
+database, named after the restored database file, then run `doc verify`.
 
 **Restore** (`ledger/restore.py`). `ledger restore --db NEW --dir DIR
 --system NAME` verifies the export, refuses an export another system
