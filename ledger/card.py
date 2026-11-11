@@ -137,8 +137,9 @@ from __future__ import annotations
 import re
 import shlex
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from .export import decay_boundary, decayed
 from .schema import SPEC_KIND
@@ -1469,6 +1470,70 @@ def _resume_sections(
     }
 
 
+def _children_with_sources(
+    rows: Iterable[Mapping[str, Any]], events: Iterable[Any], item_id: str
+) -> list[tuple[dict[str, Any], dict[str, int | None]]]:
+    """Each child row of ``item_id`` (see children_of) with the ids of the
+    events it was rendered from.
+
+    The sources are the child's creation event, its current state event
+    (None when it has none) and the child-of link that makes it a child of
+    ``item_id``: the child's latest child-of link, as v_items resolves
+    parent_id. That link is None when the events read do not hold it.
+    """
+    kids = sorted(
+        (row for row in rows if row.get("parent_id") == item_id),
+        key=lambda row: int(row["created_event_id"]),
+    )
+    ids = {row["item_id"] for row in kids}
+    before: dict[str, set[str]] = {i: set() for i in ids}
+    anchor_link: dict[str, Any] = {}
+    for event in events:
+        if event.kind != "item.linked":
+            continue
+        rel = event.payload.get("rel")
+        if rel == "child-of":
+            if event.item_id in ids:
+                held = anchor_link.get(event.item_id)
+                if held is None or event.id > held.id:
+                    anchor_link[event.item_id] = event
+            continue
+        if rel != "blocks":
+            continue
+        blocker, blocked = event.item_id, event.payload.get("target")
+        if blocker in ids and blocked in ids and blocker != blocked:
+            before[blocked].add(blocker)
+    ordered: list[tuple[dict[str, Any], dict[str, int | None]]] = []
+    placed: set[str] = set()
+    left = list(kids)
+    while left:
+        pick = next((row for row in left if before[row["item_id"]] <= placed), left[0])
+        left.remove(pick)
+        placed.add(pick["item_id"])
+        link = anchor_link.get(pick["item_id"])
+        state_id = pick.get("state_event_id")
+        ordered.append(
+            (
+                {
+                    "item_id": pick["item_id"],
+                    "title": pick["title"],
+                    "status": pick["status"],
+                    "holder": pick["owner"] if pick["owner"] is not None else pick["claim"],
+                },
+                {
+                    "created_event_id": int(pick["created_event_id"]),
+                    "state_event_id": None if state_id is None else int(state_id),
+                    "link_event_id": (
+                        link.id
+                        if link is not None and link.payload.get("target") == item_id
+                        else None
+                    ),
+                },
+            )
+        )
+    return ordered
+
+
 def children_of(
     rows: Iterable[Mapping[str, Any]], events: Iterable[Any], item_id: str
 ) -> list[dict[str, Any]]:
@@ -1478,34 +1543,54 @@ def children_of(
     order. A cycle among the blocks links falls back to creation order for
     what is left.
     """
-    kids = sorted(
-        (row for row in rows if row.get("parent_id") == item_id),
-        key=lambda row: int(row["created_event_id"]),
-    )
-    ids = {row["item_id"] for row in kids}
-    before: dict[str, set[str]] = {i: set() for i in ids}
-    for event in events:
-        if event.kind != "item.linked" or event.payload.get("rel") != "blocks":
-            continue
-        blocker, blocked = event.item_id, event.payload.get("target")
-        if blocker in ids and blocked in ids and blocker != blocked:
-            before[blocked].add(blocker)
-    ordered: list[dict[str, Any]] = []
-    placed: set[str] = set()
-    left = list(kids)
-    while left:
-        pick = next((row for row in left if before[row["item_id"]] <= placed), left[0])
-        left.remove(pick)
-        placed.add(pick["item_id"])
-        ordered.append(
-            {
-                "item_id": pick["item_id"],
-                "title": pick["title"],
-                "status": pick["status"],
-                "holder": pick["owner"] if pick["owner"] is not None else pick["claim"],
-            }
-        )
-    return ordered
+    return [row for row, _sources in _children_with_sources(rows, events, item_id)]
+
+
+def _child_source_ids(
+    item_id: str, children: Iterable[tuple[Mapping[str, Any], Mapping[str, int | None]]]
+) -> set[int]:
+    """The events behind the child rows: each child's creation, state (when it
+    has one) and child-of link event. A child whose creation or link event is
+    missing is refused, never left out of the full card's header."""
+    ids: set[int] = set()
+    for row, sources in children:
+        for key in ("created_event_id", "link_event_id"):
+            value = sources[key]
+            if value is None:
+                # Internal invariant, not a reachable refusal. The rows and the
+                # events come from one read snapshot (_read_snapshot), and
+                # v_items resolves parent_id from the child's latest child-of
+                # link, the same link _children_with_sources takes; a
+                # concurrent writer cannot split them. Reaching this means the
+                # view and this code disagree, so fail rather than drop the id.
+                raise RuntimeError(
+                    f"card --full: child {row['item_id']} of {item_id} has no {key}"
+                    " in its read snapshot; the items view and the events disagree"
+                )
+            ids.add(int(value))
+        state_id = sources["state_event_id"]
+        if state_id is not None:
+            ids.add(int(state_id))
+    return ids
+
+
+@contextmanager
+def _read_snapshot(lg: Ledger) -> Iterator[None]:
+    """Hold one SQLite read snapshot over every read made inside the block.
+
+    With no transaction open on the connection, BEGIN before the first read
+    and ROLLBACK when the block ends, also on an exception. A caller that
+    already holds a transaction is read inside it and left as it was.
+    """
+    conn = lg._conn
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        if own and conn.in_transaction:
+            conn.execute("ROLLBACK")
 
 
 def project_item(
@@ -1523,7 +1608,22 @@ def project_item(
     installed. The rows are still clipped to a few dozen words, findings and
     pointers capped and the header bounded to SOURCE_ID_LIMIT ids, unless
     ``full``: then nothing is clipped, capped or cut.
+
+    Every ledger read is made in one read snapshot, so no row or source id
+    on the card is newer than its revision_id.
     """
+    with _read_snapshot(lg):
+        return _project_item(lg, item, pointers=pointers, program=program, full=full)
+
+
+def _project_item(
+    lg: Ledger,
+    item: Mapping[str, Any],
+    *,
+    pointers: PointerSource | None,
+    program: str,
+    full: bool,
+) -> Card:
     item_id = item["item_id"]
     events = lg.events()
     tail = events[-1]
@@ -1600,7 +1700,8 @@ def project_item(
     # link {rel: "blocks", target: T} on item S blocks T.
     rows = lg.items()
     closed = {row["item_id"] for row in rows if row["status"] == "closed"}
-    children = children_of(rows, events, item_id)
+    child_sources = _children_with_sources(rows, events, item_id)
+    children = [row for row, _sources in child_sources]
     linked_only: set[str] = set()
     for event in events:
         if event.kind != "item.linked":
@@ -1669,8 +1770,14 @@ def project_item(
     )
     if full:
         # The full card names every event it was projected from, including
-        # each decision record's standing, result, source and superseding events.
-        ids = base | _content_ids(card) | _record_ref_ids(card)
+        # each decision record's standing, result, source and superseding events
+        # and each child row's creation, state and child-of link events.
+        ids = (
+            base
+            | _content_ids(card)
+            | _record_ref_ids(card)
+            | _child_source_ids(item_id, child_sources)
+        )
         return replace(card, source_event_ids=tuple(sorted(ids)))
     # The creation, state and current spec events are always named; past SOURCE_ID_LIMIT
     # the header keeps them, the newest open ask and the latest election,
@@ -1687,11 +1794,15 @@ def project_card(
     full: bool = False,
 ) -> Card:
     """Project a bounded card for ``item_id`` (unbounded with ``full``);
-    raise KeyError if missing."""
-    for row in lg.items():
-        if row["item_id"] == item_id:
-            card = project_item(lg, row, pointers=pointers, program=program, full=full)
-            return card if full else bound_card(card)
+    raise KeyError if missing. The item lookup and the whole projection read
+    one snapshot (see _read_snapshot)."""
+    with _read_snapshot(lg):
+        for row in lg.items():
+            if row["item_id"] == item_id:
+                card = _project_item(
+                    lg, row, pointers=pointers, program=program, full=full
+                )
+                return card if full else bound_card(card)
     raise KeyError(item_id)
 
 
