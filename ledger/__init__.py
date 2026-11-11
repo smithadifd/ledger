@@ -9,7 +9,7 @@ The library is importable and has no CLI. Callers open a path, append
 validated events, query current-state views, and verify the chain.
 """
 
-__version__ = "0.1.19"
+__version__ = "0.1.20"
 
 from .dbfile import UnsafeDatabaseFile
 from .paths import (
