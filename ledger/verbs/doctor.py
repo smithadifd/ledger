@@ -3,7 +3,10 @@
 It also reports whether the derived search index is missing, stale,
 behind (only newer events) or current, with a severity (``ok``, ``info``, or
 ``warn`` when the index cannot be built). That report never changes the exit
-code.
+code. The text line follows the severity: ``ok`` adds nothing; ``info`` says
+the index rebuilds itself, which it does; ``warn`` names the reason and what
+clears it, and never says the index rebuilds itself. A warn reason this file
+does not know is printed as it is, with a pointer to ``ledger doctor --json``.
 
 It also lists claims whose lease has expired, with holder and age, so a dead
 seat's claim is noticed. That list never changes the exit code either.
@@ -78,6 +81,90 @@ def _search_status(resolved: Path, ctx: Context) -> dict:
             "reasons": [f"{type(exc).__name__}: {exc}"],
             "severity": search.severity_for("unknown"),
         }
+
+
+# The reasons ``search.index_status`` gives for a ``warn`` severity, matched by
+# the fixed start ``ledger/search.py`` words them with, and what clears each.
+_WARN_REMEDIES: tuple[tuple[str, str], ...] = (
+    (
+        f"refusing to use {search.SEARCH_DB_NAME} inside a git work tree: ",
+        "move the ledger database to a directory outside the git work tree",
+    ),
+    (
+        f"{search.SEARCH_DB_NAME} is a directory, not a regular file: ",
+        "move that directory away from the index path",
+    ),
+    (
+        "unreadable ledger config ",
+        f"make {search.CONFIG_NAME} readable, valid JSON",
+    ),
+    (
+        "ledger config ",
+        f"make {search.CONFIG_NAME} a JSON object",
+    ),
+    (
+        "search_roots must be a list of absolute paths",
+        f"set search_roots in {search.CONFIG_NAME} to a list of absolute paths",
+    ),
+    (
+        "search_roots entry is not absolute: ",
+        f"make every search_roots entry in {search.CONFIG_NAME} an absolute path",
+    ),
+    (
+        "cannot stat the search index ",
+        "make the index path's directory readable",
+    ),
+)
+
+_REBUILD_HINT = " (ledger index rebuilds it)"
+
+
+def _remedy(reason: str) -> str | None:
+    for prefix, remedy in _WARN_REMEDIES:
+        if reason.startswith(prefix):
+            return remedy
+    return None
+
+
+def _warn_hint(found: dict) -> str:
+    """Each known warn reason with its remedy; any other reason verbatim with a
+    pointer to the JSON form. Never the rebuild claim."""
+    reasons = [str(r) for r in found.get("reasons") or []]
+    known = [(r, _remedy(r)) for r in reasons]
+    parts = [
+        f"ledger index refuses: {reason}; to clear it, {remedy}"
+        for reason, remedy in known
+        if remedy is not None
+    ]
+    unmatched = [reason for reason, remedy in known if remedy is None]
+    # A stale state's reasons are information, not the cause of the warning;
+    # an unknown state's reasons, or a warning no known reason explains, are
+    # printed as they are.
+    verbatim = unmatched if found.get("status") not in search.SEVERITIES or not parts else []
+    if not parts and not verbatim:
+        verbatim = ["no reason given"]
+    if verbatim:
+        parts.append(f"{'; '.join(verbatim)}; see ledger doctor --json")
+    return f" (warn: {'; '.join(parts)})"
+
+
+def _search_line(found: dict) -> str:
+    """``ok``: the state alone. ``info``: the rebuild parenthetical, or the
+    behind count. Anything else is a warning: its reason and remedy."""
+    severity = found.get("severity")
+    status = found.get("status")
+    if severity == "ok":
+        return f"{status}"
+    if severity == "info":
+        if status == "behind":
+            count = found["new_events"]
+            plural = "event" if count == 1 else "events"
+            return (
+                f"current to event {found['indexed_to_event']}, "
+                f"{count} new {plural} will be indexed on the next search"
+            )
+        return f"{status}{_REBUILD_HINT}"
+    return f"{status}{_warn_hint(found)}"
 
 
 def _expired_claims(resolved: Path) -> dict:
@@ -184,22 +271,11 @@ def run(args, ctx: Context) -> Result:
         "expired_claims": claims,
         "summary": _summary(resolved),
     }
-    if found["status"] == "behind":
-        count = found["new_events"]
-        plural = "event" if count == 1 else "events"
-        shown = (
-            f"current to event {found['indexed_to_event']}, "
-            f"{count} new {plural} will be indexed on the next search"
-        )
-        hint = ""
-    else:
-        shown = found["status"]
-        hint = "" if found["status"] == "current" else " (ledger index rebuilds it)"
     return Result(
         data=data,
         text=(
             f"path: {resolved}\nschema_version: {version}\n"
-            f"search: {shown}{hint}\n"
+            f"search: {_search_line(found)}\n"
         )
         + "".join(_expired_line(c) for c in claims["items"]),
     )
