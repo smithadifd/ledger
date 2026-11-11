@@ -56,10 +56,24 @@ cut. Rows held by the item's own events (its links, the blockers its state
 names) end "(+K cut; ledger export-item --json -- <item>)". Rows held by other
 items' events get their own line: inbound duplicated-by rows end "(+K cut;
 ledger query --duplicate-of=<item> --all)", and blockers that come only from
-another item's blocks link end "(+K cut; ledger query --blocks=<item> --all)".
-Each query prints every item that holds such a row when it runs, so every row
-the cut removed comes back. A section whose cut rows are all of one kind has
-one marker.
+another item's blocks link end "(+K cut; ledger query --blocks=<item> --open
+--all)"; --open keeps only the blockers that are not closed, the set the card
+counts. Each query prints every item that holds such a row when it runs, so
+every row the cut removed comes back. A section whose cut rows are all of one
+kind has one marker. The next step's count of the blockers past
+NEXT_STEP_BLOCKERS names the same commands, split by the same kinds.
+
+The JSON form (``Card.as_dict``) keeps ``truncated`` (the names) and adds
+``cuts``: one entry for each marker the text form prints, in the same order,
+each {section, count, unit, command} with the count and the command exactly as
+the text prints them; unit is "rows" for a "(+K cut; ...)" marker and "words"
+for a "(+K words cut; ...)" one. An ask field's entry also names the event
+that holds its full text (event_id). Words cut from an ask the card then
+capped away get one ask entry with no event_id, after the ask's field entries,
+so every name in ``truncated`` has at least one entry with a count and a
+command. The order comes from rendering the text card itself. A name with no
+marker of its own gets one entry naming the item's export, in its section's
+place, or after the rest when the text card does not render that section.
 
 An anchor's card has a Children section after Links: one line per child
 (id, title, status, holder), a child that blocks another first, then in
@@ -288,6 +302,7 @@ def _card_word_count(card: Card, source: Card | None = None) -> int:
             chosen=_latest_choice(source.decisions),
             item_id=source.item_id,
             program=program,
+            linked_blockers=source.inbound_blockers,
         )
 
     if card.next_step == derived(card.program):
@@ -316,6 +331,7 @@ def derive_next_step(
     item_id: str = "",
     program: str = "ledger",
     full: bool = False,
+    linked_blockers: Iterable[str] = (),
 ) -> str:
     """Project a next step from current status, blockers, and open questions.
 
@@ -334,6 +350,11 @@ def derive_next_step(
     count and "; then answer open questions" always survive.
 
     ``full`` (the unbounded card) names every blocker and clips no name.
+
+    The count of blockers past NEXT_STEP_BLOCKERS names the commands that
+    print them, as a capped Blockers section does: the item's own export for
+    blockers its state names, and the open-blockers query for those in
+    ``linked_blockers`` (named only by another item's blocks link).
     """
     name_words = None if full else STEP_NAME_WORDS
     if status == "closed":
@@ -342,8 +363,17 @@ def derive_next_step(
     if blockers:
         shown = blockers if full else blockers[:NEXT_STEP_BLOCKERS]
         named = ", ".join(_clip(name, name_words) for name in shown)
-        if len(blockers) > len(shown):
-            named += f" {_cut_count(len(blockers) - len(shown), item_id, program)}"
+        rest = blockers[len(shown):]
+        if rest:
+            linked = set(linked_blockers)
+            cuts = _cut_commands(
+                "blockers",
+                len(rest),
+                sum(1 for name in rest if name in linked),
+                item_id,
+                program,
+            )
+            named += " " + " ".join(_row_marker(count, command) for count, command in cuts)
         clear = f"Clear blockers: {named}."
     if open_questions:
         if blockers:
@@ -466,6 +496,7 @@ class Card:
                 self.spec_hash,
             ),
             "truncated": list(self.truncated),
+            "cuts": _cut_entries(self),
             "footer": footer_line(self.item_id, self.program),
         }
 
@@ -596,9 +627,14 @@ def footer_line(item_id: str, program: str = "ledger") -> str:
     return f"{FOOTER} ({program} {shlex.join(['export-item', '--', item_id])})"
 
 
+def _row_marker(count: int, command: str) -> str:
+    """Marker for ``count`` rows cut, naming the command that prints them."""
+    return f"(+{count} cut; {command})"
+
+
 def _cut_count(count: int, item_id: str, program: str = "ledger") -> str:
     """Marker for rows or ids cut from a section or the header."""
-    return f"(+{count} cut; {recover_command(item_id, program)})"
+    return _row_marker(count, recover_command(item_id, program))
 
 
 def children_command(item_id: str, program: str = "ledger") -> str:
@@ -613,8 +649,10 @@ def duplicates_command(item_id: str, program: str = "ledger") -> str:
 
 
 def blockers_command(item_id: str, program: str = "ledger") -> str:
-    """The command that prints every item with a blocks link to ``item_id``."""
-    return f"{program} {shlex.join(['query', f'--blocks={item_id}', '--all'])}"
+    """The command that prints every item with a blocks link to ``item_id``
+    that is not closed: the blockers the card counts (closed ones are left
+    out of the card)."""
+    return f"{program} {shlex.join(['query', f'--blocks={item_id}', '--open', '--all'])}"
 
 
 # The command that prints a section's rows held by other items' events.
@@ -622,6 +660,20 @@ _ELSEWHERE_COMMANDS: dict[str, Callable[[str, str], str]] = {
     "links": duplicates_command,
     "blockers": blockers_command,
 }
+
+
+def _cut_commands(
+    section: str, count: int, elsewhere: int, item_id: str, program: str = "ledger"
+) -> list[tuple[int, str]]:
+    """(count, command) for each kind of row cut from ``section``: rows the
+    item's own events hold first, then the ``elsewhere`` rows other items'
+    events hold, under the query that lists them."""
+    cuts: list[tuple[int, str]] = []
+    if count > elsewhere:
+        cuts.append((count - elsewhere, recover_command(item_id, program)))
+    if elsewhere > 0:
+        cuts.append((elsewhere, _ELSEWHERE_COMMANDS[section](item_id, program)))
+    return cuts
 
 
 def _cut_words(count: int, item_id: str, program: str = "ledger") -> str:
@@ -685,8 +737,13 @@ def _default_only(payload: Mapping[str, Any]) -> bool:
 
 
 def _fmt_questions(
-    rows: tuple[dict[str, Any], ...], item_id: str, program: str = "ledger"
+    rows: tuple[dict[str, Any], ...],
+    item_id: str,
+    program: str,
+    order: list[str],
 ) -> str:
+    # The ask-field markers print here, before the section's own marker.
+    _rendered(order, "ask")
     lines: list[str] = []
     for row in rows:
         lines.append(f"- event={row['asked_event_id']}: {row['question']}")
@@ -740,15 +797,15 @@ def _fmt_children(rows: tuple[dict[str, Any], ...]) -> str:
     return _fmt_list(lines)
 
 
-def _children_block(card: Card) -> list[str]:
+def _children_block(card: Card, order: list[str]) -> list[str]:
     """The Children section, or nothing for an item with no children."""
     if card.children_total <= 0:
         return []
+    _rendered(order, "children")
     body = _fmt_children(card.children)
-    count = _omitted_count(card, "children")
-    if count > 0:
-        # The children are other items' events: name the query that lists them.
-        marker = f"(+{count} cut; {children_command(card.item_id, card.program)})"
+    cuts = _section_cuts(card, "children")
+    if cuts:
+        marker = "\n".join(_row_marker(count, command) for count, command in cuts)
         body = marker if body == "(none)" else f"{body}\n{marker}"
     return [
         "",
@@ -854,26 +911,119 @@ def _elsewhere_count(card: Card, section: str) -> int:
     return 0
 
 
-def _with_marker(body: str, card: Card, section: str) -> str:
+def _section_cuts(card: Card, section: str) -> list[tuple[int, str]]:
+    """(count, command) of each marker a capped section prints, in order."""
     count = _omitted_count(card, section)
     if count <= 0:
-        return body
+        return []
+    if section == "children":
+        # The children are other items' events: name the query that lists them.
+        return [(count, children_command(card.item_id, card.program))]
     elsewhere = _elsewhere_count(card, section) if section in _ELSEWHERE_COMMANDS else 0
-    markers = []
-    if count > elsewhere:
-        # The item's own events hold these rows.
-        markers.append(_cut_count(count - elsewhere, card.item_id, card.program))
-    if elsewhere > 0:
-        # Other items' events hold these: name the query that lists them.
-        command = _ELSEWHERE_COMMANDS[section](card.item_id, card.program)
-        markers.append(f"(+{elsewhere} cut; {command})")
-    marker = "\n".join(markers)
+    return _cut_commands(section, count, elsewhere, card.item_id, card.program)
+
+
+# Fields trimmed in place, each with one "(+K words cut; ...)" marker.
+_INLINE_FIELDS = ("title", "owner", "claim", "next_step")
+
+
+def _ask_cuts(card: Card) -> list[dict[str, Any]]:
+    """One entry per ask-field marker the text prints, in print order, then
+    the words cut from asks the card capped away (no marker prints them)."""
+    command = recover_command(card.item_id, card.program)
+    entries: list[dict[str, Any]] = []
+    for row in card.open_questions:
+        omitted_words = row.get("omitted_words") or {}
+        options = range(len(row.get("options") or []))
+        paths = ["ask", *(f"options.{index}.description" for index in options), *ASK_FIELDS]
+        for path in paths:
+            cut = int(omitted_words.get(path, 0))
+            if cut > 0:
+                entries.append(
+                    {
+                        "section": "ask",
+                        "count": cut,
+                        "unit": "words",
+                        "command": command,
+                        "event_id": int(row["asked_event_id"]),
+                    }
+                )
+    left = _omitted_count(card, "ask") - sum(entry["count"] for entry in entries)
+    if left > 0:
+        entries.append({"section": "ask", "count": left, "unit": "words", "command": command})
+    return entries
+
+
+def _render_order(card: Card) -> list[str]:
+    """The sections that can carry a cut marker, in the order the text card
+    renders them: read off one rendering, so the JSON cannot drift from it."""
+    order: list[str] = []
+    _render_card(card, order)
+    return order
+
+
+def _cut_entries(card: Card) -> list[dict[str, Any]]:
+    """The JSON ``cuts``: each marker the text card prints, as
+    {section, count, unit, command}, in the order the text card prints them.
+    A name with no marker of its own still gets one entry naming the item's
+    export (after the rest when its section does not render), so no cut
+    section goes out without its count and command."""
+    order = _render_order(card)
+    sections = [name for name in order if name in card.truncated]
+    sections += [name for name in card.truncated if name not in order]
+    entries: list[dict[str, Any]] = []
+    for section in sections:
+        if section == "ask":
+            found = _ask_cuts(card)
+        elif section in _INLINE_FIELDS:
+            count = _omitted_count(card, section)
+            found = []
+            if count > 0:
+                found.append(
+                    {
+                        "section": section,
+                        "count": count,
+                        "unit": "words",
+                        "command": recover_command(card.item_id, card.program),
+                    }
+                )
+        else:
+            found = [
+                {"section": section, "count": count, "unit": "rows", "command": command}
+                for count, command in _section_cuts(card, section)
+            ]
+        if not found:
+            found = [
+                {
+                    "section": section,
+                    "count": _omitted_count(card, section),
+                    "unit": "rows",
+                    "command": recover_command(card.item_id, card.program),
+                }
+            ]
+        entries.extend(found)
+    return entries
+
+
+def _rendered(order: list[str], section: str) -> None:
+    """Note that ``section`` renders here, the first time it does."""
+    if section not in order:
+        order.append(section)
+
+
+def _with_marker(body: str, card: Card, section: str, order: list[str]) -> str:
+    _rendered(order, section)
+    cuts = _section_cuts(card, section)
+    if not cuts:
+        return body
+    marker = "\n".join(_row_marker(count, command) for count, command in cuts)
     if body == "(none)":
         return marker
     return f"{body}\n{marker}"
 
 
-def _with_inline_marker(text: str, card: Card, section: str) -> str:
+def _with_inline_marker(text: str, card: Card, section: str, order: list[str]) -> str:
+    _rendered(order, section)
     count = _omitted_count(card, section)
     if count <= 0:
         return text
@@ -882,6 +1032,12 @@ def _with_inline_marker(text: str, card: Card, section: str) -> str:
 
 def format_card(card: Card) -> str:
     """Render the stable text/markdown card, including the authority footer."""
+    return _render_card(card, [])
+
+
+def _render_card(card: Card, order: list[str]) -> str:
+    """Render the card; append to ``order`` each section that can carry a cut
+    marker, in the order it renders."""
     source = ", ".join(str(i) for i in card.source_event_ids)
     if card.source_omitted > 0:
         source = f"{source} {_cut_count(card.source_omitted, card.item_id, card.program)}"
@@ -890,10 +1046,10 @@ def format_card(card: Card) -> str:
         f"revision: {card.revision_id} {card.revision_hash}",
         f"source_event_ids: {source}",
         f"type: {card.type}",
-        f"title: {_with_inline_marker(card.title, card, 'title')}",
+        f"title: {_with_inline_marker(card.title, card, 'title', order)}",
         f"status: {card.status}",
-        f"owner: {_with_inline_marker(_dash(card.owner), card, 'owner')}",
-        f"claim: {_with_inline_marker(_dash(card.claim), card, 'claim')}",
+        f"owner: {_with_inline_marker(_dash(card.owner), card, 'owner', order)}",
+        f"claim: {_with_inline_marker(_dash(card.claim), card, 'claim', order)}",
         f"spec {_dash(None if card.spec_version is None else f'v{card.spec_version}')}",
     ]
     moved = spec_moved_line(
@@ -904,32 +1060,35 @@ def format_card(card: Card) -> str:
     parts += [
         "",
         "## Decisions",
-        _with_marker(_fmt_decisions(card.decisions), card, "decisions"),
+        _with_marker(_fmt_decisions(card.decisions), card, "decisions", order),
         "",
         "## Open questions",
         _with_marker(
-            _fmt_questions(card.open_questions, card.item_id, card.program), card, "open_questions"
+            _fmt_questions(card.open_questions, card.item_id, card.program, order),
+            card,
+            "open_questions",
+            order,
         ),
         "",
         "## Next step",
-        _with_inline_marker(card.next_step, card, "next_step"),
+        _with_inline_marker(card.next_step, card, "next_step", order),
         "",
         "## Links",
-        _with_marker(_fmt_links(card.links), card, "links"),
-        *_children_block(card),
+        _with_marker(_fmt_links(card.links), card, "links", order),
+        *_children_block(card, order),
         "",
         "## Blockers",
-        _with_marker(_fmt_blockers(card.blockers), card, "blockers"),
+        _with_marker(_fmt_blockers(card.blockers), card, "blockers", order),
         "",
         "## Notes",
-        _with_marker(_fmt_notes(card.notes), card, "notes"),
+        _with_marker(_fmt_notes(card.notes), card, "notes", order),
     ]
     for section, heading, fmt in _RESUME_FORMAT:
         rows = getattr(card, section)
         if not rows and _omitted_count(card, section) <= 0:
             continue
         body = fmt(rows, card.item_id, card.program) if fmt is _fmt_reviews else fmt(rows)
-        parts.extend(["", f"## {heading}", _with_marker(body, card, section)])
+        parts.extend(["", f"## {heading}", _with_marker(body, card, section, order)])
     if card.truncated:
         parts.extend(["", "## Truncated", "dropped: " + ", ".join(card.truncated)])
     parts.extend(["", footer_line(card.item_id, card.program)])
@@ -1147,6 +1306,7 @@ def bound_card(card: Card) -> Card:
                 chosen=_latest_choice(card.decisions),
                 item_id=current.item_id,
                 program=current.program,
+                linked_blockers=card.inbound_blockers,
             )
         updated = replace(
             current,
@@ -1802,6 +1962,7 @@ def _project_item(
         item_id=item_id,
         program=program,
         full=full,
+        linked_blockers=tuple(b for b in blockers if b in linked_only),
     )
     base: set[int] = set()
     created_id = item.get("created_event_id")
