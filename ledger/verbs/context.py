@@ -26,7 +26,7 @@ Layout, in this order (every section heading always prints):
     ## Spec                        latest item.spec event
     ## Decisions                   v_decision_records rows, decision.elected
     ## Open questions              v_open_decisions rows (latest re-ask only)
-    ## Linked documents            none until documents land (LC5)
+    ## Linked documents            the item's doc.attached events, oldest first
     ## Last notes (K of M)         the newest NOTE_LIMIT item.note events
     ## Related items (depth 1)     items linked to the target, either way
     ## Related items (depth 2)     items linked to a depth-1 item
@@ -39,6 +39,15 @@ make the graph are
 ``item.linked`` events whose rel names an item (``item``, ``blocks``,
 ``duplicate-of``) and whose target is an existing item other than the source.
 Depth 2 excludes the target and every depth-1 item, so a cycle ends there.
+
+A linked document reads ``event=<id> <role>: <title> · sha256 <12 hex>``,
+read as ``doc show`` reads the item's documents; the title is escaped as
+``doc show`` escapes it (``-`` when it has none) and, as with the other
+free-text rows here, clipped to 30 words with the full-text pointer
+(``doc show`` does not clip), and the digest is the first 12 hex digits of
+the stored sha256. With ``--json`` the section also
+carries ``entries``, one ``{event_id, role, title, sha256}`` per document
+with the full digest, empty when the section is collapsed.
 
 The budget counts whitespace-separated words of the printed pack (the card's
 ``word_count``), headings and markers included; blank lines are free. The
@@ -78,6 +87,8 @@ from ledger.verbs import (
     open_db,
     require_item,
 )
+from ledger.verbs.doc import item_documents
+from ledger.verbs.events import text_cell
 
 DEFAULT_BUDGET = 600
 UNIT = "words"
@@ -88,7 +99,6 @@ NOTE_LIMIT = 5
 ROW_WORDS = 30
 # item.linked rels whose target names another item: the link graph's edges.
 ITEM_RELS = ("item", "blocks", "duplicate-of")
-DOCUMENTS_NONE = "none (documents land with LC5)"
 READ_ATTEMPTS = 3
 
 # (key, heading) after the spec, in fill order.
@@ -108,6 +118,8 @@ class Section:
     heading: str
     lines: tuple[str, ...]
     empty: str = "none"
+    # The documents section's structured rows for --json; None elsewhere.
+    entries: tuple[Mapping[str, Any], ...] | None = None
 
     @property
     def rows(self) -> int:
@@ -250,6 +262,27 @@ def _note_section(item_id: str, events: list[Event]) -> Section:
     )
 
 
+def _document_section(lg: Ledger, item_id: str) -> Section:
+    """The item's attached documents, oldest first, one line each."""
+    lines = []
+    entries = []
+    for event in item_documents(lg, item_id):
+        payload = event.payload
+        sha256 = str(payload.get("sha256"))
+        title = payload.get("title")
+        lines.append(
+            f"event={event.id} {payload.get('role')}: "
+            f"{_clip(text_cell(title), event.id)} · sha256 {sha256[:12]}"
+        )
+        entries.append({
+            "event_id": event.id,
+            "role": payload.get("role"),
+            "title": title,
+            "sha256": payload.get("sha256"),
+        })
+    return Section("documents", "Linked documents", tuple(lines), entries=tuple(entries))
+
+
 def _edges(
     events: list[Event], known: Mapping[str, Mapping[str, Any]]
 ) -> dict[str, list[tuple[int, str, Event]]]:
@@ -317,7 +350,7 @@ def project(lg: Ledger, item_id: str) -> Pack:
     sections = (
         Section("decisions", "Decisions", _decision_lines(lg, item, events)),
         Section("open_questions", "Open questions", _question_lines(lg, item_id, events)),
-        Section("documents", "Linked documents", (), empty=DOCUMENTS_NONE),
+        _document_section(lg, item_id),
         _note_section(item_id, events),
         Section("related_1", "Related items (depth 1)",
                 tuple(_related_line(row, known) for row in depth1)),
@@ -383,13 +416,16 @@ def fit(pack: Pack, budget: int) -> tuple[str, dict[str, Any]]:
             at_floor = True
         used += _words(chosen)
         blocks.append(chosen)
-        shown.append({
+        row: dict[str, Any] = {
             "name": section.key,
             "heading": section.heading,
             "rows": section.rows,
             "collapsed": collapsed,
             "lines": [] if collapsed else list(section.lines),
-        })
+        }
+        if section.entries is not None:
+            row["entries"] = [] if collapsed else [dict(e) for e in section.entries]
+        shown.append(row)
     text = "\n\n".join("\n".join(block) for block in blocks) + "\n"
     data = {
         "item_id": pack.item_id,

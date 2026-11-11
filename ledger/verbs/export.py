@@ -7,6 +7,8 @@ from pathlib import Path
 from ledger.export import (
     DEFAULT_MAX_EVENTS,
     DEFAULT_MAX_HOURS,
+    EXPORT_DOC_CREDENTIAL,
+    ExportDocCredential,
     LagExceeded,
     check_lag,
     commit_export,
@@ -104,7 +106,14 @@ def run(args, ctx: Context) -> Result:
                     f"watermark={lag.watermark}"
                 ),
             )
-        result = export_events(lg, export_dir)
+        try:
+            result = export_events(lg, export_dir)
+        except ExportDocCredential as exc:
+            # Refused before any file is written: no watermark move, and
+            # --commit does not run.
+            raise CliError(
+                str(exc), code=EXPORT_DOC_CREDENTIAL, exit_code=EXIT_REFUSED
+            ) from exc
     finally:
         lg.close()
     commit_sha = None

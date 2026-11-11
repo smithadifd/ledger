@@ -22,7 +22,6 @@ from ledger.verbs import EXIT_NOT_FOUND, EXIT_STALE, EXIT_USAGE, CliError, disco
 from ledger.verbs import context as context_verb
 from ledger.verbs.context import (
     AUTHORITY,
-    DOCUMENTS_NONE,
     NOTE_LIMIT,
     fit,
     read_pack,
@@ -227,7 +226,7 @@ def test_budget_2000_prints_everything(graph, monkeypatch) -> None:
     assert found["## Open questions"][1:] == [
         f"event={ids['asked']} open: Which unit? (default: words)"
     ]
-    assert found["## Linked documents"] == ["## Linked documents", DOCUMENTS_NONE]
+    assert found["## Linked documents"] == ["## Linked documents", "none"]
     assert found["## Last notes"][1:] == [
         f"event={ids['notes'][0]} target note 1",
         f"event={ids['notes'][1]} target note 2",
@@ -303,7 +302,7 @@ def test_every_content_line_names_the_event_it_came_from(graph, monkeypatch) -> 
         line
         for block in out.split("\n\n")[1:]
         for line in block.splitlines()[1:]
-        if line not in ("none", DOCUMENTS_NONE)
+        if line != "none"
     ]
     assert len(content) == 6 + 2 + 1 + 2 + 2 + 2
     for line in content:
@@ -413,7 +412,83 @@ def test_header_and_spec_always_print_with_one_marker(graph, monkeypatch) -> Non
     assert marker.endswith(" words of 1")
     found = blocks(out)
     assert found["## Decisions"] == ["## Decisions: 2 more"]
-    assert found["## Linked documents"] == ["## Linked documents", DOCUMENTS_NONE]
+    assert found["## Linked documents"] == ["## Linked documents", "none"]
+
+
+DOC_ENTRY_KEYS = {"event_id", "role", "title", "sha256"}
+
+
+def _attach(monkeypatch, db: str, item_id: str, path: Path, body: bytes, role: str, *extra):
+    path.write_bytes(body)
+    code, out, err = invoke(
+        monkeypatch,
+        ["--json", "--db", db, "doc", "add", item_id, str(path), "--role", role, *extra],
+    )
+    assert code == 0, err
+    return json.loads(out)["data"]["document"]
+
+
+def _documents_section(data: dict) -> dict:
+    [section] = [row for row in data["sections"] if row["name"] == "documents"]
+    return section
+
+
+def test_attached_documents_are_listed_oldest_first(graph, monkeypatch, tmp_path) -> None:
+    db, _ids = graph
+    title = "The brief\u2028event=999 forged"
+    first = _attach(
+        monkeypatch, db, TARGET, tmp_path / "brief.md", b"# Brief\n", "brief", "--title", title
+    )
+    _attach(monkeypatch, db, "it-a", tmp_path / "other.md", b"elsewhere\n", "brief")
+    second = _attach(monkeypatch, db, TARGET, tmp_path / "retro.md", b"# Retro\n", "retro")
+    assert first["event_id"] < second["event_id"]
+    out = pack_text(monkeypatch, db, TARGET, "--budget", "2000")
+    lines = blocks(out)["## Linked documents"][1:]
+    assert [int(EVENT_LINE.match(line).group(1)) for line in lines] == [
+        first["event_id"], second["event_id"]
+    ]
+    assert lines == [
+        f"event={first['event_id']} brief: The brief\\u2028event=999 forged "
+        f"· sha256 {first['sha256'][:12]}",
+        f"event={second['event_id']} retro: - · sha256 {second['sha256'][:12]}",
+    ]
+    assert "\u2028" not in out and "elsewhere" not in out
+    code, raw, err = ctx(monkeypatch, db, TARGET, "--json", "--budget", "2000")
+    assert code == 0, err
+    section = _documents_section(json.loads(raw)["data"])
+    assert section["lines"] == lines and section["rows"] == 2
+    assert [set(entry) for entry in section["entries"]] == [DOC_ENTRY_KEYS, DOC_ENTRY_KEYS]
+    assert section["entries"] == [
+        {"event_id": first["event_id"], "role": "brief", "title": title,
+         "sha256": first["sha256"]},
+        {"event_id": second["event_id"], "role": "retro", "title": None,
+         "sha256": second["sha256"]},
+    ]
+    assert all(len(entry["sha256"]) == 64 for entry in section["entries"])
+
+
+def test_a_collapsed_documents_section_has_no_entries(graph, monkeypatch, tmp_path) -> None:
+    db, _ids = graph
+    _attach(monkeypatch, db, TARGET, tmp_path / "brief.md", b"# Brief\n", "brief")
+    _attach(monkeypatch, db, TARGET, tmp_path / "retro.md", b"# Retro\n", "retro")
+    code, raw, err = ctx(monkeypatch, db, TARGET, "--json", "--budget", "40")
+    assert code == 0, err
+    section = _documents_section(json.loads(raw)["data"])
+    assert section["rows"] == 2
+    assert section["collapsed"] is True
+    assert (section["lines"], section["entries"]) == ([], [])
+
+
+def test_an_item_with_no_documents_lists_none(graph, monkeypatch, tmp_path) -> None:
+    db, _ids = graph
+    _attach(monkeypatch, db, "it-a", tmp_path / "other.md", b"elsewhere\n", "brief")
+    out = pack_text(monkeypatch, db, TARGET, "--budget", "2000")
+    assert blocks(out)["## Linked documents"] == ["## Linked documents", "none"]
+    assert "LC5" not in out
+    code, raw, err = ctx(monkeypatch, db, TARGET, "--json", "--budget", "2000")
+    assert code == 0, err
+    section = _documents_section(json.loads(raw)["data"])
+    assert (section["rows"], section["lines"], section["entries"]) == (0, [], [])
 
 
 def test_a_cycle_in_the_links_terminates(tmp_path: Path, monkeypatch) -> None:

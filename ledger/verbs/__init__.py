@@ -75,6 +75,13 @@ class Result:
     data: Any
     text: str = ""
     exit_code: int = EXIT_OK
+    # Bytes the CLI writes as they are to standard output when --json is
+    # off: no trailing newline, no envelope (``doc show --content``).
+    raw: bytes | None = None
+    # A failure that keeps its data: --json prints ``ok: false`` with this
+    # code, ``data`` and ``text`` as the message; text mode prints ``text``.
+    # Either way the exit status is ``exit_code``.
+    error_code: str | None = None
 
 
 @dataclass(frozen=True)

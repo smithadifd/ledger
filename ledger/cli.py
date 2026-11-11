@@ -136,15 +136,32 @@ def _fail(json_mode: bool, code: str, message: str, exit_code: int) -> int:
     return exit_code
 
 
+def _write_raw(raw: bytes) -> None:
+    """Write ``raw`` to standard output exactly: no newline, no envelope."""
+    sys.stdout.flush()
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        # A text-only stream an embedding caller supplied: the bytes as text,
+        # undecodable ones kept as surrogate escapes.
+        sys.stdout.write(raw.decode("utf-8", errors="surrogateescape"))
+        return
+    buffer.write(raw)
+    buffer.flush()
+
+
 def _ok(json_mode: bool, result: Result) -> int:
     if json_mode:
-        print(
-            json.dumps(
-                {"data": result.data, "error": None, "ok": True},
-                sort_keys=True,
-                default=str,
-            )
-        )
+        if result.error_code is not None:
+            envelope = {
+                "data": result.data,
+                "error": {"code": result.error_code, "message": result.text},
+                "ok": False,
+            }
+        else:
+            envelope = {"data": result.data, "error": None, "ok": True}
+        print(json.dumps(envelope, sort_keys=True, default=str))
+    elif result.raw is not None:
+        _write_raw(result.raw)
     elif result.text:
         sys.stdout.write(result.text if result.text.endswith("\n") else result.text + "\n")
     return result.exit_code

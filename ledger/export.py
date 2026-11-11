@@ -9,6 +9,13 @@ export that holds event files without one.
 ``export --commit`` commits in the configured export directory only and never
 pushes. Pushing is ``export --push``.
 
+Before any event file is written, every pending ``doc.attached`` event's
+bytes are scanned for credential shapes (``ledger.credscan``). A hit on an
+event without ``credential_override: true`` refuses the whole export
+(``ExportDocCredential``): no file is written and the watermark does not
+move. ``commit_export`` and ``push_export`` do not run the scan: they
+commit or push whatever the export directory and its history hold.
+
 That export is the backup stream: restore replays it and checks the hash
 chain, so it keeps every event. ``item_export`` is the per-item export a
 reader or the next seat pulls from; it leaves out the item's ephemeral
@@ -28,6 +35,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .credscan import scan as scan_credentials
+from .credscan import shape_names
 from .store import (
     GENESIS_HASH,
     ChainBroken,
@@ -39,13 +48,29 @@ from .store import (
     check_expected_system,
     event_digest,
 )
-from .schema import is_ephemeral, validate_item_id, validate_payload
+from .schema import (
+    DOC_CREDENTIAL_OVERRIDE,
+    DOC_KIND,
+    is_ephemeral,
+    validate_item_id,
+    validate_payload,
+)
 
 WATERMARK_NAME = "watermark.json"
 STREAM_DIGEST_NAME = "stream-digest.json"
 EVENT_NAME = re.compile(r"^(\d{16})\.json$")
 DEFAULT_MAX_EVENTS = 100
 DEFAULT_MAX_HOURS = 24.0
+
+
+EXPORT_DOC_CREDENTIAL = "export_doc_credential"
+
+
+class ExportDocCredential(LedgerError):
+    """A pending document holds a credential shape and carries no
+    ``credential_override``: the export is refused and nothing is written."""
+
+    code = EXPORT_DOC_CREDENTIAL
 
 
 class LagExceeded(LedgerError):
@@ -308,11 +333,47 @@ def write_event_files(export_dir: Path, events: list[Event]) -> list[Path]:
     return written
 
 
+def refuse_unmarked_credentials(events: Sequence[Event]) -> None:
+    """Refuse ``ExportDocCredential`` when a ``doc.attached`` event in
+    ``events`` holds a credential shape and carries no
+    ``credential_override: true``. The message names the event, its item and
+    the shapes, never the matched bytes. A document whose inline bytes do
+    not decode cannot be scanned, and is refused the same way."""
+    from .restore import inline_document_bytes
+
+    for event in events:
+        if event.kind != DOC_KIND:
+            continue
+        if event.payload.get(DOC_CREDENTIAL_OVERRIDE) is True:
+            continue
+        where = f"export refuses event {event.id} ({event.kind}) on item {event.item_id}"
+        try:
+            data = inline_document_bytes(event.payload)
+        except ValueError:
+            raise ExportDocCredential(
+                f"{where}: {EXPORT_DOC_CREDENTIAL}: its inline bytes do not decode, "
+                "so they cannot be scanned for credential shapes; nothing was written"
+            ) from None
+        hits = scan_credentials(data)
+        if hits:
+            raise ExportDocCredential(
+                f"{where}: {EXPORT_DOC_CREDENTIAL}: its bytes hold a credential shape "
+                f"({shape_names(hits)}) and it carries no credential_override; "
+                "nothing was written"
+            )
+
+
 def export_events(lg: Ledger, export_dir: Path) -> ExportResult:
+    """Write the events after the watermark, then move the watermark.
+
+    Every pending document is scanned first (``refuse_unmarked_credentials``):
+    a refusal writes no event file and leaves the watermark where it was.
+    """
     export_dir = resolve_export_dir(export_dir)
     export_dir.mkdir(parents=True, exist_ok=True)
     watermark_before = read_watermark(export_dir)
     pending = lg.events(after_id=watermark_before)
+    refuse_unmarked_credentials(pending)
     write_event_files(export_dir, pending)
     if pending:
         write_watermark(export_dir, pending[-1].id)
