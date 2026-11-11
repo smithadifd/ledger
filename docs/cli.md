@@ -159,16 +159,19 @@ refuse the `doc.attached` kind. `doc add` is a write and needs
 `doc add` opens `FILE` one component at a time, as given, from `/` (or
 from the current directory for a relative `FILE`), each open relative to the
 directory opened before it and none following a symlink. A symlink at any
-component of the path as given, the file itself or a directory above it, or
-one swapped in while the walk runs, is refused `doc_unreadable` (exit 3)
-rather than followed. A `..` component is refused, never normalised; a
+component not yet opened, the file itself or a directory above it, is
+refused `doc_unreadable` (exit 3) rather than followed, including one
+swapped in while the walk runs. A directory replaced after the walk opened
+it does not redirect the walk, because later opens are relative to the
+descriptor already held. A `..` component is refused, never normalised; a
 repeated `/` and a `.` component are skipped. On macOS `/tmp`, `/var` and
 `/etc` are symlinks into `/private`, so pass the real path (for example
 `/private/tmp/brief.md`). A `FILE` that is empty, ends in `/`, or is not a
 readable regular file (missing, a directory, a FIFO) is `doc_unreadable` as
-well, and so is every `FILE` on a platform that cannot open a path without
-following symlinks. A filename in a refusal is escaped as `events` escapes a
-text column.
+well, and so is a file with more than one hard link (refused before any of
+its bytes are read), and every `FILE` on a platform that cannot open a path
+without following symlinks. A filename in a refusal is escaped as `events`
+escapes a text column.
 
 **`doc show ITEM [--id N] [--content]`** List the item's documents, oldest
 first: event id, role, size, the start of the sha256, `inline`, and the

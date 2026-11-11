@@ -67,9 +67,13 @@ why `append` refuses the kind. Documents are inline-only: the bytes are
 stored base64 in the event, so the hash chain covers them, and a file over
 the 64 KiB inline limit is refused. `doc add` opens the file one path
 component at a time, from `/` (or from the current directory for a relative
-path), never following a symlink at any component, so a symlink anywhere in
-the path as given, or one swapped in while the walk runs, is refused rather
-than followed; a `..` component is refused too. On macOS `/tmp`, `/var` and
+path), each open relative to the directory opened before it and none
+following a symlink. A symlink at any component not yet opened is refused
+rather than followed, including one swapped in while the walk runs. A
+directory replaced after the walk opened it does not redirect the walk,
+because later opens are relative to the descriptor already held. A `..`
+component is refused too, and so is a file with more than one hard link,
+before any of its bytes are read. On macOS `/tmp`, `/var` and
 `/etc` are symlinks, so pass the real path. Every read verifies the stored
 bytes and touches nothing else:
 `doc show --content` prints a document's bytes and `doc verify` reports it
@@ -77,7 +81,9 @@ bytes and touches nothing else:
 `mismatch`, never content. The file a document came from can change or go
 away without affecting it. Restore and replay recompute every document's
 digest before inserting it and refuse a document that names a path, so an
-export cannot bring in a forged one.
+export cannot bring in a forged one. They also refuse a document whose item
+is neither in the destination nor created earlier in the same batch
+(`restore_doc_item_missing`), and roll back the whole batch.
 
 The views (`ledger/migrations/`) include `v_items` (current state per item),
 `v_ready` (open items with no open blocker, including claims whose lease has

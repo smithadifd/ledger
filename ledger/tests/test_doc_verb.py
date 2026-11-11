@@ -803,6 +803,44 @@ def test_a_symlinked_leaf_is_refused_and_its_target_never_read(db, tmp_path, mon
     _assert_refused_unread(monkeypatch, db, chained)
 
 
+def test_a_hard_linked_file_is_refused_unread_until_its_second_link_is_gone(
+    db, tmp_path, monkeypatch
+):
+    # A writer in a directory doc add reads from can hard-link a file it cannot
+    # read itself (a credential) to the expected path. The leaf is then a
+    # regular file with no symlink anywhere, so only the link count stands in
+    # the way, and it must stop the add before any byte is read.
+    secret = write(tmp_path / "credentials", SECRET)
+    linked = tmp_path / "linked.md"
+    os.link(secret, linked)
+    assert linked.is_file() and not linked.is_symlink()
+    assert os.stat(linked).st_nlink == 2
+    reads: list[int] = []
+    real_read = os.read
+
+    def recording_read(fd, size):
+        reads.append(fd)
+        return real_read(fd, size)
+
+    monkeypatch.setattr(os, "read", recording_read)
+    code, refused, _err = add(monkeypatch, db, linked)
+    assert (code, refused["ok"]) == (3, False), f"a hard-linked file was added: {refused}"
+    assert refused["error"]["message"] == (
+        f"cannot read {linked}: it has more than one hard link, which is refused; "
+        "pass a file with one link"
+    )
+    _assert_refused_unread(monkeypatch, db, linked)
+    # The count is the file's, not the name's: the other name is refused too.
+    _assert_refused_unread(monkeypatch, db, secret)
+    assert reads == [], "doc add read a hard-linked file before refusing it"
+    os.unlink(secret)
+    code, added, err = add(monkeypatch, db, linked)
+    assert code == 0, err
+    assert added["data"]["document"]["sha256"] == hashlib.sha256(SECRET).hexdigest()
+    assert reads, "the recorder saw no read, so its empty list above proves nothing"
+    assert len(doc_events(db)) == 1
+
+
 # ---- the no-follow walk: one component at a time, from a descriptor -------------
 
 

@@ -12,7 +12,8 @@ it and none following a symlink; see ``_open_by_walk`` for the grammar. A
 symlink at any component of the path as given, or one swapped in while the
 walk runs, is refused (``doc_unreadable``) rather than followed. The leaf
 open is non-blocking, so a FIFO cannot stall it, and the open descriptor
-must be a regular file. Every filename is escaped before it reaches a
+must be a regular file with exactly one hard link, checked before any byte
+is read. Every filename is escaped before it reaches a
 refusal, so a name holding a terminal control sequence is never printed
 raw.
 
@@ -83,6 +84,7 @@ def document_key(item_id: str, role: str, sha256: str) -> str:
 
 _NOT_REGULAR = "not a readable regular file"
 _THROUGH_SYMLINK = "its path goes through a symlink, which is refused; pass the real path"
+_HARD_LINKED = "it has more than one hard link, which is refused; pass a file with one link"
 
 
 def _unreadable(name: str, reason: str) -> CliError:
@@ -157,6 +159,11 @@ def _open_by_walk(name: str) -> int:
     child is open, and every descriptor is closed on every refusal. The
     grammar of FILE is ``_walk_plan``'s. A platform with no no-follow,
     directory-only or descriptor-relative open is refused before any open.
+
+    The leaf is then refused unless one ``fstat`` of its descriptor shows a
+    regular file with exactly one hard link (``_leaf_refusal``), before any
+    byte is read: a second hard link can name a file the caller cannot read
+    under a path the walk accepts, with no symlink anywhere.
     """
     absolute, directories, leaf = _walk_plan(name)
     flags = _no_follow_flags()
@@ -181,11 +188,18 @@ def _open_by_walk(name: str) -> int:
         os.close(fd)
 
 
-def _is_regular(fd: int) -> bool:
+def _leaf_refusal(fd: int) -> str | None:
+    """Why the walk's leaf descriptor is refused, or None. One ``fstat``:
+    the leaf must be a regular file with exactly one hard link."""
     try:
-        return stat.S_ISREG(os.fstat(fd).st_mode)
+        info = os.fstat(fd)
     except OSError:
-        return False
+        return _NOT_REGULAR
+    if not stat.S_ISREG(info.st_mode):
+        return _NOT_REGULAR
+    if info.st_nlink != 1:
+        return _HARD_LINKED
+    return None
 
 
 def _read_at_most(fd: int, limit: int) -> bytes:
@@ -204,15 +218,17 @@ def _read_input(name: str) -> bytes:
 
     Opened by ``_open_by_walk``, so refused ``doc_unreadable`` when any
     component of the path as given is a symlink or ``..``, when it ends in
-    ``/``, when it is empty, and when it is not a readable regular file
-    (missing, a directory, a FIFO). The bytes are read from the walk's leaf
-    descriptor. A file over ``DOC_INLINE_LIMIT`` is a usage error. The name
-    is escaped in every refusal.
+    ``/``, when it is empty, when it is not a readable regular file
+    (missing, a directory, a FIFO), and when it has more than one hard link;
+    the leaf checks run before any byte is read. The bytes are read from the
+    walk's leaf descriptor. A file over ``DOC_INLINE_LIMIT`` is a usage
+    error. The name is escaped in every refusal.
     """
     fd = _open_by_walk(name)
     try:
-        if not _is_regular(fd):
-            raise _unreadable(name, _NOT_REGULAR)
+        refusal = _leaf_refusal(fd)
+        if refusal is not None:
+            raise _unreadable(name, refusal)
         data = _read_at_most(fd, DOC_INLINE_LIMIT)
     except OSError as exc:
         raise CliError(
