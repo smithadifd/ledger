@@ -260,3 +260,127 @@ def test_empty_result_exits_1_with_empty_code(tmp_path, monkeypatch):
     code, body, err = run_json(monkeypatch, db, "events", "--item", "no-such")
     assert code == EXIT_NOT_FOUND, err
     assert body["error"]["code"] == "empty"
+
+
+# --- events --id N ------------------------------------------------------------
+
+
+def event_count(db: Path) -> int:
+    with open_ledger(db, create=False) as lg:
+        return len(lg.events())
+
+
+def test_id_prints_exactly_the_events_asked_for_in_id_order(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db")
+    code, body, err = run_json(monkeypatch, db, "events", "--id", "3", "--id", "1")
+    assert code == EXIT_OK, err
+    assert ids(body) == [1, 3]
+    assert kinds_of(body) == ["item.created", "item.created"]
+    assert body["data"]["events"][1]["payload"] == {"type": "ticket", "title": "two"}
+    assert set(body["data"]) == DATA_KEYS
+    assert body["data"]["limit"] is None
+    assert body["data"]["truncated"] is False
+    for event in body["data"]["events"]:
+        assert set(event) == EVENT_KEYS
+
+
+def test_id_text_form_is_one_line_per_event_in_id_order(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db")
+    code, out, err = invoke(
+        monkeypatch, ["--db", str(db), "events", "--id", "3", "--id", "1"]
+    )
+    assert code == EXIT_OK, err
+    lines = out.splitlines()
+    assert [line.split("\t")[:3] for line in lines] == [
+        ["2026-01-10T09:00:00.000Z", "item.created", "it-1"],
+        ["2026-03-10T09:00:00.000Z", "item.created", "it-2"],
+    ]
+
+
+def test_id_given_twice_prints_the_event_once(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db")
+    code, body, err = run_json(monkeypatch, db, "events", "--id", "2", "--id", "2")
+    assert code == EXIT_OK, err
+    assert ids(body) == [2]
+
+
+def test_unknown_id_is_refused_by_name_and_prints_nothing(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db")
+    code, body, err = run_json(monkeypatch, db, "events", "--id", "1", "--id", "99")
+    assert code == EXIT_NOT_FOUND, err
+    assert body["ok"] is False
+    assert body["data"] is None
+    assert body["error"]["code"] == "not_found"
+    assert body["error"]["message"] == "event not found: 99"
+    code, out, err = invoke(monkeypatch, ["--db", str(db), "events", "--id", "99"])
+    assert code == EXIT_NOT_FOUND
+    assert out == ""
+    assert "event not found: 99" in err
+
+
+def test_every_unknown_id_is_named(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db")
+    code, body, err = run_json(
+        monkeypatch, db, "events", "--id", "98", "--id", "2", "--id", "97"
+    )
+    assert code == EXIT_NOT_FOUND, err
+    assert body["error"]["message"] == "event not found: 97, 98"
+
+
+def test_id_that_is_not_a_positive_integer_is_a_usage_error(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db")
+    for value in ("0", "-1", "abc", "1.5", " 1", "01", "", "9" * 30):
+        code, body, err = run_json(monkeypatch, db, "events", f"--id={value}")
+        assert code == EXIT_USAGE, (value, err)
+        assert body["error"]["code"] == "usage"
+        assert body["error"]["message"].startswith("--id "), value
+
+
+def test_id_with_any_other_filter_is_a_usage_error(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db")
+    for extra in (
+        ["--since", "2026-01-01"],
+        ["--until", "2026-12-31"],
+        ["--kind", "item.note"],
+        ["--item", "it-1"],
+        ["--actor", "alice"],
+        ["--limit", "5"],
+    ):
+        code, body, err = run_json(monkeypatch, db, "events", "--id", "1", *extra)
+        assert code == EXIT_USAGE, (extra, err)
+        assert body["error"]["message"] == f"--id cannot be combined with {extra[0]}"
+
+
+def test_id_reads_and_never_writes(tmp_path, monkeypatch):
+    db = seed(tmp_path / "ledger.db")
+    before = event_count(db)
+    run_json(monkeypatch, db, "events", "--id", "1")
+    run_json(monkeypatch, db, "events", "--id", "99")
+    assert event_count(db) == before
+
+
+def test_text_cells_keep_an_actor_with_a_tab_or_newline_on_one_line(
+    tmp_path, monkeypatch
+):
+    db = tmp_path / "ledger.db"
+    with open_ledger(db) as lg:
+        lg.append(
+            kind="item.created",
+            item_id="it-1",
+            idempotency_key="k-tab",
+            harness="pytest",
+            actor="ali\tce\nbob\r",
+            recorded_at="2026-01-10T09:00:00.000Z",
+            payload={"type": "ticket", "title": "one"},
+        )
+    for argv in (["events"], ["events", "--id", "1"]):
+        code, out, err = invoke(monkeypatch, ["--db", str(db), *argv])
+        assert code == EXIT_OK, err
+        lines = out.splitlines()
+        assert len(lines) == 1, argv
+        parts = lines[0].split("\t")
+        assert len(parts) == 5, argv
+        assert parts[3] == "ali\\tce\\nbob\\r"
+    code, body, err = run_json(monkeypatch, db, "events", "--id", "1")
+    assert code == EXIT_OK, err
+    assert body["data"]["events"][0]["actor"] == "ali\tce\nbob\r"

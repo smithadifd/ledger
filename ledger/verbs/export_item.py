@@ -32,7 +32,12 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--ticket",
         action="store_true",
-        help="print the recorded ### Ticket: section once; source is read from the current repository",
+        help=(
+            "print the recorded ticket section once: a ### Ticket: heading (one "
+            "[tag] or lowercase lead word may precede the id) or a bare ### ID "
+            "heading inside a ## Tickets section; source is read from the "
+            "current repository"
+        ),
     )
 
 
