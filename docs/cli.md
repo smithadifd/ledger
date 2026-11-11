@@ -33,15 +33,16 @@ JSON object on stdout:
 | 1 | not found | no such item or database, or an empty listing |
 | 2 | usage | bad flags or arguments |
 | 3 | refused | validation, synced path, shared database, missing `LEDGER_HARNESS`, capacity, a quote that does not match, export lag |
-| 4 | integrity | `verify` found a broken hash chain or a broken child-of forest; `doc verify` or `doc show --content` found a document whose stored bytes do not hash to its sha256 |
+| 4 | integrity | `verify` found a broken hash chain or a broken child-of forest; `doc verify` or `doc show --content` found a document whose bytes do not hash to its sha256 and size, or a by-path document whose file is missing or refused |
 | 5 | stale | `--expect-revision` no longer matches the item's newest event |
 
 Error codes in the JSON envelope include `usage`, `missing_harness`,
 `missing_db`, `not_found`, `empty`, `validation`, `conflict`, `capacity`,
 `shared_database`, `synced_path`, `stale_revision`, `integrity`, `unusable`,
 `quote_mismatch`, `lag`, `verb_collision`, `invalid_actor`, `doc_unreadable`,
-`doc_credential_shape`, `export_doc_credential`, `restore_doc_credential`,
-`doc_mismatch` and `doc_verify_failed`. A user error never
+`doc_outside_root` (exit 3), `doc_credential_shape`, `export_doc_credential`,
+`restore_doc_credential`, `doc_mismatch`, `doc_missing`, `doc_refused` (each
+exit 4) and `doc_verify_failed`. A user error never
 prints a stack trace.
 
 ## Environment
@@ -144,18 +145,23 @@ A claim stamps the spec version it was made against, and the card shows
 written only to move the source leaves the content hash as it was and prints
 nothing.
 
-**`doc add ITEM FILE --role ROLE [--title T] [--mime M] [--allow-credential-shapes]`**
+**`doc add ITEM FILE --role ROLE [--by-path] [--title T] [--mime M] [--allow-credential-shapes]`**
 Attach a document to an item as one `doc.attached` event. `ROLE` is one of
 `review-receipt`, `brief`, `packet`, `retro`, `other`. The ledger reads
-`FILE`'s bytes once, computes their sha256 and size itself, and stores the
-bytes inline (base64) in the event. Documents are inline-only: a `FILE` over
-the 65536-byte inline limit is a usage error (exit 2). The media type
-defaults to `application/octet-stream`, and to `text/markdown` for a `.md`
-file. Adding the same item, role and sha256 again writes nothing and reports
-`unchanged`; the same bytes under another role are a second document. An
-unknown item is `not_found` (exit 1). `ledger append` and `append-many`
-refuse the `doc.attached` kind. `doc add` is a write and needs
-`LEDGER_HARNESS`; `doc show` and `doc verify` are reads and do not.
+`FILE`'s bytes once and computes their sha256 and size itself. By default it
+stores the bytes inline (base64) in the event, and a `FILE` over the
+65536-byte inline limit is a usage error (exit 2) that names `--by-path`.
+With `--by-path` it stores `FILE`'s path under the document root instead (see
+below), for a file of at most 16777216 bytes (16 MiB; over it is a usage
+error, exit 2). The media type defaults to `application/octet-stream`, and
+to `text/markdown` for a `.md` file. Adding the same item, role and sha256
+again writes nothing and reports `unchanged`, whatever the storage: adding by
+path the bytes an inline document already holds returns the inline document,
+and a second path to the same bytes returns the first. The same bytes under
+another role are a second document. An unknown item is `not_found` (exit 1).
+`ledger append` and `append-many` refuse the `doc.attached` kind. `doc add`
+is a write and needs `LEDGER_HARNESS`; `doc show` and `doc verify` are reads
+and do not.
 
 `doc add` opens `FILE` one component at a time, as given, from `/` (or
 from the current directory for a relative `FILE`), each open relative to the
@@ -173,20 +179,54 @@ well, and so is every `FILE` on a platform that cannot open a path without
 following symlinks. A filename in a refusal is escaped as `events` escapes a
 text column.
 
+A by-path document names a file under the database's *document root*: the
+directory beside the database file named as the database file plus
+`.documents` (for `--db ~/.local/share/ledger/work.db`, the root is
+`~/.local/share/ledger/work.db.documents`). Each database has its own, and the
+database, its sidecars, `config.json` and the search index stay outside it.
+The ledger never creates, writes, moves or deletes anything under the root:
+put the file there first. The event stores the path relative to the root
+(`path`), never an absolute path and never the bytes. `--by-path` places
+`FILE` under the root component by component, never by string prefix (so
+`work.db.documents2` is not under `work.db.documents`), and character for
+character (on a case-insensitive volume a `FILE` spelled in another case than
+the root is refused). An absolute `FILE` must start with the root in one of
+two spellings: the physical root (the database's directory with symlinks
+resolved), or the root as the database path was spelled (`~` expanded and
+made absolute, not resolved). The second spelling is for macOS, where `/tmp`,
+`/var` and `/etc` are symlinks: a database named `/tmp/x/work.db` takes
+`FILE` `/tmp/x/work.db.documents/a.md`. A relative `FILE` is read from the
+working directory as the operating system reports it, which is physical, so
+from the database's directory `work.db.documents/a.md` works. Anything else
+is refused `doc_outside_root` (exit 3), naming `FILE` and the root, and
+nothing is written. `FILE` naming the root itself, and a stored path over
+1024 bytes, with a component over 255 bytes or holding a control character,
+is `doc_unreadable`; `..` is refused and a repeated `/` and a `.` component
+are dropped, as for an inline add. `doc add --by-path` opens the root from
+the database's directory without following a symlink, walks the stored path
+from it as above, and reads the bytes from that walk; a relative `FILE` is
+also walked from the working directory, and refused `doc_unreadable` unless
+both walks reach the same file. A symlink at the root or anywhere below it is
+refused. The credential scan below runs on the bytes read, as for an inline
+add.
+
 `FILE` given as a single hyphen (`-`) reads standard input, up to the same
 inline limit (over it is a usage error, exit 2); the media type defaults to
 `application/octet-stream`. A file whose name is a single hyphen is passed
 as `./-`. Standard input is a convenience for piping generated text into a
-document.
+document. Standard input has no path to store, so `-` with `--by-path` is a
+usage error (exit 2).
 
 `doc add` attaches whatever bytes `FILE` holds and does not vouch for where
 they came from. The ledger runs as the caller's operating-system user, so
 any process that can run `ledger doc add` with `LEDGER_HARNESS` set (an
 agent lane included) can attach any file that user can read: by its own
 path, through a hard link, or through a copy. No check at `doc add` can tell
-those apart, and none tries. What the ledger does guarantee is that the
-stored sha256 is the digest of the stored bytes, and that a document's bytes
-are never printed or reported `ok` unless they still match it.
+those apart, and none tries; the same holds for a file under the document
+root, which any process running as that user can put there by copy or by
+hard link. What the ledger does guarantee is that the stored sha256 is the
+digest of the bytes it read, and that a document's bytes are never printed
+or reported `ok` unless the bytes read in that call still match it.
 
 Before anything is written, `doc add` scans the bytes for known credential
 shapes: a private-key header (`-----BEGIN ... PRIVATE KEY-----`), a GitHub
@@ -206,7 +246,8 @@ tripwire for these common shapes, not a secret detector: a credential in any
 other shape passes it.
 
 **`doc show ITEM [--id N] [--content]`** List the item's documents, oldest
-first: event id, role, size, the start of the sha256, `inline`, the title,
+first: event id, role, size, the start of the sha256, the storage (`inline`,
+or `path` followed by the stored path, escaped as a text column), the title,
 and `credential-override` when the document carries the marker. `--id N`
 shows one. With `--json`:
 
@@ -214,19 +255,29 @@ shows one. With `--json`:
 {"data": {"documents": [{"credential_override": false, "event_id": 7, "item_id": "it-1", "mime": "text/markdown", "path": null, "role": "brief", "sha256": "<64 hex>", "size": 120, "storage": "inline", "title": "The brief"}], "item_id": "it-1"}, "error": null, "ok": true}
 ```
 
-`storage` is always `inline` and `path` is always null; both keys stay so
-the envelope keeps its shape. No documents is `documents: []` and exit 0.
-`--content` (with `--id`) decodes the document's stored bytes and hashes
-them first: when they match the stored sha256 and size, it writes exactly
-those bytes to stdout with no trailing newline, and with `--json` it prints
-`{"document": {<the row>, "content_b64": ...}}`. A mismatch is refused
-`doc_mismatch` (exit 4), and nothing is printed. `doc show` reads only the
-ledger, never the file the document came from.
+`storage` is `inline` or `path`; `path` is null for an inline document and
+the stored path (relative to the document root) for a by-path one. No
+documents is `documents: []` and exit 0. Without `--content`, `doc show`
+reads only the ledger, never a file. `--content` (with `--id`) reads the
+document's bytes and hashes them first: an inline document's stored bytes,
+or for a by-path one the file its stored path reaches when walked from the
+document root of the database `--db` names, on this call, without following
+a symlink. When they match the stored sha256 and size, it writes exactly the
+bytes it hashed to stdout with no trailing newline (never a second read), and
+with `--json` it prints `{"document": {<the row>, "content_b64": ...}}`.
+Otherwise nothing is printed and it is refused (exit 4): `doc_mismatch` when
+the bytes do not match, `doc_missing` when the root, a directory or the file
+under it is absent, and `doc_refused` for any other failure (a symlink at
+the root or below it, a FIFO or other non-regular file, a platform that
+cannot open a path without following symlinks).
 
-**`doc verify [ITEM] [--id N]`** Re-hash every document's stored bytes in
-scope (every document in the ledger when no item is given) and report each
-as `ok` or `mismatch`; it reads only the ledger, never the file a document
-came from. All `ok` prints `ok documents=N` and exits 0.
+**`doc verify [ITEM] [--id N]`** Check every document in scope (every
+document in the ledger when no item is given) as `doc show --content` reads
+it, and report each as `ok`, `mismatch`, `missing` or `refused`. An inline
+document's stored bytes are re-hashed; a by-path document's file is walked
+from the document root and hashed again on every call, so a file changed,
+moved, or replaced by a symlink after the add is reported, never followed.
+All `ok` prints `ok documents=N` and exits 0.
 Otherwise it prints `doc verify failed: F of N documents` and one line per
 failing document, and exits 4; with `--json` the envelope reads
 `ok: false`, error code `doc_verify_failed`, and keeps every row in
@@ -576,7 +627,9 @@ credential shapes `doc add` refuses. A document holding one without the
 `credential_override` marker refuses the whole export
 `export_doc_credential` (exit 3), naming the event, its item and the shapes:
 nothing is written, the watermark does not move, and `--commit` does not
-run. A document attached with `--allow-credential-shapes` is exported.
+run. A document attached with `--allow-credential-shapes` is exported. A
+by-path document's event file carries its stored path, sha256 and size and
+no bytes, so it is not scanned, and export never opens a document file.
 `--commit` and `--push` do not run the credential scan: they commit or push
 whatever the export directory and its history hold, so a file placed there
 by hand, or a commit made by hand or by an older ledger, leaves the machine
@@ -588,7 +641,13 @@ without passing it.
 export into the new database named by `--db`, then verify it. The target
 must not exist. A document holding a credential shape without the
 `credential_override` marker refuses the whole restore
-`restore_doc_credential`, and nothing is inserted.
+`restore_doc_credential`, and nothing is inserted. By-path documents restore
+as references: restore checks their stored path, storage and size against
+the schema and never opens a file. Their paths resolve against the restored
+database's own document root (`<name>.documents` beside the database `--db`
+names), never the source's, so `doc verify` reports them `missing` until you
+copy the old document root's tree there; then run `doc verify` to check
+every file against its stored sha256.
 
 ## Guidance
 

@@ -79,15 +79,26 @@ def check_document_event(event: Event) -> None:
     digest the ledger did not compute, or holding an unmarked credential
     shape.
 
-    The payload must pass its schema, which requires the inline bytes
-    (``content_b64``) and refuses any other key, a ``path`` included
-    (``unknown-key:path``): documents are inline-only. The schema also
-    refuses a ``credential_override`` other than true. The bytes are decoded
-    and their ``size`` and ``sha256`` recomputed; a malformed encoding,
-    bytes over ``DOC_INLINE_LIMIT``, or a mismatch with the stored values
-    refuses with ``restore_doc_digest_mismatch`` naming the event. The bytes
-    are then scanned for credential shapes (``ledger.credscan``): a hit on an
-    event without ``credential_override: true`` refuses with
+    The payload must pass its schema, which takes exactly one of the inline
+    bytes (``content_b64``) and a stored path (``path``), refusing both and
+    neither (``exactly-one-of:content_b64,path``), refuses a stored path
+    outside its grammar (``bad-doc-path:path``: absolute, empty, a trailing
+    or doubled ``/``, a ``.`` or ``..`` component, a control character, or
+    over its byte limits), a ``size`` over ``DOC_PATH_LIMIT``, and a
+    ``credential_override`` other than true.
+
+    A by-path document holds no bytes, so the schema is its whole check
+    here: nothing is decoded, recomputed or scanned, and no file is opened.
+    Its stored sha256 is the export's claim until ``doc verify`` or
+    ``doc show --content`` reads the file under the restoring database's own
+    document root and hashes it.
+
+    An inline document's bytes are decoded and their ``size`` and ``sha256``
+    recomputed; a malformed encoding, bytes over ``DOC_INLINE_LIMIT``, or a
+    mismatch with the stored values refuses with
+    ``restore_doc_digest_mismatch`` naming the event. The bytes are then
+    scanned for credential shapes (``ledger.credscan``): a hit on an event
+    without ``credential_override: true`` refuses with
     ``restore_doc_credential`` naming the event and the shapes, never the
     matched bytes. Other kinds pass.
     """
@@ -99,6 +110,8 @@ def check_document_event(event: Event) -> None:
         raise LedgerError(
             f"restore refuses event {event.id} ({event.kind}): {exc.reason}"
         ) from exc
+    if "path" in event.payload:
+        return
     try:
         data = inline_document_bytes(event.payload)
     except ValueError as exc:
@@ -174,11 +187,13 @@ def _replay_events(lg: Ledger, events: list[Event]) -> None:
     refusal rolls back the whole replay.
 
     Before anything is inserted, every ``doc.attached`` event in the batch
-    has its inline digest recomputed and its bytes scanned for credential
-    shapes (``check_document_event``). This is the one path
-    ``restore_export`` and ``replay_events`` share, so neither can insert a
-    document whose sha256 the ledger did not compute, or one holding a
-    credential shape without the override marker. Inside the
+    passes its schema, and an inline one has its digest recomputed and its
+    bytes scanned for credential shapes (``check_document_event``). This is
+    the one path ``restore_export`` and ``replay_events`` share, so neither
+    can insert an inline document whose sha256 the ledger did not compute,
+    one holding a credential shape without the override marker, or a by-path
+    document whose stored path breaks its grammar. Neither opens a document
+    file: a by-path document is inserted as a reference. Inside the
     transaction, each ``doc.attached`` must also name an item the rows
     replayed before it hold (``check_document_item``).
     """

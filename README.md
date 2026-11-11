@@ -316,7 +316,7 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `append` | append a validated event of any non-reserved kind | yes |
 | `append-many` | append several events for one item in one transaction (JSON array on stdin) | yes |
 | `spec` | `set`, `show` or `diff` an item's versioned spec | `set` |
-| `doc` | `add` a content-addressed document to an item (stored inline, at most 64 KiB; `-` reads standard input; known credential shapes refused unless `--allow-credential-shapes`), `show` it, or `verify` its bytes still hash to the stored sha256 | `add` |
+| `doc` | `add` a content-addressed document to an item (stored inline, at most 64 KiB, or with `--by-path` as a path under the database's `DB.documents` root, at most 16 MiB; `-` reads standard input; known credential shapes refused unless `--allow-credential-shapes`), `show` it, or `verify` its bytes still hash to the stored sha256 (a by-path file is re-read from the root, never through a symlink) | `add` |
 | `entity` | `register` an automation, project, machine or model, or `set` its state fields | yes |
 | `elect` | record an election with quote provenance | yes |
 | `pick` | record the owner's picker answer to an ask (`--ask`) as an election | yes |

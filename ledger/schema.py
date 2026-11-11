@@ -43,10 +43,18 @@ SPEC_MERGE_CLASSES = ("MC-0", "MC-1", "MC-2", "MC-3", "MC-4")
 # itself are not content.
 SPEC_CONTENT_FIELDS = ("title", "body_md", "acceptance", "size", "merge_class")
 # A document attached to an item (verbs/doc.py): content-addressed, its
-# bytes stored inline, at most DOC_INLINE_LIMIT of them.
+# bytes stored inline (at most DOC_INLINE_LIMIT of them) or by path under the
+# database's document root (at most DOC_PATH_LIMIT).
 DOC_KIND = "doc.attached"
 DOC_ROLES = ("review-receipt", "brief", "packet", "retro", "other")
 DOC_INLINE_LIMIT = 65536
+DOC_PATH_LIMIT = 16777216
+# A by-path document's stored path: relative to the document root, at most
+# this many UTF-8 bytes in all, and per component (doc_path_problem).
+DOC_PATH_MAX_BYTES = 1024
+DOC_PATH_COMPONENT_MAX_BYTES = 255
+# The reason a stored path that breaks its grammar is refused with.
+DOC_PATH_REFUSAL = "bad-doc-path"
 DOC_DEFAULT_MIME = "application/octet-stream"
 # Set, only as true, on a document whose bytes hold a credential shape
 # (ledger/credscan.py) and that ``doc add --allow-credential-shapes`` attached.
@@ -265,26 +273,31 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
     },
     # A document attached to an item. sha256 and size are computed by the
     # ledger from the bytes it read: ``ledger doc add`` is the only live
-    # writer (the store reserves the kind), and restore and replay recompute
-    # the digest before inserting it (restore.py). Documents are inline-only:
-    # content_b64 (the bytes, base64, at most DOC_INLINE_LIMIT) is required,
-    # and any other key, a path included, is refused. credential_override is
-    # present only as true: doc add sets it when --allow-credential-shapes
-    # attached bytes holding a credential shape, and any other value is
-    # refused.
+    # writer (the store reserves the kind). Exactly one of content_b64 (the
+    # bytes, base64, at most DOC_INLINE_LIMIT) and path (a stored path under
+    # the database's document root, in doc_path_problem's grammar) is
+    # present; both or neither is refused (exactly-one-of). size is at most
+    # DOC_PATH_LIMIT for every document. Restore and replay recompute an
+    # inline document's digest before inserting it; a by-path document holds
+    # no bytes, so they check its schema only (restore.py).
+    # credential_override is present only as true: doc add sets it when
+    # --allow-credential-shapes attached bytes holding a credential shape,
+    # and any other value is refused.
     (DOC_KIND, 1): {
         "item_id": "required",
         "required": {
             "role": {"enum": DOC_ROLES},
             "sha256": _SHA256_HEX,
-            "size": {"type": "integer", "min": 0},
+            "size": {"type": "integer", "min": 0, "max": DOC_PATH_LIMIT},
             "mime": _DOC_MIME,
-            "content_b64": {"type": "string"},
         },
         "optional": {
+            "content_b64": {"type": "string"},
+            "path": {"type": "string", "doc_path": True},
             "title": _DOC_TITLE,
             DOC_CREDENTIAL_OVERRIDE: {"type": "boolean", "only_true": True},
         },
+        "exactly_one_of": (("content_b64", "path"),),
     },
     ("decision.asked", 1): {
         "item_id": "required",
@@ -704,6 +717,39 @@ def control_character(text: str, *, allow_newline: bool = False) -> str | None:
     return None
 
 
+def doc_path_problem(value: Any) -> str | None:
+    """Why ``value`` is not a stored document path, else None.
+
+    A stored path is a string whose UTF-8 encoding is 1 to
+    ``DOC_PATH_MAX_BYTES`` bytes, made of components separated by single
+    ``/``, each 1 to ``DOC_PATH_COMPONENT_MAX_BYTES`` bytes, none empty (so no
+    leading, trailing or doubled ``/``, and never absolute), none ``.`` and
+    none ``..``, with no control character anywhere (``control_character``,
+    which covers NUL). It is relative to the database's document root, and
+    one file has one stored spelling.
+    """
+    if type(value) is not str:
+        return "not a string"
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return "not UTF-8 text"
+    if not encoded:
+        return "empty"
+    if len(encoded) > DOC_PATH_MAX_BYTES:
+        return f"over {DOC_PATH_MAX_BYTES} bytes"
+    if control_character(value) is not None:
+        return "holds a control character"
+    for component in value.split("/"):
+        if component == "":
+            return "has an empty component (a leading, trailing or doubled '/')"
+        if component in (".", ".."):
+            return f"has a '{component}' component"
+        if len(component.encode("utf-8")) > DOC_PATH_COMPONENT_MAX_BYTES:
+            return f"has a component over {DOC_PATH_COMPONENT_MAX_BYTES} bytes"
+    return None
+
+
 def display_control_character(kind: str, payload: Mapping[str, Any]) -> tuple[str, str] | None:
     """``(field, code point)`` of the first control character in the text a
     picker displays for a ``decision.asked`` or ``decision.elected`` payload,
@@ -803,6 +849,8 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
             _fail(f"not-single-line:{path}")
         if spec.get("no_control") and control_character(value) is not None:
             _fail(f"{ASK_CONTROL_CHARACTER}:{path}")
+        if spec.get("doc_path") and doc_path_problem(value) is not None:
+            _fail(f"{DOC_PATH_REFUSAL}:{path}")
         pattern = spec.get("pattern")
         if pattern is not None and re.fullmatch(pattern, value) is None:
             _fail(f"bad-type:{path}")
@@ -820,6 +868,9 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
         minimum = spec.get("min")
         if minimum is not None and value < minimum:
             _fail(f"bad-type:{path}")
+        maximum = spec.get("max")
+        if maximum is not None and value > maximum:
+            _fail(f"too-large:{path}")
         return
     if field_type == "array":
         if type(value) is not list:
@@ -920,6 +971,11 @@ def validate_payload(kind: str, payload: Any, payload_version: int = 1) -> dict[
         present = [key for key in group if key in payload]
         if present and len(present) != len(group):
             _fail(f"incomplete-group:{','.join(group)}")
+    # Keys of which exactly one appears: both and neither are refused.
+    for group in schema.get("exactly_one_of", ()):
+        present = [key for key in group if key in payload]
+        if len(present) != 1:
+            _fail(f"exactly-one-of:{','.join(group)}")
     return payload
 
 

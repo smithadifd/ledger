@@ -9,11 +9,13 @@ export that holds event files without one.
 ``export --commit`` commits in the configured export directory only and never
 pushes. Pushing is ``export --push``.
 
-Before any event file is written, every pending ``doc.attached`` event's
-bytes are scanned for credential shapes (``ledger.credscan``). A hit on an
-event without ``credential_override: true`` refuses the whole export
+Before any event file is written, every pending inline ``doc.attached``
+event's bytes are scanned for credential shapes (``ledger.credscan``). A hit
+on an event without ``credential_override: true`` refuses the whole export
 (``ExportDocCredential``): no file is written and the watermark does not
-move. ``commit_export`` and ``push_export`` do not run the scan: they
+move. A by-path document's event file carries its stored path, sha256 and
+size and no bytes, so it is not scanned, and export never opens a document
+file. ``commit_export`` and ``push_export`` do not run the scan: they
 commit or push whatever the export directory and its history hold.
 
 That export is the backup stream: restore replays it and checks the hash
@@ -338,11 +340,18 @@ def refuse_unmarked_credentials(events: Sequence[Event]) -> None:
     ``events`` holds a credential shape and carries no
     ``credential_override: true``. The message names the event, its item and
     the shapes, never the matched bytes. A document whose inline bytes do
-    not decode cannot be scanned, and is refused the same way."""
+    not decode cannot be scanned, and is refused the same way.
+
+    A by-path document (one carrying ``path`` and no ``content_b64``) is
+    skipped: its event file holds no bytes, so none leave in it, and its
+    file is never opened here. An event carrying both keys is scanned as
+    inline (the schema refuses that shape, so it is never stored)."""
     from .restore import inline_document_bytes
 
     for event in events:
         if event.kind != DOC_KIND:
+            continue
+        if "path" in event.payload and "content_b64" not in event.payload:
             continue
         if event.payload.get(DOC_CREDENTIAL_OVERRIDE) is True:
             continue
