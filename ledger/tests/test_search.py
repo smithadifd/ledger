@@ -446,12 +446,213 @@ def test_doctor_reports_search_state_and_never_fails_on_it(db, monkeypatch):
     assert body["data"]["search"]["status"] == "unknown"
     code, out, _err = invoke(monkeypatch, ["--db", str(db), "doctor"])
     assert code == EXIT_OK
-    assert "search: unknown (ledger index rebuilds it)" in out
+    # An unusable config is a warning: ledger index refuses, so the line names
+    # the reason and its remedy instead of saying the index rebuilds itself.
+    assert f"search: unknown (warn: ledger index refuses: unreadable ledger config {config}: " in out
+    assert "to clear it, make config.json readable, valid JSON)" in out
+    assert "rebuilds it" not in out
     config.write_text(good_config)
     (db.parent / "search.db").write_bytes(b"not a database at all " * 50)
     code, body = run_json(monkeypatch, db, "doctor")
     assert code == EXIT_OK
     assert body["data"]["search"]["status"] == "stale"
+
+
+def _doctor_search_line(monkeypatch, db: Path) -> str:
+    code, out, err = invoke(monkeypatch, ["--db", str(db), "doctor"])
+    assert code == EXIT_OK, err
+    lines = [line for line in out.splitlines() if line.startswith("search: ")]
+    assert len(lines) == 1, out
+    return lines[0]
+
+
+def _warn_git(db, monkeypatch, root, tmp_path):
+    run_json(monkeypatch, db, "index")
+    (db.parent / ".git").mkdir()
+    return "current", (
+        f"refusing to use search.db inside a git work tree: {db.parent}",
+        "move the ledger database to a directory outside the git work tree",
+    )
+
+
+def _warn_git_behind(db, monkeypatch, root, tmp_path):
+    run_json(monkeypatch, db, "index")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "after the build"}, "k9")
+    (db.parent / ".git").mkdir()
+    return "behind", (
+        f"refusing to use search.db inside a git work tree: {db.parent}",
+        "move the ledger database to a directory outside the git work tree",
+    )
+
+
+def _warn_directory(db, monkeypatch, root, tmp_path):
+    (db.parent / "search.db").mkdir()
+    return "missing", (
+        f"search.db is a directory, not a regular file: {db.parent / 'search.db'}",
+        "move that directory away from the index path",
+    )
+
+
+def _warn_unreadable_config(db, monkeypatch, root, tmp_path):
+    run_json(monkeypatch, db, "index")
+    (db.parent / "config.json").write_text("{not json")
+    return "unknown", (
+        f"unreadable ledger config {db.parent / 'config.json'}: ",
+        "make config.json readable, valid JSON",
+    )
+
+
+def _warn_config_not_object(db, monkeypatch, root, tmp_path):
+    (db.parent / "config.json").write_text("[]")
+    return "missing", (
+        f"ledger config {db.parent / 'config.json'} must be a JSON object",
+        "make config.json a JSON object",
+    )
+
+
+def _warn_roots_not_list(db, monkeypatch, root, tmp_path):
+    (db.parent / "config.json").write_text(json.dumps({"search_roots": "not-a-list"}))
+    return "missing", (
+        "search_roots must be a list of absolute paths",
+        "set search_roots in config.json to a list of absolute paths",
+    )
+
+
+def _warn_roots_not_absolute(db, monkeypatch, root, tmp_path):
+    run_json(monkeypatch, db, "index")
+    (db.parent / "config.json").write_text(json.dumps({"search_roots": ["relative/path"]}))
+    return "unknown", (
+        "search_roots entry is not absolute: relative/path",
+        "make every search_roots entry in config.json an absolute path",
+    )
+
+
+def _warn_unstattable_index(db, monkeypatch, root, tmp_path):
+    index = db.parent / "search.db"
+    real_lstat = os.lstat
+
+    def lstat(path, *args, **kwargs):
+        if Path(path) == index:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(search_mod.os, "lstat", lstat)
+    return None, (
+        f"cannot stat the search index {index}: ",
+        "make the index path's directory readable",
+    )
+
+
+@pytest.mark.parametrize("make", [
+    _warn_git, _warn_git_behind, _warn_directory, _warn_unreadable_config,
+    _warn_config_not_object, _warn_roots_not_list, _warn_roots_not_absolute,
+    _warn_unstattable_index,
+])
+def test_doctor_warn_line_names_the_reason_and_its_remedy(db, root, tmp_path, monkeypatch, make):
+    status, (reason, remedy) = make(db, monkeypatch, root, tmp_path)
+    found = search_mod.index_status(db)
+    assert found["severity"] == "warn", found
+    if status is not None:
+        assert found["status"] == status, found
+    line = _doctor_search_line(monkeypatch, db)
+    assert line.startswith(f"search: {found['status']} (warn: ledger index refuses: {reason}"), line
+    assert f"; to clear it, {remedy}" in line, line
+    assert line.endswith(")"), line
+    # Never the self-rebuild claim, in either of its forms.
+    assert "rebuilds it" not in line, line
+    assert "will be indexed on the next search" not in line, line
+    # The JSON form is unchanged: the same status, severity and reasons.
+    code, body = run_json(monkeypatch, db, "doctor")
+    assert code == EXIT_OK
+    assert body["data"]["search"] == found
+
+
+def test_doctor_warn_line_with_an_unknown_reason_prints_it_and_points_to_json(db, monkeypatch):
+    def fake_status(_db, _fallback=None):
+        return {"path": "x", "status": "missing", "reasons": ["a reason doctor has no remedy for"],
+                "severity": "warn"}
+
+    monkeypatch.setattr(search_mod, "index_status", fake_status)
+    assert _doctor_search_line(monkeypatch, db) == (
+        "search: missing (warn: a reason doctor has no remedy for; see ledger doctor --json)")
+
+
+def test_doctor_warn_line_with_no_reason_says_so(db, monkeypatch):
+    def fake_status(_db, _fallback=None):
+        return {"path": "x", "status": "missing", "reasons": [], "severity": "warn"}
+
+    monkeypatch.setattr(search_mod, "index_status", fake_status)
+    assert _doctor_search_line(monkeypatch, db) == (
+        "search: missing (warn: no reason given; see ledger doctor --json)")
+
+
+def test_doctor_unreadable_index_state_prints_the_error_and_points_to_json(db, monkeypatch):
+    def broken_status(_db, _fallback=None):
+        raise RuntimeError("the state could not be read")
+
+    monkeypatch.setattr(search_mod, "index_status", broken_status)
+    assert _doctor_search_line(monkeypatch, db) == (
+        "search: unknown (warn: RuntimeError: the state could not be read; "
+        "see ledger doctor --json)")
+
+
+def test_doctor_unknown_state_prints_its_own_reason_beside_a_known_one(db, monkeypatch):
+    def fake_status(_db, _fallback=None):
+        return {"path": "x", "status": "unknown", "severity": "warn", "reasons": [
+            "an unforeseen failure",
+            f"refusing to use search.db inside a git work tree: {db.parent}",
+        ]}
+
+    monkeypatch.setattr(search_mod, "index_status", fake_status)
+    assert _doctor_search_line(monkeypatch, db) == (
+        f"search: unknown (warn: ledger index refuses: refusing to use search.db inside a git "
+        f"work tree: {db.parent}; to clear it, move the ledger database to a directory outside "
+        f"the git work tree; an unforeseen failure; see ledger doctor --json)")
+
+
+def test_doctor_stale_reasons_are_not_repeated_on_a_warn_line(db, root, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    (root / "standards/new.md").write_text("# New\n")
+    (db.parent / ".git").mkdir()
+    found = search_mod.index_status(db)
+    assert (found["status"], found["severity"]) == ("stale", "warn")
+    assert _doctor_search_line(monkeypatch, db) == (
+        f"search: stale (warn: ledger index refuses: refusing to use search.db inside a git "
+        f"work tree: {db.parent}; to clear it, move the ledger database to a directory outside "
+        f"the git work tree)")
+
+
+def _info_missing(db, monkeypatch, root):
+    pass
+
+
+def _info_stale(db, monkeypatch, root):
+    run_json(monkeypatch, db, "index")
+    (root / "standards/new.md").write_text("# New\n")
+
+
+@pytest.mark.parametrize("make, status", [(_info_missing, "missing"), (_info_stale, "stale")])
+def test_doctor_info_line_keeps_the_rebuild_parenthetical(db, root, monkeypatch, make, status):
+    make(db, monkeypatch, root)
+    found = search_mod.index_status(db)
+    assert (found["status"], found["severity"]) == (status, "info")
+    assert _doctor_search_line(monkeypatch, db) == f"search: {status} (ledger index rebuilds it)"
+
+
+def test_doctor_behind_line_names_the_new_events_without_a_warning(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "after the build"}, "k9")
+    assert search_mod.index_status(db)["severity"] == "info"
+    assert _doctor_search_line(monkeypatch, db) == (
+        "search: current to event 8, 1 new event will be indexed on the next search")
+
+
+def test_doctor_current_line_has_no_hint(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    assert search_mod.index_status(db)["severity"] == "ok"
+    assert _doctor_search_line(monkeypatch, db) == "search: current"
 
 
 # --- never exported, never committed -------------------------------------------------
