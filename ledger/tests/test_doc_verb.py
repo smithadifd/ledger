@@ -17,6 +17,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -461,6 +462,85 @@ def test_a_correct_inline_document_restores(db, tmp_path, monkeypatch):
     assert [event.payload for event in doc_events(str(dest))] == [
         event.payload for event in doc_events(db)
     ]
+
+
+# ---- restore and replay refuse a document for an item that does not exist -----
+
+
+MISSING_ITEM = "it-missing"
+
+
+def _attach_to_a_missing_item(db: str) -> int:
+    """Write a well-formed inline document on an item with no ``item.created``
+    (a store a hand-edited writer left behind), through the writer's own
+    capability, which leaves the item check to ``doc add``. Returns its id."""
+    body = b"orphan bytes"
+    payload = {
+        "role": "brief",
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "size": len(body),
+        "mime": "text/plain",
+        "content_b64": base64.b64encode(body).decode("ascii"),
+    }
+    with open_ledger(db, create=False) as lg:
+        event = lg._append_doc_event(
+            doc_verb._DOC_WRITER_CAPABILITY, kind=DOC_KIND, payload=payload,
+            item_id=MISSING_ITEM, idempotency_key="orphan",
+        )
+    return event.id
+
+
+def _item_missing(event_id: int) -> str:
+    return re.escape(
+        f"restore refuses event {event_id} (doc.attached): "
+        f"restore_doc_item_missing: item not found: {MISSING_ITEM}"
+    )
+
+
+def test_restore_refuses_a_document_for_an_item_that_does_not_exist(db, tmp_path):
+    event_id = _attach_to_a_missing_item(db)
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, tmp_path / "export")
+    dest = tmp_path / "restored" / "ledger.db"
+    with pytest.raises(LedgerError, match=_item_missing(event_id)):
+        restore_export(tmp_path / "export", dest, system="home")
+    assert not any(dest.parent.glob("ledger.db*")), "a refused restore left files behind"
+
+
+def test_replay_events_refuses_a_document_for_an_item_that_does_not_exist(db, tmp_path):
+    event_id = _attach_to_a_missing_item(db)
+    with open_ledger(db, create=False) as lg:
+        events = lg.events()
+    # The seed's own rows come first and pass, so the refusal rolls them back.
+    assert events[-1].id == event_id and len(events) > 1
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        with pytest.raises(LedgerError, match=_item_missing(event_id)):
+            replay_events(fresh, events)
+        assert fresh.events() == [], "a refused replay inserted events"
+
+
+def test_a_document_whose_item_exists_restores_and_replays(db, tmp_path, monkeypatch):
+    assert add(monkeypatch, db, write(tmp_path / "in.md", b"on a real item"))[0] == 0
+    with open_ledger(db, create=False) as lg:
+        events = lg.events()
+        export_events(lg, tmp_path / "export")
+    [created] = [e for e in events if e.kind == "item.created" and e.item_id == ITEM]
+    [document] = [e for e in events if e.kind == DOC_KIND]
+    assert created.id < document.id
+    # The item is created earlier in the same batch: restore and replay insert it.
+    dest = tmp_path / "restored" / "ledger.db"
+    restore_export(tmp_path / "export", dest, system="home")
+    assert [e.payload for e in doc_events(str(dest))] == [document.payload]
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        replay_events(fresh, events)
+        assert [e.id for e in fresh.events(kind=DOC_KIND)] == [document.id]
+    # The item is already in the destination: a later batch holding only the
+    # document replays too.
+    split = events.index(document)
+    with open_ledger(tmp_path / "split.db") as split_db:
+        replay_events(split_db, events[:split])
+        replay_events(split_db, events[split:])
+        assert [e.id for e in split_db.events(kind=DOC_KIND)] == [document.id]
 
 
 # ---- a path field is refused everywhere: at add, on restore, on replay --------

@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +43,7 @@ _INSERT = """INSERT INTO events (
 
 
 DOC_DIGEST_MISMATCH = "restore_doc_digest_mismatch"
+DOC_ITEM_MISSING = "restore_doc_item_missing"
 
 
 def inline_document_bytes(payload: Any) -> bytes:
@@ -102,6 +104,27 @@ def check_document_event(event: Event) -> None:
         )
 
 
+def check_document_item(conn: sqlite3.Connection, event: Event) -> None:
+    """Refuse a ``doc.attached`` event whose item is not an item yet.
+
+    The check reads the items the replay transaction holds so far
+    (``v_items``), as the decision and child-of guards do: an item already
+    in the destination, or one whose ``item.created`` was replayed earlier
+    in the same batch, counts. Otherwise it refuses with
+    ``restore_doc_item_missing`` naming the event and the item. Other kinds
+    pass.
+    """
+    if event.kind != DOC_KIND:
+        return
+    if event.item_id is None or conn.execute(
+        "SELECT 1 FROM v_items WHERE item_id = ?", (event.item_id,)
+    ).fetchone() is None:
+        raise LedgerError(
+            f"restore refuses event {event.id} ({event.kind}): "
+            f"{DOC_ITEM_MISSING}: item not found: {event.item_id}"
+        )
+
+
 @dataclass(frozen=True)
 class RestoreResult:
     path: Path
@@ -130,7 +153,9 @@ def _replay_events(lg: Ledger, events: list[Event]) -> None:
     Before anything is inserted, every ``doc.attached`` event in the batch
     has its inline digest recomputed (``check_document_event``). This is the
     one path ``restore_export`` and ``replay_events`` share, so neither can
-    insert a document whose sha256 the ledger did not compute.
+    insert a document whose sha256 the ledger did not compute. Inside the
+    transaction, each ``doc.attached`` must also name an item the rows
+    replayed before it hold (``check_document_item``).
     """
     for event in events:
         check_document_event(event)
@@ -158,6 +183,7 @@ def _replay_events(lg: Ledger, events: list[Event]) -> None:
                 raise LedgerError(
                     f"restore refuses event {event.id} ({event.kind}): {exc.reason}"
                 ) from exc
+            check_document_item(conn, event)
             conn.execute(
                 _INSERT,
                 (
