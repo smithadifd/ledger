@@ -328,14 +328,27 @@ prove who wrote the file.
 
 `ledger search` and `ledger index` maintain `search.db`, an SQLite FTS5
 index in the database's own directory (`ledger/search.py`). It is a derived
-projection: rebuilt from scratch, never exported, and never built inside a git
-working tree. It indexes current items with their notes and links, questions
-and elections, person utterances, and, under each root in `search_roots`, the
-markdown files in `standards/` and `decisions/` plus any markdown file an
-item or decision names, chunked at `##` headings. The index stores a manifest
-of what it was built from; `doctor` reports it `missing`, `stale`,
-`behind` (current to event N, with M new events to be indexed on the next
-search) or `current`, and `search` rebuilds a missing, stale or behind index
-before reading. Results are
-ranked by BM25 and can be filtered by type, item status, item, initiative
-and date.
+projection: never exported, and never built inside a git working tree. It
+indexes current items with their notes and links, questions and elections,
+person utterances, and, under each root in `search_roots`, the markdown files
+in `standards/` and `decisions/` plus any markdown file an item or decision
+names, chunked at `##` headings. A note is searched as part of its item, not
+as its own document: a hit on a note's words returns the item that carries it.
+Without `search_roots` only the ledger is indexed; `ledger index` says so and
+names the `config.json` to set it in, and exits 0.
+
+The index stores a manifest of what it was built from; `doctor` reports it
+`missing`, `stale`, `behind` (current to event N, with M new events to be
+indexed on the next search) or `current`. `search` and `ledger index` bring a
+`behind` index up to date by appending the new events, without re-reading
+markdown; a missing or stale index, or `ledger index --rebuild`, is rebuilt
+from scratch. Each report also carries a `severity` to colour it by:
+
+| severity | when |
+|----------|------|
+| `ok` | `current` |
+| `info` | `behind`, `stale` or `missing`: the next search or `ledger index` brings it up to date on its own |
+| `warn` | the index cannot be built where it is (inside a git working tree, a directory at the index path, an unusable `config.json`), or `doctor` could not read its state (`unknown`); the reason is in `reasons` |
+
+Results are ranked by BM25 and can be filtered by type, item status, item,
+initiative and date.
