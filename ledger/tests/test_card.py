@@ -2301,45 +2301,123 @@ def test_card_json_child_rows_keep_their_keys(tmp_path: Path, monkeypatch) -> No
         assert rows == expected
 
 
-def test_full_card_refuses_a_child_whose_link_was_not_read(tmp_path: Path) -> None:
+def _append_after_events_read(lg, db, append):
+    """Make ``append`` land through a second connection right after the
+    projection's first ``events`` read, before any later read.
+
+    The injection is the test-local ledger's own ``events`` method; the writer
+    is another connection to the same file, as a concurrent process would be.
+    """
+    writer = open_ledger(db)
+    read = lg.events
+    landed = []
+
+    def events(*args, **kwargs):
+        result = read(*args, **kwargs)
+        if not landed:
+            landed.append(append(writer))
+        return result
+
+    lg.events = events
+    return writer, landed
+
+
+def test_full_card_child_link_race_reads_one_snapshot(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    lg = open_ledger(db)
+    parent = _create(lg, "it-parent", "ticket", "parent")
+    child = _create(lg, "it-child", "ticket", "child")
+    writer, landed = _append_after_events_read(
+        lg,
+        db,
+        lambda w: _append(
+            w, "item.linked", {"rel": "child-of", "target": "it-parent"}, "it-child", "l-race"
+        ),
+    )
+    card = project_card(lg, "it-parent", full=True)
+    assert len(landed) == 1
+    # The link committed mid-projection; the card is the state before it.
+    assert card.revision_id == child.id
+    assert card.children == ()
+    assert card.source_event_ids == (parent.id,)
+    assert max(card.source_event_ids) <= card.revision_id
+    # A fresh projection sees the link, with every source in its own revision.
+    del lg.events
+    after = project_card(lg, "it-parent", full=True)
+    writer.close()
+    lg.close()
+    assert [row["item_id"] for row in after.children] == ["it-child"]
+    assert after.source_event_ids == tuple(sorted({parent.id, child.id, landed[0].id}))
+    assert max(after.source_event_ids) <= after.revision_id == landed[0].id
+
+
+def test_full_card_child_state_race_reads_one_snapshot(tmp_path: Path) -> None:
+    db = _db(tmp_path)
+    lg = open_ledger(db)
+    parent = _create(lg, "it-parent", "ticket", "parent")
+    child = _create(lg, "it-child", "ticket", "child")
+    link = _append(
+        lg, "item.linked", {"rel": "child-of", "target": "it-parent"}, "it-child", "l-child"
+    )
+    writer, landed = _append_after_events_read(
+        lg,
+        db,
+        lambda w: _append(
+            w, "item.state", {"status": "claimed", "owner": "tester"}, "it-child", "s-race"
+        ),
+    )
+    card = project_card(lg, "it-parent", full=True)
+    writer.close()
+    lg.close()
+    assert len(landed) == 1
+    state = landed[0]
+    # The child row and the ids agree: the row is the open child, not the
+    # claimed one, and no id names the state event appended mid-projection.
+    assert card.revision_id == link.id
+    assert card.children == (
+        {"item_id": "it-child", "title": "child", "status": "open", "holder": None},
+    )
+    assert card.source_event_ids == tuple(sorted({parent.id, child.id, link.id}))
+    assert state.id not in card.source_event_ids
+    assert max(card.source_event_ids) <= card.revision_id
+
+
+def test_card_projection_keeps_a_callers_transaction(tmp_path: Path) -> None:
     lg = open_ledger(_db(tmp_path))
-    parent, child, state, link = _child_ledger(lg)
-    read = lg.events()
-    # The child row is current, but the events read lack its child-of link,
-    # as when an append lands between the two reads.
-    monkeypatched = [event for event in read if event.id != link.id]
-    lg.events = lambda *args, **kwargs: list(monkeypatched)
-    with pytest.raises(RuntimeError, match="child it-child of it-parent has no link_event_id"):
-        project_card(lg, "it-parent", full=True)
+    _child_ledger(lg)
+    conn = lg._conn
+    # With no caller transaction, the projection ends the one it opened.
+    project_card(lg, "it-parent", full=True)
+    assert not conn.in_transaction
+    conn.execute("BEGIN")
+    full = project_card(lg, "it-parent", full=True)
+    assert conn.in_transaction
     bounded = project_card(lg, "it-parent")
+    assert conn.in_transaction
+    item = next(row for row in lg.items() if row["item_id"] == "it-parent")
+    project_item(lg, item, full=True)
+    assert conn.in_transaction
+    conn.execute("ROLLBACK")
     lg.close()
-    assert bounded.source_event_ids == (parent.id,)
+    assert [row["item_id"] for row in full.children] == ["it-child"]
+    assert [row["item_id"] for row in bounded.children] == ["it-child"]
 
 
-def test_full_card_refuses_a_child_whose_latest_read_link_names_another_anchor(
-    tmp_path: Path,
-) -> None:
+def test_card_projection_ends_its_snapshot_on_an_exception(tmp_path: Path) -> None:
     lg = open_ledger(_db(tmp_path))
-    _create(lg, "it-parent", "ticket", "parent")
-    _create(lg, "it-other", "ticket", "other")
-    _create(lg, "it-child", "ticket", "child")
-    _append(lg, "item.linked", {"rel": "child-of", "target": "it-parent"}, "it-child", "l-1")
-    moved = _append(
-        lg, "item.linked",
-        {"rel": "child-of", "target": "it-other", "moved_from": "it-parent"},
-        "it-child", "l-2",
-    )
-    back = _append(
-        lg, "item.linked",
-        {"rel": "child-of", "target": "it-parent", "moved_from": "it-other"},
-        "it-child", "l-3",
-    )
-    read = [event for event in lg.events() if event.id != back.id]
-    # The events read end at the move away; the child row already shows the
-    # move back. The latest link read names another anchor, so it is not this
-    # child's link, and no earlier link to this item stands in for it.
-    lg.events = lambda *args, **kwargs: list(read)
-    with pytest.raises(RuntimeError, match="child it-child of it-parent has no link_event_id"):
+    _child_ledger(lg)
+    conn = lg._conn
+
+    def broken(*args, **kwargs):
+        assert conn.in_transaction
+        raise OSError("events read failed")
+
+    lg.events = broken
+    with pytest.raises(OSError, match="events read failed"):
         project_card(lg, "it-parent", full=True)
+    assert not conn.in_transaction
+    item = next(row for row in lg.items() if row["item_id"] == "it-parent")
+    with pytest.raises(OSError, match="events read failed"):
+        project_item(lg, item)
+    assert not conn.in_transaction
     lg.close()
-    assert moved.id < back.id

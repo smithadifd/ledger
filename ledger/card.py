@@ -137,8 +137,9 @@ from __future__ import annotations
 import re
 import shlex
 import unicodedata
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Iterable, Mapping
+from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from .export import decay_boundary, decayed
 from .schema import SPEC_KIND
@@ -1556,15 +1557,40 @@ def _child_source_ids(
         for key in ("created_event_id", "link_event_id"):
             value = sources[key]
             if value is None:
+                # Internal invariant, not a reachable refusal. The rows and the
+                # events come from one read snapshot (_read_snapshot), and
+                # v_items resolves parent_id from the child's latest child-of
+                # link, the same link _children_with_sources takes; a
+                # concurrent writer cannot split them. Reaching this means the
+                # view and this code disagree, so fail rather than drop the id.
                 raise RuntimeError(
                     f"card --full: child {row['item_id']} of {item_id} has no {key}"
-                    " in the events read; the ledger changed during projection, rerun"
+                    " in its read snapshot; the items view and the events disagree"
                 )
             ids.add(int(value))
         state_id = sources["state_event_id"]
         if state_id is not None:
             ids.add(int(state_id))
     return ids
+
+
+@contextmanager
+def _read_snapshot(lg: Ledger) -> Iterator[None]:
+    """Hold one SQLite read snapshot over every read made inside the block.
+
+    With no transaction open on the connection, BEGIN before the first read
+    and ROLLBACK when the block ends, also on an exception. A caller that
+    already holds a transaction is read inside it and left as it was.
+    """
+    conn = lg._conn
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        if own and conn.in_transaction:
+            conn.execute("ROLLBACK")
 
 
 def project_item(
@@ -1582,7 +1608,22 @@ def project_item(
     installed. The rows are still clipped to a few dozen words, findings and
     pointers capped and the header bounded to SOURCE_ID_LIMIT ids, unless
     ``full``: then nothing is clipped, capped or cut.
+
+    Every ledger read is made in one read snapshot, so no row or source id
+    on the card is newer than its revision_id.
     """
+    with _read_snapshot(lg):
+        return _project_item(lg, item, pointers=pointers, program=program, full=full)
+
+
+def _project_item(
+    lg: Ledger,
+    item: Mapping[str, Any],
+    *,
+    pointers: PointerSource | None,
+    program: str,
+    full: bool,
+) -> Card:
     item_id = item["item_id"]
     events = lg.events()
     tail = events[-1]
@@ -1753,11 +1794,15 @@ def project_card(
     full: bool = False,
 ) -> Card:
     """Project a bounded card for ``item_id`` (unbounded with ``full``);
-    raise KeyError if missing."""
-    for row in lg.items():
-        if row["item_id"] == item_id:
-            card = project_item(lg, row, pointers=pointers, program=program, full=full)
-            return card if full else bound_card(card)
+    raise KeyError if missing. The item lookup and the whole projection read
+    one snapshot (see _read_snapshot)."""
+    with _read_snapshot(lg):
+        for row in lg.items():
+            if row["item_id"] == item_id:
+                card = _project_item(
+                    lg, row, pointers=pointers, program=program, full=full
+                )
+                return card if full else bound_card(card)
     raise KeyError(item_id)
 
 
