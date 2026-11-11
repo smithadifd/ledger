@@ -48,6 +48,9 @@ DOC_KIND = "doc.attached"
 DOC_ROLES = ("review-receipt", "brief", "packet", "retro", "other")
 DOC_INLINE_LIMIT = 65536
 DOC_DEFAULT_MIME = "application/octet-stream"
+# Set, only as true, on a document whose bytes hold a credential shape
+# (ledger/credscan.py) and that ``doc add --allow-credential-shapes`` attached.
+DOC_CREDENTIAL_OVERRIDE = "credential_override"
 # Channels only `ledger capture` (verbs/capture.py) writes: the harness's
 # record of a submitted prompt and of a question-picker answer. The store
 # refuses every other writer on any channel that starts with the prefix.
@@ -265,7 +268,10 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
     # writer (the store reserves the kind), and restore and replay recompute
     # the digest before inserting it (restore.py). Documents are inline-only:
     # content_b64 (the bytes, base64, at most DOC_INLINE_LIMIT) is required,
-    # and any other key, a path included, is refused.
+    # and any other key, a path included, is refused. credential_override is
+    # present only as true: doc add sets it when --allow-credential-shapes
+    # attached bytes holding a credential shape, and any other value is
+    # refused.
     (DOC_KIND, 1): {
         "item_id": "required",
         "required": {
@@ -277,6 +283,7 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
         },
         "optional": {
             "title": _DOC_TITLE,
+            DOC_CREDENTIAL_OVERRIDE: {"type": "boolean", "only_true": True},
         },
     },
     ("decision.asked", 1): {
@@ -837,6 +844,8 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
         return
     if field_type == "boolean":
         if type(value) is not bool:
+            _fail(f"bad-type:{path}")
+        if spec.get("only_true") and value is not True:
             _fail(f"bad-type:{path}")
         return
     if field_type == "json_object":

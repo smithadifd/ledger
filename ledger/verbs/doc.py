@@ -12,10 +12,25 @@ it and none following a symlink; see ``_open_by_walk`` for the grammar. A
 symlink at any component of the path as given, or one swapped in while the
 walk runs, is refused (``doc_unreadable``) rather than followed. The leaf
 open is non-blocking, so a FIFO cannot stall it, and the open descriptor
-must be a regular file with exactly one hard link, checked before any byte
-is read. Every filename is escaped before it reaches a
-refusal, so a name holding a terminal control sequence is never printed
-raw.
+must be a regular file, checked before any byte is read. Nothing else about
+the leaf is checked: a file with a second hard link is a regular file, and
+is read like any other. FILE given as a single hyphen reads standard input
+instead; that is a convenience for piping generated text, not a safer way
+to attach a file. Every filename is escaped before it reaches a refusal, so
+a name holding a terminal control sequence is never printed raw.
+
+``doc add`` attaches whatever bytes FILE holds and does not vouch for where
+they came from: it runs as the caller's operating-system user, so it can
+attach any file that user can read, by its own path, through a hard link or
+through a copy. What it guarantees is that the stored sha256 is the hash of
+the stored bytes.
+
+Before anything is written, ``doc add`` scans the bytes for credential
+shapes (``ledger.credscan``). A hit is refused ``doc_credential_shape``
+unless ``--allow-credential-shapes`` is given, which writes the event with
+``credential_override: true``. The scan runs before the idempotency check,
+so repeating an overridden add without the flag is refused, not reported
+``unchanged``. No message carries the matched bytes.
 
 ``doc show`` and ``doc verify`` read only the stored inline bytes and
 recompute their sha256 and size; they never touch the filesystem. They are
@@ -41,10 +56,19 @@ import hashlib
 import os
 import re
 import stat
+import sys
 from typing import Any
 
+from ledger.credscan import describe as describe_credentials
+from ledger.credscan import scan as scan_credentials
 from ledger.restore import inline_document_bytes
-from ledger.schema import DOC_DEFAULT_MIME, DOC_INLINE_LIMIT, DOC_KIND, DOC_ROLES
+from ledger.schema import (
+    DOC_CREDENTIAL_OVERRIDE,
+    DOC_DEFAULT_MIME,
+    DOC_INLINE_LIMIT,
+    DOC_KIND,
+    DOC_ROLES,
+)
 from ledger.store import Event, Ledger
 from ledger.verbs import (
     EXIT_INTEGRITY,
@@ -63,6 +87,9 @@ from ledger.verbs.events import text_cell
 ACTIONS = ("add", "show", "verify")
 MARKDOWN_MIME = "text/markdown"
 VERIFY_FAILED = "doc_verify_failed"
+CREDENTIAL_SHAPE = "doc_credential_shape"
+# FILE exactly this reads standard input; a file of that name is ``./-``.
+STDIN = "-"
 STATUS_OK = "ok"
 STATUS_MISMATCH = "mismatch"
 # Every document is stored inline; the row keeps the storage and path keys
@@ -71,7 +98,7 @@ STORAGE_INLINE = "inline"
 _CHUNK = 1 << 16
 _EVENT_ID = re.compile(r"[1-9][0-9]{0,18}")
 _MAX_EVENT_ID = 2**63 - 1
-_ADD_ONLY = ("file", "role", "title", "mime")
+_ADD_ONLY = ("file", "role", "title", "mime", "allow_credential_shapes")
 # The store appends doc.attached only for a caller holding this
 # (attach_document).
 _DOC_WRITER_CAPABILITY = object()
@@ -84,8 +111,6 @@ def document_key(item_id: str, role: str, sha256: str) -> str:
 
 _NOT_REGULAR = "not a readable regular file"
 _THROUGH_SYMLINK = "its path goes through a symlink, which is refused; pass the real path"
-_HARD_LINKED = "it has more than one hard link, which is refused; pass a file with one link"
-_REMOVED = "it was removed or replaced while it was being read, which is refused"
 
 
 def _unreadable(name: str, reason: str) -> CliError:
@@ -161,18 +186,12 @@ def _open_by_walk(name: str) -> int:
     grammar of FILE is ``_walk_plan``'s. A platform with no no-follow,
     directory-only or descriptor-relative open is refused before any open.
 
-    The leaf is then verified before any byte is read, with its parent's
-    descriptor still open (``_leaf_refusal``): an ``fstat`` of the leaf
-    descriptor and a no-follow ``stat`` of the leaf name relative to the
-    parent descriptor must both succeed, both show a regular file, agree on
-    ``st_dev`` and ``st_ino``, and both read exactly one hard link. A second
-    hard link can name a file the caller cannot read under a path the walk
-    accepts, with no symlink anywhere, and a writer can unlink that link
-    after the open and before the check, so the descriptor alone would read
-    one link. Checking the name too closes that race: while the planted link
-    exists both stats read two links; once it is unlinked the name stat
-    fails; once it is replaced by another file the inode differs. The parent
-    descriptor is closed after the verification and on every refusal.
+    The leaf descriptor is then checked before any byte is read
+    (``_leaf_refusal``): its ``fstat`` must show a regular file. Nothing
+    else about the leaf is checked, not its link count and not its name
+    after the open: a hard link is a second name for a regular file, not a
+    symlink, and the walk reads it like any other file. The parent
+    descriptor is closed after the check and on every refusal.
     """
     absolute, directories, leaf = _walk_plan(name)
     flags = _no_follow_flags()
@@ -195,7 +214,7 @@ def _open_by_walk(name: str) -> int:
         )
         verified = False
         try:
-            refusal = _leaf_refusal(leaf_fd, leaf, fd)
+            refusal = _leaf_refusal(leaf_fd)
             if refusal is not None:
                 raise _unreadable(name, refusal)
             verified = True
@@ -207,33 +226,15 @@ def _open_by_walk(name: str) -> int:
         os.close(fd)
 
 
-def _leaf_refusal(fd: int, leaf: str, parent_fd: int) -> str | None:
-    """Why the walk's leaf is refused, or None. The ``fstat`` of the leaf
-    descriptor and the no-follow ``stat`` of ``leaf`` under ``parent_fd``
-    must both show the same regular file (``st_dev`` and ``st_ino``) with
-    exactly one hard link; see ``_open_by_walk`` for why both are read."""
+def _leaf_refusal(fd: int) -> str | None:
+    """Why the walk's leaf is refused, or None: the ``fstat`` of the leaf
+    descriptor must show a regular file. Nothing else is checked."""
     try:
         info = os.fstat(fd)
     except OSError:
         return _NOT_REGULAR
     if not stat.S_ISREG(info.st_mode):
         return _NOT_REGULAR
-    if info.st_nlink == 0:
-        return _REMOVED
-    try:
-        named = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
-    except FileNotFoundError:
-        return _REMOVED
-    except (OSError, ValueError, NotImplementedError):
-        return _NOT_REGULAR
-    if named.st_nlink == 0:
-        return _REMOVED
-    if not stat.S_ISREG(named.st_mode):
-        return _REMOVED
-    if (named.st_dev, named.st_ino) != (info.st_dev, info.st_ino):
-        return _REMOVED
-    if info.st_nlink != 1 or named.st_nlink != 1:
-        return _HARD_LINKED
     return None
 
 
@@ -248,18 +249,58 @@ def _read_at_most(fd: int, limit: int) -> bytes:
     return bytes(data)
 
 
+def _display_name(name: str) -> str:
+    """FILE as a message names it: escaped, and ``standard input`` for ``-``."""
+    return "standard input" if name == STDIN else text_cell(name)
+
+
+def _read_stdin() -> bytes:
+    """Standard input's binary stream, read until it ends or holds more than
+    ``DOC_INLINE_LIMIT`` bytes; over the limit is a usage error."""
+    stream = getattr(sys.stdin, "buffer", None) if sys.stdin is not None else None
+    if stream is None:
+        raise CliError(
+            "cannot read standard input: it is not a binary stream",
+            code="doc_unreadable",
+            exit_code=EXIT_REFUSED,
+        )
+    data = bytearray()
+    try:
+        while len(data) <= DOC_INLINE_LIMIT:
+            chunk = stream.read(DOC_INLINE_LIMIT + 1 - len(data))
+            if not chunk:
+                break
+            data.extend(chunk)
+    except (OSError, ValueError) as exc:
+        reason = getattr(exc, "strerror", None) or str(exc)
+        raise CliError(
+            f"cannot read standard input: {text_cell(reason)}",
+            code="doc_unreadable",
+            exit_code=EXIT_REFUSED,
+        ) from exc
+    if len(data) > DOC_INLINE_LIMIT:
+        raise UsageError(
+            f"standard input is over the {DOC_INLINE_LIMIT}-byte inline limit; "
+            "documents are stored inline, and by-path documents are not supported yet"
+        )
+    return bytes(data)
+
+
 def _read_input(name: str) -> bytes:
     """The bytes of the file named on the command line, read once.
 
-    Opened by ``_open_by_walk``, so refused ``doc_unreadable`` when any
-    component of the path as given is a symlink or ``..``, when it ends in
-    ``/``, when it is empty, when it is not a readable regular file
-    (missing, a directory, a FIFO), when it has more than one hard link,
-    and when its name no longer names the opened file; the walk runs these
-    leaf checks before any byte is read. The bytes are read from the walk's
-    leaf descriptor. A file over ``DOC_INLINE_LIMIT`` is a usage error. The
-    name is escaped in every refusal.
+    FILE exactly ``-`` reads standard input (``_read_stdin``); a file whose
+    name is a single hyphen is passed as ``./-``. Any other FILE is opened
+    by ``_open_by_walk``, so refused ``doc_unreadable`` when any component of
+    the path as given is a symlink or ``..``, when it ends in ``/``, when it
+    is empty, and when it is not a readable regular file (missing, a
+    directory, a FIFO); the walk checks the leaf before any byte is read.
+    The bytes are read from the walk's leaf descriptor. A file over
+    ``DOC_INLINE_LIMIT`` is a usage error. The name is escaped in every
+    refusal.
     """
+    if name == STDIN:
+        return _read_stdin()
     fd = _open_by_walk(name)
     try:
         data = _read_at_most(fd, DOC_INLINE_LIMIT)
@@ -291,6 +332,7 @@ def attach_document(
     role: str,
     mime: str | None = None,
     title: str | None = None,
+    allow_credential_shapes: bool = False,
     actor: str | None = None,
     harness: str | None = None,
     model: str | None = None,
@@ -302,8 +344,24 @@ def attach_document(
     document with the same item, role and sha256 and False (nothing is
     written). The item check and the duplicate check run inside the write
     transaction.
+
+    The bytes are scanned for credential shapes first, before the duplicate
+    check and before any write. A hit is refused ``doc_credential_shape``,
+    naming FILE and each shape with its byte offset but never the matched
+    bytes, unless ``allow_credential_shapes`` is set; then the event carries
+    ``credential_override: true``. The flag on bytes with no hit writes no
+    marker.
     """
     data = _read_input(name)
+    hits = scan_credentials(data)
+    if hits and not allow_credential_shapes:
+        raise CliError(
+            f"{_display_name(name)} holds a credential shape "
+            f"({describe_credentials(hits)}); nothing was written. Pass "
+            "--allow-credential-shapes to attach it anyway",
+            code=CREDENTIAL_SHAPE,
+            exit_code=EXIT_REFUSED,
+        )
     sha256 = hashlib.sha256(data).hexdigest()
     payload: dict[str, Any] = {
         "role": role,
@@ -314,6 +372,8 @@ def attach_document(
     }
     if title is not None:
         payload["title"] = title
+    if hits:
+        payload[DOC_CREDENTIAL_OVERRIDE] = True
     with lg.transaction():
         if lg.item(item_id) is None:
             raise CliError(
@@ -349,6 +409,7 @@ def document_row(event: Event) -> dict[str, Any]:
         "sha256": payload.get("sha256"),
         "storage": STORAGE_INLINE,
         "path": None,
+        "credential_override": payload.get(DOC_CREDENTIAL_OVERRIDE) is True,
     }
 
 
@@ -395,13 +456,19 @@ def add_arguments(parser) -> None:
         "file",
         nargs="?",
         help=f"add: the file to attach, inline (at most {DOC_INLINE_LIMIT} bytes; "
-        "no symlink anywhere in its path)",
+        "no symlink anywhere in its path); - reads standard input",
     )
     parser.add_argument("--role", choices=DOC_ROLES, help="add: what the document is")
     parser.add_argument("--title", help="add: a one-line title")
     parser.add_argument(
         "--mime",
         help=f"add: the media type (default {DOC_DEFAULT_MIME}; {MARKDOWN_MIME} for .md)",
+    )
+    parser.add_argument(
+        "--allow-credential-shapes",
+        action="store_true",
+        help="add: attach bytes holding a known credential shape, marking the "
+        "document credential_override",
     )
     parser.add_argument("--id", dest="event_id", help="show, verify: one document by event id")
     parser.add_argument(
@@ -453,15 +520,25 @@ def _run_add(args, ctx: Context) -> Result:
             role=args.role,
             mime=args.mime,
             title=args.title,
+            allow_credential_shapes=args.allow_credential_shapes,
             **actor_kwargs(ctx),
         )
     finally:
         lg.close()
     row = document_row(event)
+    text = f"doc\t{args.item}\t{row['role']}\t{row['storage']}\t" + (
+        f"event={event.id}" if created else f"unchanged event={event.id}"
+    )
+    if row["credential_override"]:
+        text += "\tcredential-override"
     return Result(
-        data={"item_id": args.item, "unchanged": not created, "document": row},
-        text=f"doc\t{args.item}\t{row['role']}\t{row['storage']}\t"
-        + (f"event={event.id}" if created else f"unchanged event={event.id}"),
+        data={
+            "item_id": args.item,
+            "unchanged": not created,
+            "credential_override": row["credential_override"],
+            "document": row,
+        },
+        text=text,
     )
 
 
@@ -490,6 +567,8 @@ def _show_line(row: dict[str, Any]) -> str:
     ]
     if row["title"] is not None:
         fields.append(str(row["title"]))
+    if row["credential_override"]:
+        fields.append("credential-override")
     return "\t".join(fields)
 
 

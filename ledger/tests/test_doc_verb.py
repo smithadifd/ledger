@@ -3,10 +3,13 @@
 A document is a content-addressed record on an item: the ledger computes its
 sha256 and size from the bytes it read and stores the bytes inline. Documents
 are inline-only, so no read after ``doc add`` touches the filesystem, and
-``doc add`` refuses a file whose path holds a symlink anywhere. Nothing is
-printed as a document's content, or reported ``ok``, unless its stored bytes
-hash to the stored sha256. Only ``attach_document`` writes the kind; restore
-and replay recompute the digest before inserting it and refuse a ``path``.
+``doc add`` refuses a file whose path holds a symlink anywhere; a file with a
+second hard link is a regular file and is attached. Nothing is printed as a
+document's content, or reported ``ok``, unless its stored bytes hash to the
+stored sha256. Only ``attach_document`` writes the kind; restore and replay
+recompute the digest before inserting it and refuse a ``path``. Bytes holding
+a credential shape are refused at add unless the override flag marks them,
+and an unmarked one is refused at restore, at replay and at export.
 """
 from __future__ import annotations
 
@@ -24,20 +27,34 @@ from pathlib import Path
 
 import pytest
 
-from ledger.export import event_filename, event_record, export_events, hash_body
+from ledger.export import (
+    ExportDocCredential,
+    event_filename,
+    event_record,
+    export_events,
+    hash_body,
+    load_export,
+    read_watermark,
+    write_event_files,
+    write_stream_digest,
+    write_watermark,
+)
 from ledger.restore import replay_events, restore_export
 from ledger.schema import DOC_INLINE_LIMIT, DOC_KIND, ValidationError, validate_payload
 from ledger.store import LedgerError, canonical_dumps, event_digest, open_ledger
 from ledger.verbs import CliError
 from ledger.verbs import doc as doc_verb
+from ledger.verbs import export as export_verb
 
 from test_cli import invoke, seed
+from test_credscan import NEAR_MISSES, SAMPLES, wrap
 
 ITEM = "it-1"
 PKG_PARENT = Path(__file__).resolve().parent.parent.parent
 BINARY = b"\x00head\xff\x00\r\n\xfe\xff tail\x00"
 ROW_KEYS = {
     "event_id", "item_id", "role", "title", "mime", "size", "sha256", "storage", "path",
+    "credential_override",
 }
 VERIFY_ROW_KEYS = {"event_id", "item_id", "sha256", "status"}
 ENVELOPE_KEYS = {"ok", "data", "error"}
@@ -77,7 +94,7 @@ def doc_events(db: str) -> list:
 
 
 def run_module(
-    db: str, *argv: str, timeout: float | None = None
+    db: str, *argv: str, timeout: float | None = None, stdin: bytes | None = None
 ) -> subprocess.CompletedProcess:
     """The real CLI in a child process, stdout captured as bytes."""
     env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
@@ -86,6 +103,7 @@ def run_module(
     return subprocess.run(
         [sys.executable, "-m", "ledger", "--db", db, *argv],
         cwd=PKG_PARENT, capture_output=True, env=env, check=False, timeout=timeout,
+        input=stdin if stdin is not None else b"",
     )
 
 
@@ -105,6 +123,8 @@ def test_add_inline_then_show_then_content_gives_the_exact_bytes(db, tmp_path, m
     assert code == 0, err
     document = added["data"]["document"]
     assert added["data"]["unchanged"] is False
+    assert added["data"]["credential_override"] is False
+    assert document["credential_override"] is False
     assert document["storage"] == "inline" and document["path"] is None
     assert document["mime"] == "text/markdown"
     assert document["size"] == len(body)
@@ -803,167 +823,27 @@ def test_a_symlinked_leaf_is_refused_and_its_target_never_read(db, tmp_path, mon
     _assert_refused_unread(monkeypatch, db, chained)
 
 
-def test_a_hard_linked_file_is_refused_unread_until_its_second_link_is_gone(
+def test_a_file_with_a_second_hard_link_is_attached_and_its_bytes_stored(
     db, tmp_path, monkeypatch
 ):
-    # A writer in a directory doc add reads from can hard-link a file it cannot
-    # read itself (a credential) to the expected path. The leaf is then a
-    # regular file with no symlink anywhere, so only the link count stands in
-    # the way, and it must stop the add before any byte is read.
-    secret = write(tmp_path / "credentials", SECRET)
+    # The boundary: doc add does not vouch for where bytes came from. A hard
+    # link is a second name for a regular file, not a symlink, so the walk
+    # reads it like any other file, by either name.
+    original = write(tmp_path / "original.md", SECRET)
     linked = tmp_path / "linked.md"
-    os.link(secret, linked)
-    assert linked.is_file() and not linked.is_symlink()
-    assert os.stat(linked).st_nlink == 2
-    reads: list[int] = []
-    real_read = os.read
-
-    def recording_read(fd, size):
-        reads.append(fd)
-        return real_read(fd, size)
-
-    monkeypatch.setattr(os, "read", recording_read)
-    code, refused, _err = add(monkeypatch, db, linked)
-    assert (code, refused["ok"]) == (3, False), f"a hard-linked file was added: {refused}"
-    assert refused["error"]["message"] == (
-        f"cannot read {linked}: it has more than one hard link, which is refused; "
-        "pass a file with one link"
-    )
-    _assert_refused_unread(monkeypatch, db, linked)
-    # The count is the file's, not the name's: the other name is refused too.
-    _assert_refused_unread(monkeypatch, db, secret)
-    assert reads == [], "doc add read a hard-linked file before refusing it"
-    os.unlink(secret)
+    os.link(original, linked)
+    assert os.stat(linked).st_nlink == 2 and not linked.is_symlink()
     code, added, err = add(monkeypatch, db, linked)
     assert code == 0, err
-    assert added["data"]["document"]["sha256"] == hashlib.sha256(SECRET).hexdigest()
-    assert reads, "the recorder saw no read, so its empty list above proves nothing"
-    assert len(doc_events(db)) == 1
-
-
-def _record_reads(monkeypatch) -> list[int]:
-    """Every descriptor ``os.read`` is called with."""
-    reads: list[int] = []
-    real_read = os.read
-
-    def recording_read(fd, size):
-        reads.append(fd)
-        return real_read(fd, size)
-
-    monkeypatch.setattr(os, "read", recording_read)
-    return reads
-
-
-def _assert_race_refused(db, monkeypatch, linked: Path, reads: list[int], message: str):
-    """One ``doc add`` of ``linked`` is refused ``doc_unreadable`` with
-    ``message``, reads nothing, prints no secret, writes nothing and leaks
-    no descriptor. Each caller then adds a single-link name as a control,
-    so the empty read list proves something."""
-    before = _open_descriptors()
-    code, refused, err = add(monkeypatch, db, linked)
-    assert (code, refused["ok"]) == (3, False), f"the raced file was added: {refused}"
-    assert refused["error"]["code"] == "doc_unreadable", (refused, err)
-    assert refused["error"]["message"] == f"cannot read {linked}: {message}"
-    assert reads == [], "doc add read the raced file before refusing it"
-    assert not _output_holds_secret(json.dumps(refused), err)
-    assert doc_events(db) == []
-    assert not _store_holds_secret(db)
-    assert _open_descriptors() == before, "a refused leaf check leaked a descriptor"
-
-
-def test_a_hard_link_unlinked_after_the_leaf_open_is_refused_unread(
-    db, tmp_path, monkeypatch
-):
-    # A writer plants a hard link to a file it cannot read, then unlinks it
-    # after doc add opened it and before the leaf check: the descriptor now
-    # reads one link, but the name no longer exists.
-    secret = write(tmp_path / "credentials", SECRET)
-    linked = tmp_path / "linked.md"
-    os.link(secret, linked)
-    reads = _record_reads(monkeypatch)
-    ran = _swap_after_opening(monkeypatch, "linked.md", linked.unlink)
-    _assert_race_refused(db, monkeypatch, linked, reads, doc_verb._REMOVED)
-    assert ran == ["linked.md"] and not linked.exists(), "the unlink did not run"
-    assert os.stat(secret).st_nlink == 1
-    code, added, err = add(monkeypatch, db, secret)
+    document = added["data"]["document"]
+    assert document["sha256"] == hashlib.sha256(SECRET).hexdigest()
+    assert document["size"] == len(SECRET)
+    code, again, err = add(monkeypatch, db, original)
     assert code == 0, err
-    assert reads, "the recorder saw no read, so its empty list above proves nothing"
-
-
-def test_a_hard_link_replaced_after_the_leaf_open_is_refused_unread(
-    db, tmp_path, monkeypatch
-):
-    # The writer replaces its planted link with a file of its own after the
-    # open: both names now read one link, but the name is another inode.
-    secret = write(tmp_path / "credentials", SECRET)
-    linked = tmp_path / "linked.md"
-    os.link(secret, linked)
-
-    def replace() -> None:
-        linked.unlink()
-        write(linked, b"the writer's own bytes")
-
-    reads = _record_reads(monkeypatch)
-    ran = _swap_after_opening(monkeypatch, "linked.md", replace)
-    _assert_race_refused(db, monkeypatch, linked, reads, doc_verb._REMOVED)
-    assert ran == ["linked.md"], "the replace did not run"
-    assert os.stat(linked).st_nlink == 1 and os.stat(secret).st_nlink == 1
-    code, added, err = add(monkeypatch, db, secret)
-    assert code == 0, err
-    assert reads, "the recorder saw no read, so its empty list above proves nothing"
-
-
-def _after_leaf_fstat(monkeypatch, inode: int, act) -> list[int]:
-    """Run ``act()`` once, just after ``os.fstat`` has read the file with
-    ``inode``; the returned list holds the inode once it has run."""
-    ran: list[int] = []
-    real_fstat = os.fstat
-
-    def racing_fstat(fd):
-        info = real_fstat(fd)
-        if not ran and info.st_ino == inode:
-            act()
-            ran.append(inode)
-        return info
-
-    monkeypatch.setattr(os, "fstat", racing_fstat)
-    return ran
-
-
-def test_a_second_link_on_the_descriptor_alone_is_refused_unread(
-    db, tmp_path, monkeypatch
-):
-    # The descriptor's fstat reads two links; the other name is unlinked
-    # before the name is checked, so the name alone would read one. Both
-    # counts must be one.
-    secret = write(tmp_path / "credentials", SECRET)
-    linked = tmp_path / "linked.md"
-    os.link(secret, linked)
-    reads = _record_reads(monkeypatch)
-    ran = _after_leaf_fstat(monkeypatch, os.stat(secret).st_ino, secret.unlink)
-    _assert_race_refused(db, monkeypatch, linked, reads, doc_verb._HARD_LINKED)
-    assert ran and os.stat(linked).st_nlink == 1, "the unlink did not run"
-    code, added, err = add(monkeypatch, db, linked)
-    assert code == 0, err
-    assert reads, "the recorder saw no read, so its empty list above proves nothing"
-
-
-def test_a_second_link_on_the_name_alone_is_refused_unread(db, tmp_path, monkeypatch):
-    # The descriptor's fstat reads one link; a second link is made before the
-    # name is checked, so the descriptor alone would read one. Both counts
-    # must be one.
-    secret = write(tmp_path / "credentials", SECRET)
-    second = tmp_path / "second.md"
-    reads = _record_reads(monkeypatch)
-    ran = _after_leaf_fstat(
-        monkeypatch, os.stat(secret).st_ino, lambda: os.link(secret, second)
-    )
-    _assert_race_refused(db, monkeypatch, secret, reads, doc_verb._HARD_LINKED)
-    assert ran and os.stat(secret).st_nlink == 2, "the link did not run"
-    second.unlink()
-    code, added, err = add(monkeypatch, db, secret)
-    assert code == 0, err
-    assert reads, "the recorder saw no read, so its empty list above proves nothing"
+    assert again["data"]["unchanged"] is True
+    assert again["data"]["document"]["event_id"] == document["event_id"]
+    [stored] = doc_events(db)
+    assert base64.b64decode(stored.payload["content_b64"]) == SECRET
 
 
 # ---- the no-follow walk: one component at a time, from a descriptor -------------
@@ -1310,3 +1190,396 @@ def test_a_read_error_at_add_is_refused_with_the_filename_escaped(db, tmp_path, 
     assert refused["error"]["message"].endswith(f"reads{OSC52_ESCAPED}.md: Input/output error")
     monkeypatch.undo()
     assert doc_events(db) == []
+
+
+# ---- standard input: a single hyphen ---------------------------------------------
+
+
+def _stdin(monkeypatch, data: bytes) -> None:
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(data)))
+
+
+def test_a_single_hyphen_reads_standard_input_and_dot_slash_hyphen_the_file(
+    db, tmp_path, monkeypatch
+):
+    # A file named "-" sits in the working directory: "-" still reads
+    # standard input, and "./-" reads that file.
+    monkeypatch.chdir(tmp_path)
+    named = b"the file whose name is a hyphen"
+    write(tmp_path / "-", named)
+    _stdin(monkeypatch, BINARY)
+    code, added, err = add(monkeypatch, db, "-")
+    assert code == 0, err
+    document = added["data"]["document"]
+    assert document["sha256"] == hashlib.sha256(BINARY).hexdigest()
+    assert document["size"] == len(BINARY)
+    assert document["mime"] == "application/octet-stream"
+    code, added, err = add(monkeypatch, db, "./-")
+    assert code == 0, err
+    assert added["data"]["document"]["sha256"] == hashlib.sha256(named).hexdigest()
+    assert [base64.b64decode(e.payload["content_b64"]) for e in doc_events(db)] == [
+        BINARY, named,
+    ]
+
+
+def test_standard_input_through_the_real_cli(db):
+    done = run_module(
+        db, "--json", "doc", "add", ITEM, "-", "--role", "packet", stdin=BINARY
+    )
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["data"]["document"]["size"] == len(BINARY)
+    [stored] = doc_events(db)
+    assert base64.b64decode(stored.payload["content_b64"]) == BINARY
+
+
+def test_standard_input_over_the_limit_is_a_usage_error(db, monkeypatch):
+    _stdin(monkeypatch, b"x" * (DOC_INLINE_LIMIT + 1))
+    code, refused, err = add(monkeypatch, db, "-")
+    assert (code, refused["error"]["code"]) == (2, "usage"), (refused, err)
+    assert refused["error"]["message"].startswith(
+        "standard input is over the 65536-byte inline limit"
+    )
+    assert doc_events(db) == []
+    _stdin(monkeypatch, b"x" * DOC_INLINE_LIMIT)
+    code, added, err = add(monkeypatch, db, "-")
+    assert code == 0, err
+    assert added["data"]["document"]["size"] == DOC_INLINE_LIMIT
+
+
+# ---- credential shapes at add ---------------------------------------------------
+
+SHAPES = sorted(SAMPLES)
+
+
+def _assert_no_sample(sample: bytes, *texts: str) -> None:
+    """None of ``texts`` holds the matched bytes, raw or base64."""
+    joined = "".join(texts)
+    assert sample.decode() not in joined
+    assert base64.b64encode(sample).decode() not in joined
+
+
+def _refusal(name: str, shape: str, offset: int) -> str:
+    return (
+        f"{name} holds a credential shape ({shape} at byte {offset}); nothing was "
+        "written. Pass --allow-credential-shapes to attach it anyway"
+    )
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_a_credential_shape_is_refused_at_add_and_nothing_is_written(
+    db, tmp_path, monkeypatch, shape
+):
+    sample = SAMPLES[shape]
+    body = wrap(sample)
+    offset = body.index(sample)
+    source = write(tmp_path / "notes.md", body)
+    code, refused, err = add(monkeypatch, db, source)
+    assert (code, refused["ok"]) == (3, False), f"a {shape} document was added: {refused}"
+    assert refused["error"]["code"] == "doc_credential_shape"
+    assert refused["error"]["message"] == _refusal(str(source), shape, offset)
+    _assert_no_sample(sample, json.dumps(refused), err)
+    code, out, err = cli(monkeypatch, db, "doc", "add", ITEM, str(source), "--role", "brief")
+    assert (code, out) == (3, "")
+    assert _refusal(str(source), shape, offset) in err
+    _assert_no_sample(sample, out, err)
+    assert doc_events(db) == []
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_a_credential_shape_attached_with_the_flag_carries_the_marker(
+    db, tmp_path, monkeypatch, shape
+):
+    source = write(tmp_path / "notes.md", wrap(SAMPLES[shape]))
+    code, added, err = add(monkeypatch, db, source, "--allow-credential-shapes")
+    assert code == 0, err
+    assert added["data"]["credential_override"] is True
+    assert added["data"]["document"]["credential_override"] is True
+    [stored] = doc_events(db)
+    assert stored.payload["credential_override"] is True
+    assert set(stored.payload) == PAYLOAD_KEYS | {"credential_override"}
+    code, shown, err = cli_json(monkeypatch, db, "doc", "show", ITEM)
+    assert code == 0, err
+    assert [row["credential_override"] for row in shown["data"]["documents"]] == [True]
+    code, out, err = cli(monkeypatch, db, "doc", "show", ITEM)
+    assert code == 0, err
+    assert out.endswith("\tcredential-override\n")
+    _assert_no_sample(SAMPLES[shape], out, err)
+
+
+def test_an_overridden_add_repeated_without_the_flag_is_refused_not_unchanged(
+    db, tmp_path, monkeypatch
+):
+    source = write(tmp_path / "key.txt", wrap(SAMPLES["private-key"]))
+    code, out, err = cli(
+        monkeypatch, db, "doc", "add", ITEM, str(source), "--role", "brief",
+        "--allow-credential-shapes",
+    )
+    assert code == 0, err
+    assert out.endswith("\tcredential-override\n")
+    code, refused, err = add(monkeypatch, db, source)
+    assert (code, refused["ok"]) == (3, False), f"reported unchanged: {refused}"
+    assert refused["error"]["code"] == "doc_credential_shape"
+    code, again, err = add(monkeypatch, db, source, "--allow-credential-shapes")
+    assert code == 0, err
+    assert again["data"]["unchanged"] is True
+    assert again["data"]["credential_override"] is True
+    assert len(doc_events(db)) == 1
+
+
+@pytest.mark.parametrize("name", sorted(NEAR_MISSES))
+def test_near_misses_are_attached_with_no_marker(db, tmp_path, monkeypatch, name):
+    code, added, err = add(monkeypatch, db, write(tmp_path / "near.md", wrap(NEAR_MISSES[name])))
+    assert code == 0, (name, err)
+    assert added["data"]["credential_override"] is False
+    [stored] = doc_events(db)
+    assert set(stored.payload) == PAYLOAD_KEYS
+
+
+def test_the_flag_on_bytes_with_no_shape_writes_no_marker(db, tmp_path, monkeypatch):
+    code, added, err = add(
+        monkeypatch, db, write(tmp_path / "clean.md", b"nothing to hide"),
+        "--allow-credential-shapes",
+    )
+    assert code == 0, err
+    assert added["data"]["credential_override"] is False
+    [stored] = doc_events(db)
+    assert set(stored.payload) == PAYLOAD_KEYS
+
+
+def test_a_credential_shape_on_standard_input_is_refused_naming_standard_input(
+    db, monkeypatch
+):
+    sample = SAMPLES["slack-token"]
+    _stdin(monkeypatch, sample)
+    code, refused, err = add(monkeypatch, db, "-")
+    assert (code, refused["error"]["code"]) == (3, "doc_credential_shape"), (refused, err)
+    assert refused["error"]["message"] == _refusal("standard input", "slack-token", 0)
+    _assert_no_sample(sample, json.dumps(refused), err)
+    assert doc_events(db) == []
+
+
+def test_the_flag_belongs_to_add_only(db, monkeypatch):
+    for argv in (
+        ("doc", "show", ITEM, "--allow-credential-shapes"),
+        ("doc", "verify", "--allow-credential-shapes"),
+    ):
+        code, refused, _err = cli_json(monkeypatch, db, *argv)
+        assert (code, refused["error"]["code"]) == (2, "usage"), argv
+        assert "--allow-credential-shapes" in refused["error"]["message"], argv
+
+
+def test_the_schema_takes_credential_override_only_as_true():
+    base = {"role": "brief", "sha256": "a" * 64, "size": 0, "mime": "text/plain",
+            "content_b64": ""}
+    validate_payload(DOC_KIND, {**base, "credential_override": True})
+    for value in (False, 1, 0, "true", None, [True]):
+        with pytest.raises(ValidationError, match="bad-type:credential_override"):
+            validate_payload(DOC_KIND, {**base, "credential_override": value})
+
+
+# ---- credential shapes at restore and replay ---------------------------------------
+
+
+def _store_unmarked(db: str, sample: bytes, *, content_b64: str | None = None) -> int:
+    """Store an inline document holding ``sample`` with no marker, through
+    the writer's own capability: the add-time scan is bypassed, as a store
+    an older ledger or a hand-edited writer left behind. Returns its id."""
+    body = wrap(sample)
+    payload = {
+        "role": "brief",
+        "sha256": hashlib.sha256(body).hexdigest(),
+        "size": len(body),
+        "mime": "text/plain",
+        "content_b64": (
+            content_b64 if content_b64 is not None
+            else base64.b64encode(body).decode("ascii")
+        ),
+    }
+    with open_ledger(db, create=False) as lg:
+        event = lg._append_doc_event(
+            doc_verb._DOC_WRITER_CAPABILITY, kind=DOC_KIND, payload=payload,
+            item_id=ITEM, idempotency_key="unmarked",
+        )
+    return event.id
+
+
+def _export_without_scan(db: str, export: Path) -> list:
+    """Write every event of ``db`` as an export the way a ledger with no
+    export scan wrote one. Returns the events."""
+    with open_ledger(db, create=False) as lg:
+        events = lg.events()
+    write_event_files(export, events)
+    write_watermark(export, events[-1].id)
+    write_stream_digest(export, load_export(export))
+    return events
+
+
+def _credential_refused(event_id: int, shape: str) -> str:
+    return re.escape(
+        f"restore refuses event {event_id} (doc.attached): restore_doc_credential: "
+        f"its bytes hold a credential shape ({shape}) and it carries no "
+        "credential_override"
+    )
+
+
+def test_restore_refuses_an_unmarked_credential_document(db, tmp_path):
+    sample = SAMPLES["aws-access-key"]
+    event_id = _store_unmarked(db, sample)
+    _export_without_scan(db, tmp_path / "export")
+    dest = tmp_path / "restored" / "ledger.db"
+    with pytest.raises(LedgerError, match=_credential_refused(event_id, "aws-access-key")) as caught:
+        restore_export(tmp_path / "export", dest, system="home")
+    _assert_no_sample(sample, str(caught.value))
+    assert not any(dest.parent.glob("ledger.db*")), "a refused restore left files behind"
+
+
+def test_replay_events_refuses_an_unmarked_credential_document(db, tmp_path):
+    sample = SAMPLES["private-key"]
+    event_id = _store_unmarked(db, sample)
+    with open_ledger(db, create=False) as lg:
+        events = lg.events()
+    assert events[-1].id == event_id
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        # The destination already holds the item; the refused batch leaves
+        # it as it was.
+        replay_events(fresh, events[:-1])
+        before = fresh.events()
+        with pytest.raises(
+            LedgerError, match=_credential_refused(event_id, "private-key")
+        ) as caught:
+            replay_events(fresh, events[-1:])
+        assert fresh.events() == before, "a refused replay changed the destination"
+    _assert_no_sample(sample, str(caught.value))
+
+
+def test_a_marked_credential_document_restores_and_replays(db, tmp_path, monkeypatch):
+    source = write(tmp_path / "key.txt", wrap(SAMPLES["github-token"]))
+    assert add(monkeypatch, db, source, "--allow-credential-shapes")[0] == 0
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, tmp_path / "export")
+        events = lg.events()
+    dest = tmp_path / "restored" / "ledger.db"
+    restore_export(tmp_path / "export", dest, system="home")
+    [restored] = doc_events(str(dest))
+    assert restored.payload["credential_override"] is True
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        replay_events(fresh, events)
+        assert [e.payload for e in fresh.events(kind=DOC_KIND)] == [restored.payload]
+
+
+@pytest.mark.parametrize("value", [False, 1, "true"])
+def test_a_restore_or_replay_with_a_credential_override_other_than_true_is_refused(
+    db, tmp_path, monkeypatch, value
+):
+    source = write(tmp_path / "key.txt", wrap(SAMPLES["openai-key"]))
+    assert add(monkeypatch, db, source, "--allow-credential-shapes")[0] == 0
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, export)
+        events = lg.events()
+    document = events[-1]
+    assert document.kind == DOC_KIND
+    forged = dataclasses.replace(
+        document, payload={**document.payload, "credential_override": value}
+    )
+    forged = dataclasses.replace(forged, hash=event_digest(hash_body(forged)))
+    (export / event_filename(forged.id)).write_text(
+        canonical_dumps(event_record(forged)) + "\n", encoding="utf-8"
+    )
+    dest = tmp_path / "restored" / "ledger.db"
+    with pytest.raises((ValidationError, LedgerError), match="bad-type:credential_override"):
+        restore_export(export, dest, system="home")
+    assert not any(dest.parent.glob("ledger.db*")), "a refused restore left files behind"
+    replaced = [forged if event.id == forged.id else event for event in events]
+    with open_ledger(tmp_path / "fresh.db") as fresh:
+        with pytest.raises(
+            LedgerError,
+            match=r"restore refuses event \d+ \(doc\.attached\): bad-type:credential_override",
+        ):
+            replay_events(fresh, replaced)
+        assert fresh.events() == [], "a refused replay inserted events"
+
+
+# ---- credential shapes at export -----------------------------------------------------
+
+
+def _export_state(export: Path) -> dict[str, bytes]:
+    return {path.name: path.read_bytes() for path in sorted(export.iterdir())}
+
+
+def test_export_refuses_an_unmarked_credential_document_and_writes_nothing(
+    db, tmp_path, monkeypatch
+):
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        export_events(lg, export)
+    before = _export_state(export)
+    watermark = read_watermark(export)
+    assert watermark > 0
+    sample = SAMPLES["openai-key"]
+    # The test hook: doc add's scan sees nothing, so an unmarked credential
+    # document reaches the store and then the export step.
+    with monkeypatch.context() as hook:
+        hook.setattr(doc_verb, "scan_credentials", lambda data: ())
+        code, added, err = add(monkeypatch, db, write(tmp_path / "leak.md", wrap(sample)))
+    assert code == 0, err
+    assert added["data"]["credential_override"] is False
+    [document] = doc_events(db)
+    message = (
+        f"export refuses event {document.id} (doc.attached) on item {ITEM}: "
+        "export_doc_credential: its bytes hold a credential shape (openai-key) and it "
+        "carries no credential_override; nothing was written"
+    )
+    with open_ledger(db, create=False) as lg:
+        with pytest.raises(ExportDocCredential) as caught:
+            export_events(lg, export)
+    assert str(caught.value) == message
+    assert _export_state(export) == before, "a refused export wrote a file"
+    assert read_watermark(export) == watermark
+
+    commits: list = []
+    monkeypatch.setattr(export_verb, "commit_export", lambda *a, **k: commits.append(a))
+    code, refused, err = cli_json(monkeypatch, db, "export", "--dir", str(export), "--commit")
+    assert (code, refused["ok"], refused["error"]["code"]) == (3, False, "export_doc_credential")
+    assert refused["error"]["message"] == message
+    _assert_no_sample(sample, json.dumps(refused), err)
+    code, out, err = cli(monkeypatch, db, "export", "--dir", str(export))
+    assert (code, out) == (3, "")
+    assert message in err
+    _assert_no_sample(sample, out, err)
+    assert commits == [], "export --commit ran after a refused export"
+    assert _export_state(export) == before, "a refused export wrote a file"
+    assert read_watermark(export) == watermark
+
+
+def test_a_marked_credential_document_exports(db, tmp_path, monkeypatch):
+    source = write(tmp_path / "key.md", wrap(SAMPLES["slack-token"]))
+    assert add(monkeypatch, db, source, "--allow-credential-shapes")[0] == 0
+    export = tmp_path / "export"
+    code, exported, err = cli_json(monkeypatch, db, "export", "--dir", str(export))
+    assert code == 0, f"a marked document was refused at export: {exported}"
+    [document] = doc_events(db)
+    assert (export / event_filename(document.id)).is_file()
+    assert read_watermark(export) == document.id == exported["data"]["watermark"]
+
+
+def test_a_clean_document_exports(db, tmp_path, monkeypatch):
+    assert add(monkeypatch, db, write(tmp_path / "clean.md", b"plain notes"))[0] == 0
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        result = export_events(lg, export)
+    [document] = doc_events(db)
+    assert (export / event_filename(document.id)).is_file()
+    assert result.watermark == document.id
+
+
+def test_export_refuses_a_document_whose_inline_bytes_cannot_be_scanned(db, tmp_path):
+    # Fail closed: bytes that do not decode cannot be scanned, so they are
+    # not exported either.
+    event_id = _store_unmarked(db, b"", content_b64="!!!")
+    export = tmp_path / "export"
+    with open_ledger(db, create=False) as lg:
+        with pytest.raises(ExportDocCredential, match="its inline bytes do not decode"):
+            export_events(lg, export)
+    assert not any(export.glob("*.json")), "a refused export wrote a file"
+    assert event_id > 0

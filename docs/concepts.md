@@ -72,12 +72,29 @@ following a symlink. A symlink at any component not yet opened is refused
 rather than followed, including one swapped in while the walk runs. A
 directory replaced after the walk opened it does not redirect the walk,
 because later opens are relative to the descriptor already held. A `..`
-component is refused too, and so is a file with more than one hard link,
-before any of its bytes are read; the check is made against the name as
-well as the opened file, so a link removed or swapped during the add is
-refused. On macOS `/tmp`, `/var` and
-`/etc` are symlinks, so pass the real path. Every read verifies the stored
-bytes and touches nothing else:
+component is refused too. On macOS `/tmp`, `/var` and `/etc` are symlinks,
+so pass the real path. `-` reads standard input instead of a file, a
+convenience for piping generated text.
+
+`doc add` attaches whatever bytes the file holds and does not vouch for
+where they came from. The ledger runs as the caller's operating-system user,
+so any process that can run `ledger doc add` with `LEDGER_HARNESS` set (an
+agent lane included) can attach any file that user can read: by its own
+path, through a hard link, or through a copy. No check at `doc add` can tell
+those apart, and none tries. What the ledger does guarantee is that the
+stored sha256 is the digest of the stored bytes, and that a document's bytes
+are never printed or reported `ok` unless they still match it.
+
+`doc add` refuses bytes holding a known credential shape (a private-key
+header, a GitHub, AWS, `sk-` or Slack token) unless it is given
+`--allow-credential-shapes`, which marks the event `credential_override:
+true`. Restore and replay refuse a document holding one without the marker
+(`restore_doc_credential`), and `ledger export` refuses to write one
+(`export_doc_credential`), so an unmarked one never enters the store or an
+export file. `export --commit` and `export --push` do not run the scan. The
+scan is a tripwire for common shapes, not a secret detector.
+
+Every read verifies the stored bytes and touches nothing else:
 `doc show --content` prints a document's bytes and `doc verify` reports it
 `ok` only when they hash to the stored sha256 and size; otherwise it is a
 `mismatch`, never content. The file a document came from can change or go

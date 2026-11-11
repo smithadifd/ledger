@@ -143,7 +143,7 @@ A claim stamps the spec version it was made against, and the card shows
 written only to move the source leaves the content hash as it was and prints
 nothing.
 
-**`doc add ITEM FILE --role ROLE [--title T] [--mime M]`**
+**`doc add ITEM FILE --role ROLE [--title T] [--mime M] [--allow-credential-shapes]`**
 Attach a document to an item as one `doc.attached` event. `ROLE` is one of
 `review-receipt`, `brief`, `packet`, `retro`, `other`. The ledger reads
 `FILE`'s bytes once, computes their sha256 and size itself, and stores the
@@ -168,19 +168,49 @@ repeated `/` and a `.` component are skipped. On macOS `/tmp`, `/var` and
 `/etc` are symlinks into `/private`, so pass the real path (for example
 `/private/tmp/brief.md`). A `FILE` that is empty, ends in `/`, or is not a
 readable regular file (missing, a directory, a FIFO) is `doc_unreadable` as
-well, and so is a file with more than one hard link (refused before any of
-its bytes are read; the check is made against the name as well as the
-opened file, so a link removed or swapped during the add is refused), and
-every `FILE` on a platform that cannot open a path
-without following symlinks. A filename in a refusal is escaped as `events`
-escapes a text column.
+well, and so is every `FILE` on a platform that cannot open a path without
+following symlinks. A filename in a refusal is escaped as `events` escapes a
+text column.
+
+`FILE` given as a single hyphen (`-`) reads standard input, up to the same
+inline limit (over it is a usage error, exit 2); the media type defaults to
+`application/octet-stream`. A file whose name is a single hyphen is passed
+as `./-`. Standard input is a convenience for piping generated text into a
+document.
+
+`doc add` attaches whatever bytes `FILE` holds and does not vouch for where
+they came from. The ledger runs as the caller's operating-system user, so
+any process that can run `ledger doc add` with `LEDGER_HARNESS` set (an
+agent lane included) can attach any file that user can read: by its own
+path, through a hard link, or through a copy. No check at `doc add` can tell
+those apart, and none tries. What the ledger does guarantee is that the
+stored sha256 is the digest of the stored bytes, and that a document's bytes
+are never printed or reported `ok` unless they still match it.
+
+Before anything is written, `doc add` scans the bytes for known credential
+shapes: a private-key header (`-----BEGIN ... PRIVATE KEY-----`), a GitHub
+token (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_` or `github_pat_`), an AWS
+access key id (`AKIA` or `ASIA`), an `sk-` API key, and a Slack token
+(`xoxa-`, `xoxb-`, `xoxp-`, `xoxr-`, `xoxs-`). Every shape but the
+private-key header matches only at the start of the bytes or after a byte
+that is not an ASCII letter, digit or underscore, so `risk-free` is not an
+`sk-` key. A hit is refused `doc_credential_shape` (exit 3), naming `FILE`
+and each shape with its byte offset, never the matched bytes, and nothing is
+written. `--allow-credential-shapes` attaches it anyway and marks the event
+`credential_override: true`; the result says so (`credential-override` in
+text, `data.credential_override: true` with `--json`). The flag on bytes
+with no hit writes no marker. The scan runs before the `unchanged` check, so
+repeating an overridden add without the flag is refused. The scan is a
+tripwire for these common shapes, not a secret detector: a credential in any
+other shape passes it.
 
 **`doc show ITEM [--id N] [--content]`** List the item's documents, oldest
-first: event id, role, size, the start of the sha256, `inline`, and the
-title. `--id N` shows one. With `--json`:
+first: event id, role, size, the start of the sha256, `inline`, the title,
+and `credential-override` when the document carries the marker. `--id N`
+shows one. With `--json`:
 
 ```json
-{"data": {"documents": [{"event_id": 7, "item_id": "it-1", "mime": "text/markdown", "path": null, "role": "brief", "sha256": "<64 hex>", "size": 120, "storage": "inline", "title": "The brief"}], "item_id": "it-1"}, "error": null, "ok": true}
+{"data": {"documents": [{"credential_override": false, "event_id": 7, "item_id": "it-1", "mime": "text/markdown", "path": null, "role": "brief", "sha256": "<64 hex>", "size": 120, "storage": "inline", "title": "The brief"}], "item_id": "it-1"}, "error": null, "ok": true}
 ```
 
 `storage` is always `inline` and `path` is always null; both keys stay so
@@ -540,12 +570,24 @@ exits 0, as before.
 Write events after the watermark as canonical JSON files. `--commit` makes
 one git commit in `DIR` and never pushes; `--push` pushes; `--check` reports
 the lag and exits 3 when it is over the limits (100 events, 24 hours).
+Before any event file is written, every pending document is scanned for the
+credential shapes `doc add` refuses. A document holding one without the
+`credential_override` marker refuses the whole export
+`export_doc_credential` (exit 3), naming the event, its item and the shapes:
+nothing is written, the watermark does not move, and `--commit` does not
+run. A document attached with `--allow-credential-shapes` is exported.
+`--commit` and `--push` do not run the credential scan: they commit or push
+whatever the export directory and its history hold, so a file placed there
+by hand, or a commit made by hand or by an older ledger, leaves the machine
+without passing it.
 
 **`backup --to FILE`** Online backup with `PRAGMA integrity_check`.
 
 **`restore --dir DIR --system NAME [--accept-loop-events]`** Replay an
 export into the new database named by `--db`, then verify it. The target
-must not exist.
+must not exist. A document holding a credential shape without the
+`credential_override` marker refuses the whole restore
+`restore_doc_credential`, and nothing is inserted.
 
 ## Guidance
 
