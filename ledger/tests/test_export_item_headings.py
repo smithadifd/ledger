@@ -482,3 +482,96 @@ def test_a_final_line_without_a_newline_is_the_last_line():
     assert ticket_section(text, 4) == "### Ticket: END1 — t\n- last\n"
     with pytest.raises(ValueError, match=f"^{SECTION_NOT_FOUND}$"):
         ticket_section(text, 2)
+
+
+# --- legacy ids: lowercase, or holding an underscore --------------------------
+# The importer's id grammar is uppercase-led segments of letters and digits
+# joined by hyphens. An older roadmap may hold a ticket heading whose id is
+# lowercase (``sl40``) or holds an underscore (``SL_41``). The importer imports
+# neither: after ``Ticket:`` it reads a ticket heading with no id and reports
+# ``no stable id``; inside ``## Tickets`` it reads no ticket heading at all.
+# The view agrees: an anchor to such an id is refused by name, and a line
+# locator shows exactly the headings the importer counts as ticket headings.
+
+LEGACY_BODY = "- AI-able: yes\n- Prompt: legacy.\n\n"
+# name: (id, heading line, whether it sits inside ``## Tickets``)
+LEGACY = {
+    "prefixed-lowercase": ("sl40", "### Ticket: sl40 — lowercase id\n", False),
+    "prefixed-underscore": ("SL_41", "### Ticket: SL_41 — underscore id\n", False),
+    "bare-lowercase": ("sl42", "### sl42 — lowercase id\n", True),
+    "bare-underscore": ("SL_43", "### SL_43 — underscore id\n", True),
+}
+# The same two forms with an id in the grammar: the fixture shape resolves.
+LEGACY_CONTROLS = {
+    "prefixed-control": ("SL44", "### Ticket: SL44 — control\n", False),
+    "bare-control": ("SL45", "### SL45 — control\n", True),
+}
+
+
+def _legacy_text(heading: str, in_tickets: bool) -> str:
+    return "# Roadmap\n\n" + ("## Tickets\n\n" if in_tickets else "") + heading + LEGACY_BODY
+
+
+def _heading_text(heading: str) -> str:
+    """The heading's text after ``### ``, as the importer and the view read it."""
+    return heading[len("### "):].strip()
+
+
+@pytest.fixture()
+def legacy_repo(tmp_path: Path) -> tuple[Path, str]:
+    root = tmp_path / "repo"
+    (root / "roadmaps").mkdir(parents=True)
+    for name, (_ticket_id, heading, in_tickets) in {**LEGACY, **LEGACY_CONTROLS}.items():
+        (root / "roadmaps" / f"{name}.md").write_text(
+            _legacy_text(heading, in_tickets), encoding="utf-8")
+    _git(root, "init", "-q")
+    _git(root, "add", "-A")
+    _git(root, "commit", "-q", "-m", "init")
+    return root, _git(root, "rev-parse", "HEAD").strip()
+
+
+@pytest.mark.parametrize("name", sorted(LEGACY))
+def test_a_legacy_id_anchor_is_refused_by_name(tmp_path, legacy_repo, name):
+    root, _sha = legacy_repo
+    ticket_id, heading, in_tickets = LEGACY[name]
+    locator = f"roadmaps/{name}.md#{ticket_id}"
+    db = tmp_path / "ledger.db"
+    _item(db, "legacy", f"row:{ticket_id}", f"also at {locator}")
+
+    result = _run(db, root, "legacy")
+
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    error = json.loads(result.stdout)["error"]
+    assert error["code"] == "not_found", error
+    assert error["message"] == f"{NOT_FOUND}: no ticket heading for {ticket_id} in {locator}"
+    # The importer's outcome for the same heading: no ticket id. A
+    # ``Ticket:`` heading is a ticket heading with no id (``no stable id``);
+    # a bare one is not a ticket heading.
+    assert ticket_heading(_heading_text(heading), in_tickets=in_tickets) == (not in_tickets, "")
+
+
+@pytest.mark.parametrize("name", sorted(LEGACY))
+def test_a_legacy_id_line_locator_follows_the_importer(tmp_path, legacy_repo, name):
+    root, sha = legacy_repo
+    _ticket_id, heading, in_tickets = LEGACY[name]
+    text = _legacy_text(heading, in_tickets)
+    db = tmp_path / "ledger.db"
+    _item(db, "legacy-line", f"roadmaps/{name}.md:{_line_of(text, heading)}@{sha}")
+
+    if in_tickets:
+        # Not a ticket heading for the importer: the view refuses the line.
+        assert SECTION_NOT_FOUND in _refusal(db, root, "legacy-line")
+    else:
+        # A ticket heading with no id for the importer: the line still shows.
+        assert _ticket(db, root, "legacy-line") == heading + LEGACY_BODY
+
+
+@pytest.mark.parametrize("name", sorted(LEGACY_CONTROLS))
+def test_the_legacy_fixture_with_a_grammar_id_resolves(tmp_path, legacy_repo, name):
+    root, _sha = legacy_repo
+    ticket_id, heading, in_tickets = LEGACY_CONTROLS[name]
+    db = tmp_path / "ledger.db"
+    _item(db, "control", f"row:{ticket_id}", f"also at roadmaps/{name}.md#{ticket_id}")
+
+    assert _ticket(db, root, "control") == heading + LEGACY_BODY
+    assert ticket_heading(_heading_text(heading), in_tickets=in_tickets) == (True, ticket_id)

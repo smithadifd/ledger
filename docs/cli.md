@@ -379,7 +379,17 @@ any code fence, in one of two forms:
 The title is optional and follows `: ` or a spaced em dash, en dash or hyphen.
 An id is uppercase-led segments joined by single hyphens, each of which may end
 in one lowercase letter (`SL12`, `SL12a`, `CSF3-9-H1`); an `RM-` id is never a
-ticket id. A `path:line@commit` locator shows the section of the nearest
+ticket id. This is the roadmap importer's id grammar, so a ticket the importer
+reads is one this view shows, and an id it refuses is refused here too. A
+legacy heading whose id is lowercase or holds an underscore carries no id:
+`### Ticket: sl40 — title` and `### Ticket: SL_41 — title` are ticket
+headings with no id (the importer reports each as `no stable id` and imports
+nothing), and the bare `### sl40 — title` and `### SL_41 — title` inside
+`## Tickets` are not ticket headings (the importer skips them). An anchor to
+such an id refuses with
+`row_source_anchor_not_found: no ticket heading for sl40 in path#sl40`
+(exit 1). To import and show the ticket, rename the id to the grammar
+(`SL40`, `SL41`). A `path:line@commit` locator shows the section of the nearest
 heading of level three or less at or above that line, and refuses
 (`not_found`) when that heading is not a ticket heading; a `### Ticket:`
 heading whose tail is not that shape still counts there, with no id.
