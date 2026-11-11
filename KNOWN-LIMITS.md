@@ -14,12 +14,15 @@ no weight group. The seat copies it here as one line. It gets no ticket, no fix 
 block. The line is revisited at beta, when a second person's machine and use are in the
 picture.
 
-Line form, one per limit:
+Line form, one per limit. A limit a review recorded names the pull request and review round
+that found it:
+
+    - <path>:<line> — <what> — out of scope for alpha: <why> (<repo>#<PR> r<round>)
+
+A limit set by a ruling names the pull request that recorded the ruling, who made it and the
+date (`owner confirmation 2026-11-10`, `director ruling 2026-11-11`):
 
     - <path>:<line> — <what> — out of scope for alpha: <why> (<repo>#<PR>, <ruling> <date>)
-
-The closing parenthesis names the pull request that recorded the ruling and who made it, with
-the date: `owner confirmation 2026-11-10` or `director ruling 2026-11-11`.
 
 ## Limits
 
