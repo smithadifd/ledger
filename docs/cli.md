@@ -673,8 +673,9 @@ refuses the push), then pushes exactly that commit to `refs/heads/<branch>`
 at the branch's push remote: `branch.<name>.pushRemote`, else
 `remote.pushDefault`, else `branch.<name>.remote`, using that remote's push
 URL. There is no fallback to a remote named `origin`. It pushes no tag and
-no other ref, sends no push option, ignores `push.default` and
-`remote.<name>.push`, and never opens the ledger. A refusal pushes nothing.
+no other ref, sends no push option and no push certificate (it ignores
+`push.gpgSign`), ignores `push.default` and `remote.<name>.push`, and never
+opens the ledger. A refusal pushes nothing.
 `export_push_failed` means git push itself failed after it started; the
 remote may or may not hold the commit, so check it. With `--json` a push
 reports `sha`, `pushed`, `branch` and `remote` (null when the push remote is

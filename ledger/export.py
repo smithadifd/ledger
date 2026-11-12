@@ -1464,7 +1464,7 @@ def _check_event_record(data: bytes) -> Event:
         raise _RecordInvalid(str(exc)) from None
     try:
         canonical = (canonical_dumps(event_record(event)) + "\n").encode("utf-8")
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, RecursionError):
         raise _RecordInvalid("canonical bytes") from None
     if data != canonical:
         raise _RecordInvalid("canonical bytes")
@@ -1791,9 +1791,9 @@ def push_export(export_dir: Path) -> PushResult:
     pinned. The branch name, then every commit, path and blob reachable from
     the pinned commit, pass the scan rule before anything is sent. The one
     push sends the pinned full sha to ``refs/heads/<branch>``, with no tag,
-    push option or other ref. Every refusal is raised before the push
-    command runs; ``ExportPushFailed`` means the push command ran and
-    failed, so its outcome is unknown."""
+    push option, push certificate or other ref. Every refusal is raised
+    before the push command runs; ``ExportPushFailed`` means the push
+    command ran and failed, so its outcome is unknown."""
     export_dir = assert_export_repo(export_dir)
     step = "push"
     branch = _pin_branch(export_dir, step)
@@ -1813,7 +1813,8 @@ def push_export(export_dir: Path) -> PushResult:
     result = _git(
         export_dir,
         "-c", "push.pushOption=",
-        "push", "--no-follow-tags", "--recurse-submodules=no", "--end-of-options",
+        "push", "--no-follow-tags", "--recurse-submodules=no", "--no-signed",
+        "--end-of-options",
         remote, f"{sha}:refs/heads/{name}",
     )
     if result.returncode != 0:
@@ -1877,7 +1878,10 @@ def _swap(
         if prepared:
             assert proc.stdin is not None
             try:
-                proc.stdin.write(f"update {ref} {new} {old or zero}\n".encode())
+                proc.stdin.write(
+                    b"update " + os.fsencode(ref) + b" " + new.encode("ascii") + b" "
+                    + (old or zero).encode("ascii") + b"\n"
+                )
             except BrokenPipeError:
                 prepared = False
         prepared = prepared and _txn(proc, "prepare")

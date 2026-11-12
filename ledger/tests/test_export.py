@@ -7,7 +7,9 @@ the pinned branch commit and pushes exactly that commit, by its full sha, to
 the branch's push remote.
 
 Tests are named for the design's T1 to T43 (T40 lives in the repository's
-docs test). Credential samples are assembled at run time
+docs test); T44 to T46 cover review findings on the push certificate,
+deeply nested event files and a branch name that is not UTF-8.
+Credential samples are assembled at run time
 (``test_credscan.SAMPLES``), so no complete shape appears in this file.
 Remotes are local bare repositories. Every git command here, the test's own
 and the code's, reads only this test's global config file and no system
@@ -1047,6 +1049,107 @@ def test_t43_a_signing_program_that_succeeds_signs_the_commit(db, tmp_path):
     assert result.sha is not None and ref(repo) == result.sha
     header = git(repo, "cat-file", "commit", result.sha).stdout.split(b"\n\n", 1)[0]
     assert b"\ngpgsig -----BEGIN PGP SIGNATURE-----" in header
+
+
+# ---- push certificate, deep nesting, a branch name that is not UTF-8 ---------------
+
+
+def test_t44_push_gpg_sign_sends_no_push_certificate(db, tmp_path):
+    # A push certificate names the pusher (the committer ident) and is sent
+    # beside the commits, so nothing in the scanned history covers it. The
+    # remote advertises certificates and the repository asks to sign every
+    # push; the receiving hook records any certificate that arrives.
+    repo = committed_repo(tmp_path, db)
+    remote = with_remote(repo, bare(tmp_path / "remote.git"))
+    signer = executable(
+        tmp_path / "gpg-ok.sh",
+        "#!/bin/sh\ncat > /dev/null\n"
+        "printf '[GNUPG:] BEGIN_SIGNING\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 ABCDEF\\n' >&2\n"
+        "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nZmFrZQ==\\n-----END PGP SIGNATURE-----\\n'\n",
+    )
+    git(remote, "config", "receive.certNonceSeed", "pushscan-test-seed")
+    git(remote, "config", "gpg.program", str(signer))
+    record = tmp_path / "push-cert.txt"
+    executable(
+        remote / "hooks" / "pre-receive",
+        "#!/bin/sh\ncat > /dev/null\n"
+        f"if [ -n \"$GIT_PUSH_CERT\" ]; then git cat-file blob \"$GIT_PUSH_CERT\" > '{record}'; "
+        f"else echo none > '{record}'; fi\n",
+    )
+    git(repo, "config", "gpg.program", str(signer))
+    git(repo, "config", "push.gpgSign", "true")
+    # The clean commit exists; only now does the ident take a credential shape.
+    git(repo, "config", "user.name", SAMPLE_TEXT)
+    pushed = push_export(repo)
+    assert remote_refs(remote) == {"refs/heads/main": pushed.sha}
+    assert record.read_text(encoding="utf-8") == "none\n", "the push sent a push certificate"
+
+
+def _deep_event_bytes(depth: int = 2000) -> bytes:
+    """An event file whose payload nests ``depth`` objects: too deep to
+    canonicalise. Python 3.12 and later parse it; Python 3.11's parser
+    shares the recursion limit and refuses it while parsing."""
+    record = _record_dict(doc_event(HAND_ID, b"plain notes\n"))
+    record["payload"] = {"nest": 0}
+    text = canonical_dumps(record)
+    assert text.count('{"nest":0}') == 1
+    nested = '{"a":' * depth + "0" + "}" * depth
+    return (text.replace('{"nest":0}', nested) + "\n").encode("utf-8")
+
+
+@pytest.mark.parametrize("step", ["commit", "push"])
+def test_t45_a_deeply_nested_event_file_refuses_as_invalid(db, tmp_path, step):
+    # The check that fails is the first one that recurses too deep on this
+    # interpreter: canonicalising where the parser copes, else parsing.
+    try:
+        json.loads(_deep_event_bytes())
+        check = "canonical bytes"
+    except RecursionError:
+        check = "json"
+    repo = committed_repo(tmp_path, db)
+    if step == "commit":
+        (repo / EVENT_NAME).write_bytes(_deep_event_bytes())
+        before = snapshot(repo)
+        with pytest.raises(ExportEventInvalid) as caught:
+            commit_export(repo)
+        assert snapshot(repo) == before
+    else:
+        hand_commit(repo, "add a deep event", {EVENT_NAME: _deep_event_bytes()})
+        remote = with_remote(repo, bare(tmp_path / "remote.git"))
+        with pytest.raises(ExportEventInvalid) as caught:
+            push_export(repo)
+        assert remote_refs(remote) == {}
+    message = str(caught.value)
+    assert "export_event_invalid" in message and EVENT_NAME in message
+    assert f"(failed check: {check})" in message
+
+
+def test_t46_a_branch_name_that_is_not_utf8_commits(db, tmp_path, monkeypatch):
+    # A reftable repository keeps its refs inside its table files, so the
+    # branch name needs no file of its own (a file system may refuse a file
+    # name that is not UTF-8). The branch is made with git update-ref.
+    repo = tmp_path / "export"
+    subprocess.run(
+        ["git", "init", "-q", "--ref-format=reftable", "-b", "main", str(repo)],
+        check=True, capture_output=True,
+    )
+    git(repo, "config", "user.name", "ledger-test")
+    git(repo, "config", "user.email", "ledger-test@example.invalid")
+    git(repo, "config", "commit.gpgsign", "false")
+    export(db, repo)
+    old = commit_export(repo).sha
+    assert old is not None
+    branch = "refs/heads/" + os.fsdecode(b"caf\xe9-\xff")
+    git(repo, "update-ref", branch, old)
+    git(repo, "symbolic-ref", "HEAD", branch)
+    assert git(repo, "symbolic-ref", "HEAD").stdout == b"refs/heads/caf\xe9-\xff\n"
+    seed(monkeypatch, db, "it-2")
+    export(db, repo)
+    result = commit_export(repo)
+    assert result.sha is not None and result.index_refreshed is True
+    assert ref(repo, branch) == result.sha
+    assert ref(repo) == old
+    assert out(repo, "rev-list", "--parents", "-n", "1", result.sha).split() == [result.sha, old]
 
 
 # ---- other failures ----------------------------------------------------------------
