@@ -401,6 +401,21 @@ def test_newest_changelog_heading_names_the_package_version() -> None:
     )
 
 
+EXPORT_GUARANTEE = (
+    "The guard guarantees that every byte the ledger's own commit and push send is "
+    "reachable from a pinned commit whose full history passed the scan; it does not "
+    "guarantee which branch, index or destination ends up updated when another "
+    "same-user git process changes HEAD, refs or config while the command runs."
+)
+
+
+def test_the_export_entry_states_the_commit_and_push_guarantee_word_for_word() -> None:
+    # The export entry runs from its heading to the next verb heading.
+    page = CLI_PAGE.read_text(encoding="utf-8")
+    entry = page.split("**`export [--dir DIR]", 1)[1].split("\n**`", 1)[0]
+    assert _squash(EXPORT_GUARANTEE) in _squash(entry)
+
+
 def test_concepts_documents_note_search_and_severity() -> None:
     text = (ROOT / "docs" / "concepts.md").read_text(encoding="utf-8")
     section = text.split("## The search index", 1)[1].split("\n## ", 1)[0]

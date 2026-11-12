@@ -32,7 +32,7 @@ JSON object on stdout:
 | 0 | ok | success |
 | 1 | not found | no such item or database, or an empty listing |
 | 2 | usage | bad flags or arguments |
-| 3 | refused | validation, synced path, shared database, missing `LEDGER_HARNESS`, capacity, a quote that does not match, export lag |
+| 3 | refused | validation, synced path, shared database, missing `LEDGER_HARNESS`, capacity, a quote that does not match, export lag, an export, commit or push refusal |
 | 4 | integrity | `verify` found a broken hash chain or a broken child-of forest; `doc verify` or `doc show --content` found a document whose bytes do not hash to its sha256 and size, or a by-path document whose file is missing or refused |
 | 5 | stale | `--expect-revision` no longer matches the item's newest event |
 
@@ -40,7 +40,7 @@ Error codes in the JSON envelope include `usage`, `missing_harness`,
 `missing_db`, `not_found`, `empty`, `validation`, `conflict`, `capacity`,
 `shared_database`, `synced_path`, `stale_revision`, `integrity`, `unusable`,
 `quote_mismatch`, `lag`, `verb_collision`, `invalid_actor`, `doc_unreadable`,
-`doc_outside_root` (exit 3), `doc_credential_shape`, `export_doc_credential`,
+`doc_outside_root` (exit 3), `export_doc_credential`, `export_head_detached`, `export_push_unborn`, `export_push_unconfigured`, `export_push_multiple_urls`, `export_repo_shallow`, `export_history_incomplete`, `export_file_credential`, `export_event_invalid`, `export_object_unreadable`, `export_head_moved`, `export_commit_ancestry`, `export_branch_credential`, `export_commit_sign_failed`, `export_git_failed`, `export_push_failed` (each exit 3), `doc_credential_shape`,
 `restore_doc_credential`, `doc_mismatch`, `doc_missing`, `doc_refused` (each
 exit 4) and `doc_verify_failed`. A user error never
 prints a stack trace.
@@ -627,9 +627,10 @@ JSON error code) is `second_anchor`, `self_link`, `anchor_missing` or
 exits 0, as before.
 
 **`export [--dir DIR] [--commit | --push | --check [--max-events N] [--max-hours H]]`**
-Write events after the watermark as canonical JSON files. `--commit` makes
-one git commit in `DIR` and never pushes; `--push` pushes; `--check` reports
-the lag and exits 3 when it is over the limits (100 events, 24 hours).
+Write events after the watermark as canonical JSON files. `--commit` scans,
+then makes one git commit in `DIR`, and never pushes; `--push` scans the
+branch's whole history, then pushes its commit; `--check` reports the lag
+and exits 3 when it is over the limits (100 events, 24 hours).
 Before any event file is written, every pending document is scanned for the
 credential shapes `doc add` refuses. A document holding one without the
 `credential_override` marker refuses the whole export
@@ -640,10 +641,71 @@ by-path document's event file carries its stored path, sha256 and size and
 no bytes, so export never opens a document file; it scans the stored path
 instead, and an unmarked hit there refuses `export_doc_credential` the same
 way, naming the shapes as in the path and never the path.
-`--commit` and `--push` do not run the credential scan: they commit or push
-whatever the export directory and its history hold, so a file placed there
-by hand, or a commit made by hand or by an older ledger, leaves the machine
-without passing it.
+
+The guard guarantees that every byte the ledger's own commit and push send
+is reachable from a pinned commit whose full history passed the scan; it
+does not guarantee which branch, index or destination ends up updated when
+another same-user git process changes HEAD, refs or config while the
+command runs.
+
+`--commit` stages the export directory into a temporary index, never the
+repository's own, and scans the exact tree it will commit before it makes
+the commit. A file at an event name (sixteen digits and `.json`, at any
+depth) must be the canonical bytes of a valid event record, and its
+`doc.attached` document gets the same scan as at export; every other file,
+every path name and the commit message are scanned for the credential
+shapes, with no override. The commit's parent is the head the step read,
+and only that branch moves, only if it still holds that head; the commit is
+also refused if HEAD no longer names that branch when checked. A refusal
+(codes below) commits nothing and leaves HEAD and the index as they were.
+After a commit the index is set to the new commit's tree when HEAD still
+names the branch, and the result's `index_refreshed` says whether that ran;
+when it did not, the text line ends with a warning, and `git read-tree HEAD`
+in the export directory sets the index. `--commit` signs its commit when
+`commit.gpgSign` is true, as `git commit` would, and refuses
+`export_commit_sign_failed` when signing fails.
+
+`--push` needs HEAD on a branch. It refuses a shallow repository, and a push
+remote with more than one push URL when it checks before the scan. It reads
+the branch's commit once, scans every commit, path and file reachable from
+it (the whole history: a file committed by hand, even one removed later,
+refuses the push), then pushes exactly that commit to `refs/heads/<branch>`
+at the branch's push remote: `branch.<name>.pushRemote`, else
+`remote.pushDefault`, else `branch.<name>.remote`, using that remote's push
+URL. There is no fallback to a remote named `origin`. It pushes no tag and
+no other ref, sends no push option and no push certificate (it ignores
+`push.gpgSign`), ignores `push.default` and `remote.<name>.push`, and never
+opens the ledger. A refusal pushes nothing.
+`export_push_failed` means git push itself failed after it started; the
+remote may or may not hold the commit, so check it. With `--json` a push
+reports `sha`, `pushed`, `branch` and `remote` (null when the push remote is
+a URL or a path).
+
+Both steps also scan the branch name and refuse `export_branch_credential`
+without printing it. A history that already holds a refused file cannot be
+pushed by the ledger: remove the file from the export repository's history
+with git, and rotate the credential if that history has been pushed before.
+The scan is the same tripwire as at `doc add`: a credential in another
+shape, or encoded, passes.
+
+Refusal codes of the export, commit and push steps, each exit 3:
+
+- `export_head_detached`: HEAD is detached or names a ref outside `refs/heads/` (commit, push).
+- `export_push_unborn`: the branch has no commit (push).
+- `export_push_unconfigured`: no push remote is set by `branch.<name>.pushRemote`, `remote.pushDefault` or `branch.<name>.remote`, or the value starts with a hyphen (push).
+- `export_push_multiple_urls`: the push remote has more than one push destination when counted before the scan (push).
+- `export_repo_shallow`: the export repository is shallow (push).
+- `export_history_incomplete`: a listed commit's object names a parent that the history listing does not hold (push).
+- `export_doc_credential`: a valid `doc.attached` record holds an unmarked credential shape or undecodable bytes (export, commit, push).
+- `export_file_credential`: a credential shape in a file that is not at an event name, in a path name or in a commit object (commit, push).
+- `export_event_invalid`: a file at an event name is not the canonical bytes of a valid event record (commit, push).
+- `export_object_unreadable`: a missing object, a wrong object type, a submodule (gitlink), or a branch that does not hold a commit (commit, push).
+- `export_head_moved`: at the swap, the branch no longer holds the head the step read (or exists when it was unborn), or HEAD no longer names the branch (commit).
+- `export_commit_ancestry`: the new commit's tree or parents are not exactly the scanned tree and the old head (commit).
+- `export_branch_credential`: the branch name holds a credential shape; the name is not printed (commit, push).
+- `export_commit_sign_failed`: `commit.gpgSign` is true and signing the commit failed; no ref moved (commit).
+- `export_git_failed`: any other git command failed before the push command, or in the commit steps (commit, push).
+- `export_push_failed`: the push command itself failed after it started; the outcome is unknown (push).
 
 **`backup --to FILE`** Online backup with `PRAGMA integrity_check`. The
 backup holds the database only: a by-path document's bytes live under its

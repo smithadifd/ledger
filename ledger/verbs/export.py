@@ -9,9 +9,11 @@ from ledger.export import (
     DEFAULT_MAX_HOURS,
     EXPORT_DOC_CREDENTIAL,
     ExportDocCredential,
+    ExportRefusal,
     LagExceeded,
     check_lag,
     commit_export,
+    escape_name,
     export_events,
     push_export,
 )
@@ -35,12 +37,15 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--commit",
         action="store_true",
-        help="make one git commit in the export directory; never pushes",
+        help=(
+            "scan the exact tree, then make one git commit in the export directory; "
+            "never pushes"
+        ),
     )
     parser.add_argument(
         "--push",
         action="store_true",
-        help="push the export directory; a separate step from --commit",
+        help="scan the whole history, then push the branch's commit to its push remote",
     )
     parser.add_argument(
         "--check",
@@ -75,8 +80,22 @@ def run(args, ctx: Context) -> Result:
     if args.commit and args.push:
         raise UsageError("export --commit never pushes; run --push separately")
     if args.push:
-        sha = push_export(export_dir)
-        return Result(data={"sha": sha, "pushed": True}, text=f"pushed {sha}")
+        try:
+            pushed = push_export(export_dir)
+        except ExportRefusal as exc:
+            raise CliError(str(exc), code=exc.code, exit_code=EXIT_REFUSED) from exc
+        return Result(
+            data={
+                "branch": pushed.branch,
+                "pushed": True,
+                "remote": pushed.remote,
+                "sha": pushed.sha,
+            },
+            text=(
+                f"pushed {pushed.sha} to refs/heads/{escape_name(pushed.branch)}"
+                + (f" at {escape_name(pushed.remote)}" if pushed.remote is not None else "")
+            ),
+        )
     lg = open_db(ctx, write=False)
     try:
         if args.check:
@@ -117,9 +136,14 @@ def run(args, ctx: Context) -> Result:
     finally:
         lg.close()
     commit_sha = None
+    index_refreshed = False
     if args.commit:
-        committed = commit_export(export_dir)
+        try:
+            committed = commit_export(export_dir)
+        except ExportRefusal as exc:
+            raise CliError(str(exc), code=exc.code, exit_code=EXIT_REFUSED) from exc
         commit_sha = committed.sha
+        index_refreshed = committed.index_refreshed
     data = {
         "commit": commit_sha,
         "exported": result.exported,
@@ -128,7 +152,13 @@ def run(args, ctx: Context) -> Result:
     }
     text = f"exported {result.exported} watermark={result.watermark}"
     if args.commit:
+        data["index_refreshed"] = index_refreshed
         text += f" commit={commit_sha or '-'}"
+        if commit_sha is not None and not index_refreshed:
+            text += (
+                " (warning: the git index was not refreshed; run git read-tree HEAD "
+                "in the export directory)"
+            )
     return Result(data=data, text=text)
 
 
