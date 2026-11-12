@@ -6,8 +6,8 @@ compare-and-swap. ``--push`` scans every commit, path and blob reachable from
 the pinned branch commit and pushes exactly that commit, by its full sha, to
 the branch's push remote.
 
-Tests are named for the design's T1 to T43 (T40 lives in
-``tests/test_repo_docs.py``). Credential samples are assembled at run time
+Tests are named for the design's T1 to T43 (T40 lives in the repository's
+docs test). Credential samples are assembled at run time
 (``test_credscan.SAMPLES``), so no complete shape appears in this file.
 Remotes are local bare repositories. Every git command here, the test's own
 and the code's, reads only this test's global config file and no system
