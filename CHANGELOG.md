@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`ledger export --commit` and `--push` run the credential scan.** `--commit` stages into a temporary index and scans the exact tree it commits; `--push` scans every commit reachable from the branch, then pushes exactly that commit to the branch's push remote, with no tags. Event files must be the canonical bytes of valid records; other files, path names, commit messages and the branch name are scanned for credential shapes. Refusals: `export_head_detached`, `export_push_unborn`, `export_push_unconfigured`, `export_push_multiple_urls`, `export_repo_shallow`, `export_history_incomplete`, `export_file_credential`, `export_event_invalid`, `export_object_unreadable`, `export_head_moved`, `export_commit_ancestry`, `export_branch_credential`, `export_commit_sign_failed`, `export_git_failed` (exit 3), and `export_doc_credential` as at export; a push that fails after it started is `export_push_failed` (exit 3, outcome unknown). `export --push` no longer uses `push.default`, `remote.<name>.push` or a fallback remote, and refuses a detached HEAD, a shallow repository and a remote with several push URLs; `export --commit` refuses a detached HEAD and signs its commit when `commit.gpgSign` is true. With `--json`, `--push` reports `branch` and `remote` beside `sha`, and `--commit` reports `index_refreshed`.
+
 ## 0.1.21 — 2026-11-11
 
 By-path documents: `ledger doc add --by-path` stores a document's path under the database's document root instead of its bytes, and `doc show --content` and `doc verify` re-read the file through a no-follow walk from that root on every call.

@@ -113,8 +113,10 @@ no bytes, so restore, replay and export scan its stored path and open no
 file. A hit in a stored path is named by its shape and said to be in the
 path; the path itself is not shown. A `--title`, like other text fields, is
 not scanned.
-`export --commit` and `export --push` do not run the scan. The scan is a
-tripwire for common shapes, not a secret detector.
+`export --commit` scans the exact tree it commits, and `export --push` scans
+the whole history it pushes, with the same rule (see `export` in
+[cli.md](cli.md)). The scan is a tripwire for common shapes, not a secret
+detector.
 
 Every read verifies the bytes it read: `doc show --content` prints a
 document's bytes and `doc verify` reports it `ok` only when they hash to the
