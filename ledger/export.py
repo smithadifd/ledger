@@ -333,7 +333,7 @@ def read_watermark(export_dir: Path) -> int:
         return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
         raise LedgerError(f"unreadable watermark: {exc}") from exc
     if type(data) is not dict or "id" not in data:
         raise LedgerError("watermark.json must be an object with id")
@@ -367,7 +367,7 @@ def verify_stream_digest(export_dir: Path, events: list[Event]) -> str:
         raise LedgerError(f"export stream digest is missing: {STREAM_DIGEST_NAME}")
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
         raise LedgerError(f"unreadable export stream digest: {exc}") from exc
     if type(record) is not dict:
         raise LedgerError("export stream digest must be an object")
@@ -1061,7 +1061,7 @@ def load_export(export_dir: Path) -> list[Event]:
         file_id = int(match.group(1))
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
             raise ChainBroken(f"exported file {path.name}: {exc}") from exc
         if type(record) is not dict:
             raise ChainBroken(f"exported file {path.name}: not an object")
@@ -1977,6 +1977,7 @@ def commit_export(export_dir: Path, message: str = "ledger export") -> CommitRes
     git_dir = _git(export_dir, "rev-parse", "--absolute-git-dir")
     if git_dir.returncode != 0:
         raise _git_failed(step, "rev-parse --absolute-git-dir", git_dir)
+    # The temporary index does not carry the real index's skip-worktree bits.
     private = tempfile.mkdtemp(prefix="ledger-export-index-", dir=os.fsdecode(_line(git_dir.stdout)))
     try:
         new = _commit_tree(

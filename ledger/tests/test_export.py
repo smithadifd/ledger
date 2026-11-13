@@ -26,6 +26,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -70,10 +71,9 @@ EVENT_NAME = event_filename(HAND_ID)
 # ---- isolation and helpers -------------------------------------------------------
 
 
-@pytest.fixture(autouse=True)
-def isolated_git(tmp_path: Path, monkeypatch) -> Path:
-    """Every git command reads this file as its global config and no system
-    config, and no variable points git at another repository."""
+def isolate_git_config(tmp_path: Path, monkeypatch) -> Path:
+    """Point every git command at this test's global config and no system
+    config, and drop variables that would point git at another repository."""
     global_config = tmp_path / "global.gitconfig"
     global_config.write_text("[commit]\n\tgpgSign = false\n", encoding="utf-8")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
@@ -86,6 +86,13 @@ def isolated_git(tmp_path: Path, monkeypatch) -> Path:
     ):
         monkeypatch.delenv(name, raising=False)
     return global_config
+
+
+@pytest.fixture(autouse=True)
+def isolated_git(tmp_path: Path, monkeypatch) -> Path:
+    """Every git command reads this file as its global config and no system
+    config, and no variable points git at another repository."""
+    return isolate_git_config(tmp_path, monkeypatch)
 
 
 def git(repo: Path, *args: str, check: bool = True, env: dict | None = None):
@@ -1122,6 +1129,8 @@ def test_t45_a_deeply_nested_event_file_refuses_as_invalid(db, tmp_path, step):
     message = str(caught.value)
     assert "export_event_invalid" in message and EVENT_NAME in message
     assert f"(failed check: {check})" in message
+    if sys.version_info[:2] == (3, 11):
+        assert check == "json"
 
 
 def test_t46_a_branch_name_that_is_not_utf8_commits(db, tmp_path, monkeypatch):

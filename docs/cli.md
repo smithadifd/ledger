@@ -686,7 +686,9 @@ command runs.
 
 `--commit` stages the export directory into a temporary index, never the
 repository's own, and scans the exact tree it will commit before it makes
-the commit. A file at an event name (sixteen digits and `.json`, at any
+the commit. The temporary index does not carry skip-worktree bits from the
+repository index, so a skip-worktree file is staged from the work tree as
+it is on disk, not omitted. A file at an event name (sixteen digits and `.json`, at any
 depth) must be the canonical bytes of a valid event record, and its
 `doc.attached` document gets the same scan as at export; every other file,
 every path name and the commit message are scanned for the credential
