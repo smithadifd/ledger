@@ -5,12 +5,18 @@ v0.1.21 and v0.1.22. It is not a grant of who may tag, merge, or push.
 
 Replace `X.Y.Z` with the version being tagged.
 
+## Choosing the version
+
+Patch releases carry fixes only. Any new verb, flag, hook or schema change
+bumps the minor version. 0.1.13 and 0.1.20 carried features as patch
+releases.
+
 ## 1. Open a `chore(release)` pull request
 
 The last two tags used a squash-merged pull request whose tree changed
 exactly these three files:
 
-- `pyproject.toml` — set `[project] version` to `"X.Y.Z"`
+- `pyproject.toml` — set `[project] version` to `"X.Y.Z"` (see Choosing the version)
 - `ledger/__init__.py` — set `__version__` to `"X.Y.Z"`
 - `CHANGELOG.md` — add the dated section at the top of the file
 
