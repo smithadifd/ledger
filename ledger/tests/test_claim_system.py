@@ -21,7 +21,6 @@ from ledger.verbs import EXIT_REFUSED, EXIT_USAGE, discover_verbs
 from test_cli import invoke, seed
 
 _LIB = Path(__file__).resolve().parents[2]
-_DOCS = _LIB / "docs"
 
 
 def claim_events(db: str) -> list[dict]:
@@ -229,6 +228,92 @@ def test_two_systems_claiming_at_once_leave_one_claim(tmp_path: Path) -> None:
     assert [e["system"] for e in claim_events(db)] == [winner]
 
 
+def claim_row(db: str) -> dict:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT actor, harness, model, session FROM events WHERE kind = 'ledger.system'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    return dict(rows[0])
+
+
+def test_the_claim_event_carries_the_callers_attribution(db, monkeypatch) -> None:
+    env = {
+        "LEDGER_HARNESS": "claude-code",
+        "LEDGER_OPERATOR": "alice",
+        "LEDGER_AGENT": "builder",
+        "LEDGER_MODEL": "model-x",
+        "LEDGER_SESSION": "sess-42",
+    }
+    code, payload, err = claim(monkeypatch, db, "work", env=env)
+    assert code == 0, err
+    assert claim_row(db) == {
+        "actor": "alice/builder",
+        "harness": "claude-code",
+        "model": "model-x",
+        "session": "sess-42",
+    }
+
+
+def test_the_library_claim_returns_whether_it_wrote(db) -> None:
+    with open_ledger(db) as lg:
+        assert lg.claim_system("work") is True
+        assert lg.claim_system("work") is False
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+
+
+def test_the_library_claim_stamps_only_what_it_is_given(db) -> None:
+    with open_ledger(db) as lg:
+        lg.claim_system("work")
+    assert claim_row(db) == {"actor": None, "harness": None, "model": None, "session": None}
+
+
+def test_the_report_comes_from_the_claim_not_from_a_read_before_it(
+    db, monkeypatch
+) -> None:
+    # A caller whose read of the claim ran before another caller's commit sees
+    # no claim. Play that interleaving: the database is claimed, and
+    # Ledger.system() still says it is not. The verb must report the library's
+    # answer ("already claimed"), not a stale read ("claimed").
+    from ledger.store import Ledger
+
+    with open_ledger(db) as lg:
+        lg.claim_system("work")
+    monkeypatch.setattr(Ledger, "system", lambda self: None)
+    code, payload, err = claim(monkeypatch, db, "work")
+    assert code == 0, err
+    assert payload["data"]["claimed"] is False
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+
+
+def test_two_callers_claiming_the_same_name_at_once_report_one_claim(tmp_path: Path) -> None:
+    db = str(tmp_path / "ledger.db")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_LIB) + os.pathsep + env.get("PYTHONPATH", "")
+    env["LEDGER_HARNESS"] = "pytest"
+    procs = [
+        subprocess.Popen(
+            [sys.executable, "-m", "ledger", "--json", "--db", db, "claim-system", "work"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(2)
+    ]
+    reports = []
+    for proc in procs:
+        out, err = proc.communicate(timeout=60)
+        assert proc.returncode == 0, err
+        reports.append(json.loads(out)["data"]["claimed"])
+    assert sorted(reports) == [False, True], reports
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+
+
 def test_verify_system_reads_the_claim_the_verb_wrote(db, monkeypatch) -> None:
     assert claim(monkeypatch, db, "work")[0] == 0
     code, out, err = invoke(monkeypatch, ["--db", db, "verify", "--system", "work"])
@@ -236,10 +321,3 @@ def test_verify_system_reads_the_claim_the_verb_wrote(db, monkeypatch) -> None:
     code, out, err = invoke(monkeypatch, ["--db", db, "verify", "--system", "home"])
     assert code == EXIT_REFUSED
 
-
-def test_the_docs_name_the_verb_and_its_rule() -> None:
-    cli = (_DOCS / "cli.md").read_text(encoding="utf-8")
-    assert "**`claim-system NAME`**" in cli
-    assert "lowercase letter" in cli
-    start = (_DOCS / "start-here.md").read_text(encoding="utf-8")
-    assert "ledger claim-system" in start

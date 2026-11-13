@@ -109,7 +109,8 @@ refuses the claim when N items are already claimed.
 letters, digits, `_` or `-`; anything else is refused with exit 2 before the
 database is opened. An unclaimed database is claimed and the verb exits 0. The
 same name again exits 0, says the database is already claimed for that name and
-writes nothing. A different name is refused (exit 3, code `shared_database`,
+writes nothing (a read-only database file refuses even the repeat, as every
+write verb does). A different name is refused (exit 3, code `shared_database`,
 naming both systems) and writes nothing. A synced or linked database path is
 refused as every write verb refuses it (exit 3, codes `synced_path` and
 `db_symlink`), and no file is created. `--json` prints `system`, `path` and

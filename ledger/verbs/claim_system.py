@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ledger.schema import SYSTEM_CLAIM_KIND, ValidationError, validate_payload
-from ledger.verbs import Context, Result, UsageError, Verb, open_db
+from ledger.verbs import Context, Result, UsageError, Verb, actor_kwargs, open_db
 
 NAME_RULE = (
     "a system name is 1 to 64 characters: a lowercase letter, then lowercase "
@@ -40,24 +40,24 @@ def run(args, ctx: Context) -> Result:
     lg = open_db(ctx, write=True)
     try:
         # DESIGN: the library decides. Ledger.claim_system checks and writes in
-        # one transaction: it skips the write for the same system and refuses
-        # another system (SharedDatabaseError, exit 3, code shared_database).
-        # The read below only chooses the words; two callers claiming the same
-        # name at once may both be told "claimed", and the database still
-        # holds one claim.
-        already = lg.system() == name
-        lg.claim_system(name)
+        # one transaction: it skips the write for the same system, refuses
+        # another system (SharedDatabaseError, exit 3, code shared_database)
+        # and returns whether it wrote. The words come from that return, so
+        # two callers claiming the same name at once are not both told
+        # "claimed". The claim carries the caller's attribution, as every
+        # other write verb's event does.
+        wrote = lg.claim_system(name, **actor_kwargs(ctx))
         path = str(lg.path)
     finally:
         lg.close()
-    if already:
+    if wrote:
         return Result(
-            data={"system": name, "path": path, "claimed": False},
-            text=f"already claimed for {name}: {path}",
+            data={"system": name, "path": path, "claimed": True},
+            text=f"claimed for {name}: {path}",
         )
     return Result(
-        data={"system": name, "path": path, "claimed": True},
-        text=f"claimed for {name}: {path}",
+        data={"system": name, "path": path, "claimed": False},
+        text=f"already claimed for {name}: {path}",
     )
 
 

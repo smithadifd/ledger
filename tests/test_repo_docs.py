@@ -513,6 +513,15 @@ def test_the_export_entry_states_the_commit_and_push_guarantee_word_for_word() -
     assert _squash(EXPORT_GUARANTEE) in _squash(entry)
 
 
+def test_the_docs_name_the_claim_system_verb_and_its_rule() -> None:
+    cli = CLI_PAGE.read_text(encoding="utf-8")
+    assert "**`claim-system NAME`**" in cli
+    assert "lowercase letter" in cli
+    assert "read-only database file refuses even the repeat" in _squash(cli)
+    start = START.read_text(encoding="utf-8")
+    assert "ledger claim-system" in start
+
+
 def test_concepts_documents_note_search_and_severity() -> None:
     text = (ROOT / "docs" / "concepts.md").read_text(encoding="utf-8")
     section = text.split("## The search index", 1)[1].split("\n## ", 1)[0]
