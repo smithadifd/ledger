@@ -73,9 +73,9 @@ _SOURCE = {"type": "string", "min_len": 1}
 _REF = {"type": "string", "min_len": 1, "max_len": 300, "single_line": True}
 _TEXT = {"type": "string", "min_len": 1}
 _SHA256_HEX = {"type": "string", "pattern": r"[0-9a-f]{64}"}
-# A document's displayed text: one line, no control character (the same
-# definition as an ask's, control_character), checked wherever the payload
-# is validated, so a restored document holds none either.
+# A document's displayed text: one line, no control character
+# (control_character, the Cc class), checked wherever the payload is
+# validated, so a restored document holds none either.
 _DOC_TITLE = {"type": "string", "min_len": 1, "max_len": 300, "single_line": True,
               "no_control": True}
 _DOC_MIME = {
@@ -680,14 +680,15 @@ def _fail(reason: str) -> None:
     raise ValidationError(reason)
 
 
-# The refusal a write gets when text a picker displays holds a control
-# character. ``ask_control_character:<field>`` is its reason; ``<field>``
-# names the payload field (``question_id``, ``options[1].label``).
+# The refusal a write gets when text a picker displays breaks the displayed
+# text rule (display_text_problem). ``ask_control_character:<field>`` is its
+# reason for every class the rule refuses, so a caller compares one string;
+# ``<field>`` names the payload field (``question_id``, ``options[1].label``).
 ASK_CONTROL_CHARACTER = "ask_control_character"
 
-# Text a picker displays, per kind, as (field, newline allowed). A newline
-# is allowed in the question body only: a long question can run to several
-# lines, and a line feed alone cannot move the cursor back over text. The
+# Text a picker displays, per kind, as (field, is the question body). Only
+# the question body may hold a newline (a long question can run to several
+# lines, and a line feed alone cannot move the cursor back over text). The
 # header is ``ask K``, built from the event id, so no payload field holds it.
 _DISPLAYED_TEXT: dict[str, tuple[tuple[str, bool], ...]] = {
     "decision.asked": (("question", True), ("question_id", False), ("scope", False)),
@@ -700,21 +701,216 @@ _DISPLAYED_TEXT: dict[str, tuple[tuple[str, bool], ...]] = {
     ),
 }
 
+# The displayed text rule reads three Unicode tables written out below, because
+# Python's unicodedata has none of their properties: WHITE_SPACE_CODE_POINTS,
+# BLANK_CODE_POINTS and DEFAULT_IGNORABLE_RANGES. Each holds the Unicode
+# 16.0.0 data, and the rule reads it the same way on every interpreter whose
+# database UNICODE_TABLE_VERSIONS names (Python 3.11 carries 14.0.0, 3.12
+# 15.0.0, 3.13 15.1.0 and 3.14 16.0.0): a code point a table holds is decided
+# by the table, never by that interpreter's own database.
+#
+# Update rule: test_ask_display_text_rule.py fails on an interpreter whose
+# unicodedata.unidata_version is not in UNICODE_TABLE_VERSIONS. On a Unicode
+# version bump, run
+#     python3 -m pytest -q -p no:cacheprovider ledger/tests/test_ask_display_text_rule.py -k unicode_table
+# on the new interpreter. Then re-derive each table from that version's
+# Unicode Character Database (https://www.unicode.org/Public/<version>/ucd/):
+# White_Space from PropList.txt, Default_Ignorable_Code_Point from
+# DerivedCoreProperties.txt, and the blank table from its two sources as the
+# comment on BLANK_CODE_POINTS says (UnicodeData.txt names, and the no-ink
+# drawing probe; the test prints every BLANK or FILLER name it does not know).
+# Update a table, the literal copy the test pins it to, and the version list
+# together.
+UNICODE_TABLE_VERSIONS = ("14.0.0", "15.0.0", "15.1.0", "16.0.0")
+
+# Unicode White_Space (PropList.txt): the 25 code points the property names,
+# the same in every version from 6.3.0 (which took U+180E out) to 16.0.0.
+# str.isspace() is another set (it adds U+001C-U+001F), so the set is written
+# out, and every interpreter decides these code points from this table, never
+# from its own database. Displayed text holds none of them but U+0020 (and a
+# newline inside the question).
+WHITE_SPACE_CODE_POINTS = frozenset({
+    0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0, 0x1680,
+    0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008,
+    0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+})
+
+# Code points that render as blank space but are not White_Space, from two
+# sources.
+#
+# 1. Names: the characters whose name in UnicodeData.txt holds the word BLANK
+#    or FILLER, less the ones whose glyph is a visible mark: U+2422 BLANK
+#    SYMBOL and the scribal gap and line fillers (U+A8F9, U+10AF6, U+1144E,
+#    U+11945, U+11F48). That leaves the Hangul fillers U+115F, U+1160, U+3164
+#    and U+FFA0 (default ignorable too), U+2800 BRAILLE PATTERN BLANK, U+13441
+#    EGYPTIAN HIEROGLYPH FULL BLANK and U+13442 EGYPTIAN HIEROGLYPH HALF BLANK
+#    (which Unicode says are rendered as whitespace), and U+16FE4 KHITAN SMALL
+#    SCRIPT FILLER (it marks an empty place in a Khitan cluster and draws
+#    nothing).
+# 2. No ink: code points the rule otherwise allows that a fallback font draws
+#    with no ink. U+FFFC OBJECT REPLACEMENT CHARACTER (Menlo, the macOS
+#    terminal font CoreText falls back to for it, draws it as a full-width
+#    empty cell) and U+1D159 MUSICAL SYMBOL NULL NOTEHEAD (a notehead
+#    placeholder that carries no ink of its own).
+#
+# Update rule for source 2, on a Unicode version bump and whenever a reviewer
+# reports a blank-looking character: list every code point the rule allows
+# (display_text_problem(f"a{c}b") or the question form is None), draw each one
+# alone with the platform's text renderer and its font fallback (on macOS,
+# CoreText starting from Helvetica and again from Menlo) into a bitmap, and
+# count the inked pixels; draw each allowed combining mark on a base letter
+# and compare with the letter alone. Every code point that leaves no ink,
+# other than U+0020 and U+000A, goes into this table and the test's copy.
+BLANK_CODE_POINTS = frozenset({
+    0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0, 0xFFFC, 0x13441, 0x13442, 0x16FE4,
+    0x1D159,
+})
+
+# Unicode Default_Ignorable_Code_Point (DerivedCoreProperties.txt) as
+# inclusive ranges: code points a renderer may draw as nothing, so text that
+# holds one looks the same as text without it. It is the same list in
+# Unicode 14.0.0 to 16.0.0.
+DEFAULT_IGNORABLE_RANGES: tuple[tuple[int, int], ...] = (
+    (0x00AD, 0x00AD),
+    (0x034F, 0x034F),
+    (0x061C, 0x061C),
+    (0x115F, 0x1160),
+    (0x17B4, 0x17B5),
+    (0x180B, 0x180F),
+    (0x200B, 0x200F),
+    (0x202A, 0x202E),
+    (0x2060, 0x206F),
+    (0x3164, 0x3164),
+    (0xFE00, 0xFE0F),
+    (0xFEFF, 0xFEFF),
+    (0xFFA0, 0xFFA0),
+    (0xFFF0, 0xFFF8),
+    (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A),
+    (0xE0000, 0xE0FFF),
+)
+_COMBINING_MARKS = ("Mn", "Mc", "Me")
+
 
 def control_character(text: str, *, allow_newline: bool = False) -> str | None:
     """``U+XXXX`` of the first control character in ``text``, else None.
 
     A control character is one of C0 (U+0000-U+001F, so ESC and every ANSI
     escape), DEL (U+007F) or C1 (U+0080-U+009F): Unicode category ``Cc`` and
-    nothing else. ``allow_newline`` lets U+000A pass. This is the one
-    definition for the text an ask displays; it is written as a code point
-    so a message that names it never carries the character itself.
+    nothing else. ``allow_newline`` lets U+000A pass. A document's title and
+    stored path use this definition; the text an ask displays uses the
+    wider ``display_text_problem``. It is written as a code point so a
+    message that names it never carries the character itself.
     """
     for char in text:
         if allow_newline and char == "\n":
             continue
         if unicodedata.category(char) == "Cc":
             return f"U+{ord(char):04X}"
+    return None
+
+
+def _code_point(char: str) -> str:
+    return f"U+{ord(char):04X}"
+
+
+def _default_ignorable(code: int) -> bool:
+    return any(low <= code <= high for low, high in DEFAULT_IGNORABLE_RANGES)
+
+
+def _white_space_class(code: int) -> str:
+    """The class named for a White_Space code point, from the code point
+    alone, so it is the same on every interpreter."""
+    if code in (0x2028, 0x2029):
+        return "a line or paragraph separator"
+    if code <= 0x000D or code == 0x0085:
+        return "a control character"
+    return "a space other than U+0020"
+
+
+def _refused_code_point(char: str, *, question: bool) -> str | None:
+    """The class that refuses ``char`` anywhere in displayed text, else
+    None. The two pinned tables decide first, so a White_Space or blank code
+    point gets one answer on every interpreter whatever its database holds;
+    a category this rule does not name is refused, never let through."""
+    code = ord(char)
+    if char == " " or (question and char == "\n"):
+        return None
+    if code in WHITE_SPACE_CODE_POINTS:
+        return _white_space_class(code)
+    if code in BLANK_CODE_POINTS:
+        return "a blank character"
+    category = unicodedata.category(char)
+    if category == "Cc":
+        return "a control character"
+    if category == "Cf":
+        return "a format character"
+    if category == "Cs":
+        return "a surrogate"
+    if category == "Co":
+        return "a private-use character"
+    if category == "Cn":
+        return "an unassigned character"
+    if _default_ignorable(code):
+        return "an invisible character"
+    if category[:1] not in ("L", "M", "N", "P", "S"):
+        return "a character of unknown category"
+    return None
+
+
+def _edge_space(char: str) -> bool:
+    return unicodedata.category(char).startswith("Z") or char in "\t\n"
+
+
+def _nfc_culprit(text: str) -> str:
+    """The code point to name when ``text`` is not NFC: the first one at or
+    after the first place NFC changes that NFC changes alone or that
+    combines, else the code point at that place."""
+    normal = unicodedata.normalize("NFC", text)
+    start = next(
+        (i for i, (a, b) in enumerate(zip(text, normal)) if a != b),
+        min(len(text), len(normal)),
+    )
+    for char in text[start:]:
+        if unicodedata.combining(char) or unicodedata.normalize("NFC", char) != char:
+            return char
+    return text[min(start, len(text) - 1)]
+
+
+def display_text_problem(text: str, *, question: bool = False) -> tuple[str, str] | None:
+    """``(class, U+XXXX)`` of the first reason ``text`` cannot be shown by a
+    picker as it is stored, else None. ``question`` is True for the question
+    body only.
+
+    Displayed text holds no White_Space code point but U+0020
+    (WHITE_SPACE_CODE_POINTS; a newline is allowed inside the question), no
+    blank (BLANK_CODE_POINTS: U+2800, the Hangul fillers, the Egyptian
+    hieroglyph blanks, the Khitan filler, U+FFFC and U+1D159), no code point
+    of category Cc,
+    Cf (the bidi embeddings, overrides and isolates, the zero-width space and
+    joiners), Cs, Co or Cn, and no Default_Ignorable_Code_Point
+    (DEFAULT_IGNORABLE_RANGES, which adds the variation selectors such as
+    U+FE0F and U+034F). There is no emoji exception: U+200D and U+FE0F are
+    refused in the question too. It does not start or end with whitespace
+    (any Z* code point, a tab or a newline), does not start with a combining
+    mark, and is NFC, so one visible string has one stored spelling. The
+    class is a phrase for a message (``a format character``, ``an invisible
+    character``, ``text that is not NFC``); the code point is written as
+    ``U+XXXX`` so a message that names it never carries it.
+    """
+    for char in text:
+        found = _refused_code_point(char, question=question)
+        if found is not None:
+            return found, _code_point(char)
+    if text:
+        if _edge_space(text[0]):
+            return "leading whitespace", _code_point(text[0])
+        if _edge_space(text[-1]):
+            return "trailing whitespace", _code_point(text[-1])
+        if unicodedata.category(text[0]) in _COMBINING_MARKS:
+            return "a leading combining mark", _code_point(text[0])
+    if not unicodedata.is_normalized("NFC", text):
+        return "text that is not NFC", _code_point(_nfc_culprit(text))
     return None
 
 
@@ -753,18 +949,20 @@ def doc_path_problem(value: Any) -> str | None:
     return None
 
 
-def display_control_character(kind: str, payload: Mapping[str, Any]) -> tuple[str, str] | None:
-    """``(field, code point)`` of the first control character in the text a
-    picker displays for a ``decision.asked`` or ``decision.elected`` payload,
-    else None. A value that is not a string is skipped here: the type
-    checks (write time: the schema; read time: ``render_ask_display``) own it.
+def display_control_character(
+        kind: str, payload: Mapping[str, Any]) -> tuple[str, str, str] | None:
+    """``(field, class, code point)`` of the first ``display_text_problem``
+    in the text a picker displays for a ``decision.asked`` or
+    ``decision.elected`` payload, else None. A value that is not a string is
+    skipped here: the type checks (write time: the schema; read time:
+    ``render_ask_display``) own it.
     """
-    for name, allow_newline in _DISPLAYED_TEXT.get(kind, ()):
+    for name, is_question in _DISPLAYED_TEXT.get(kind, ()):
         value = payload.get(name)
         if isinstance(value, str):
-            found = control_character(value, allow_newline=allow_newline)
+            found = display_text_problem(value, question=is_question)
             if found is not None:
-                return name, found
+                return (name, *found)
     if kind == "decision.asked":
         options = payload.get("options")
         for index, option in enumerate(options if isinstance(options, list) else []):
@@ -773,24 +971,27 @@ def display_control_character(kind: str, payload: Mapping[str, Any]) -> tuple[st
             for name in ("label", "description"):
                 value = option.get(name)
                 if isinstance(value, str):
-                    found = control_character(value)
+                    found = display_text_problem(value)
                     if found is not None:
-                        return f"options[{index}].{name}", found
+                        return (f"options[{index}].{name}", *found)
     elif kind == "decision.elected":
         rejected = payload.get("rejected")
         for index, value in enumerate(rejected if isinstance(rejected, list) else []):
             if isinstance(value, str):
-                found = control_character(value)
+                found = display_text_problem(value)
                 if found is not None:
-                    return f"rejected[{index}]", found
+                    return (f"rejected[{index}]", *found)
     return None
 
 
 def refuse_display_control_characters(kind: str, payload: Mapping[str, Any]) -> None:
-    """Write-time rule: refuse an ask or election whose displayed text holds a
-    control character. Not part of ``validate_payload``: verify, export and
-    restore re-validate rows written before this rule, and those must still
-    read; ``render_ask_display`` makes such an ask unpickable instead."""
+    """Write-time rule: refuse an ask or election whose displayed text breaks
+    ``display_text_problem`` (a control, format, separator, invisible or
+    blank code point, text that is not NFC, and the rest), always with
+    ``ask_control_character:<field>``. Not part of ``validate_payload``:
+    verify, export and restore re-validate rows written before this rule,
+    and those must still read; ``render_ask_display`` makes such an ask
+    unpickable instead."""
     hit = display_control_character(kind, payload)
     if hit is not None:
         _fail(f"{ASK_CONTROL_CHARACTER}:{hit[0]}")

@@ -19,8 +19,16 @@ captured exactly this display (``ledger.answers``). An ask with no scope,
 with fewer than two or more than four options, with two options sharing a
 label, whose ``ask K`` header would be longer than 12 characters, or whose
 displayed text (question id, scope, an option label or description, the
-question) holds a control character (C0, DEL or C1; a newline is allowed in
-the question only) is refused with ``ask_not_pickable``, naming the field.
+question) breaks ``ledger.schema.display_text_problem`` is refused with
+``ask_not_pickable``, naming the field, the class and the code point. That
+rule refuses a control character (a newline is allowed in the question
+only), a format character (Cf: bidi controls, zero-width characters), a line
+or paragraph separator, a surrogate, private-use or unassigned code point, a
+default-ignorable code point (U+FE0F, U+034F and the rest), any White_Space
+code point but U+0020, a blank (U+2800, the Egyptian hieroglyph blanks,
+U+FFFC and the rest of ``BLANK_CODE_POINTS``), text that is not NFC, a
+leading combining mark, and leading or trailing whitespace. There is no emoji
+exception.
 
 Text output is the input object as indented JSON, then one line
 ``display_sha256 <hex>``. ``--json`` carries ``{asked_event_id, item_id,
