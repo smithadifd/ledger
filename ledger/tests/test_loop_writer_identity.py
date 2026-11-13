@@ -262,6 +262,38 @@ def test_managed_export_restore_requires_intent_and_records_provenance(
     assert provenance.payload["source"].startswith("sha256:")
 
 
+def test_managed_export_restore_records_attribution_on_session_opened(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = managed_item(tmp_path, monkeypatch)
+    claim_database(db, "home")
+    with open_ledger(db, create=False) as ledger:
+        start_operation(ledger, "item-1", "merge", "merge-1", target="org/repo#1")
+        done = finish_operation(ledger, "item-1", "merge", "merge-1", target="org/repo#1")
+        close_item(ledger, "item-1", done.id, idempotency_key="loop:item-1:closed")
+        export_dir = tmp_path / "attributed-managed-export"
+        export_events(ledger, export_dir)
+
+    dest = tmp_path / "attributed-restored.db"
+    restore_export(
+        export_dir,
+        dest,
+        system="home",
+        accept_loop_events=True,
+        actor="alice/builder",
+        harness="claude-code",
+        model="model-x",
+        session="sess-42",
+    )
+    with open_ledger(dest, create=False) as restored:
+        provenance = restored.events()[-1]
+    assert provenance.kind == "session.opened"
+    assert provenance.actor == "alice/builder"
+    assert provenance.harness == "claude-code"
+    assert provenance.model == "model-x"
+    assert provenance.session == "sess-42"
+
+
 def test_forged_link_and_merged_note_cannot_mark_merge_done(tmp_path: Path, monkeypatch) -> None:
     db = managed_item(tmp_path, monkeypatch)
 
