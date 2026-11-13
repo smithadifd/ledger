@@ -1,0 +1,16 @@
+{
+  "session_id": "3f2b8c1e-5d4a-4e7b-9a10-2c6d8e4f1a2b",
+  "transcript_path": "/tmp/fixture/transcript.jsonl",
+  "cwd": "/tmp/fixture",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "AskUserQuestion",
+  "tool_use_id": "toolu_01FixtureAskUserQuestion",
+  "tool_input": {
+    "questions": "<filled from ledger ask-display K>"
+  },
+  "tool_response": {
+    "questions": "<filled from ledger ask-display K>",
+    "answers": "<filled with the chosen label>"
+  }
+}

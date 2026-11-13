@@ -1,0 +1,9 @@
+{
+  "name": "ledger-hooks",
+  "description": "Prints the ledger's session brief at session start and records submitted prompts and question-picker answers through the ledger CLI; silent unless a ledger is configured.",
+  "author": {
+    "name": "smithadifd"
+  },
+  "repository": "https://github.com/smithadifd/ledger",
+  "license": "MIT"
+}
