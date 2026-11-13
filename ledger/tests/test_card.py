@@ -902,7 +902,12 @@ def _words(prefix: str, count: int) -> str:
 
 
 def _ask_text_line(text: str) -> str:
-    return next(line for line in text.splitlines() if line.startswith("  ask: "))
+    line = next(
+        (line for line in text.splitlines() if line.startswith("  ask: ")),
+        None,
+    )
+    assert line is not None, "missing ask line"
+    return line
 
 
 def test_decision_card_shows_every_ask_field(tmp_path: Path, monkeypatch) -> None:
@@ -1048,7 +1053,13 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
         card = project_card(reader, "dc-1")
     finally:
         reader.close()
+    # Pin the flake: a599 in the revision hash must not fail the ask-line check.
+    card = dataclasses.replace(
+        card,
+        revision_hash="deadbeefa599cafe0123456789abcdef0123456789abcdef0123456789ab",
+    )
     text = format_card(card)
+    assert "a599" in text
     # Exact: the cut pays for its own marker and the Truncated line.
     assert word_count(text) == WORD_LIMIT
     # The ask is shortened, not dropped, and nothing else was capped.
@@ -1066,7 +1077,7 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
         "ledger export-item --json -- dc-1)"
     )
     assert row["ask"].startswith("a000 a001")
-    assert "a599" not in text
+    assert "a599" not in _ask_text_line(text)
     for line in (
         "    A) fast synthetic lane",
         "    B) slow synthetic lane",
@@ -1103,6 +1114,15 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
         }
     ]
     assert "a599" not in data["open_questions"][0]["ask"]
+
+
+def test_ask_text_line_fails_by_name_when_missing() -> None:
+    try:
+        _ask_text_line("# dc-1\nrevision: 1 abc\n")
+    except AssertionError as err:
+        assert "missing ask line" in str(err)
+    else:
+        raise AssertionError("expected missing ask line")
 
 
 def test_huge_option_description_is_shortened(tmp_path: Path, monkeypatch) -> None:
