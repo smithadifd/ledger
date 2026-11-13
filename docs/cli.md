@@ -130,12 +130,13 @@ transaction reached: two callers claiming the same name at once both exit 0 and
 exactly one says `claimed`. After an I/O error in the claim's transaction
 (before the write or after it) or a checkpoint that cannot finish because
 another connection still holds the file, the verb reads the claim back and
-checks the database path again as at open: the name's claim on record, through
-a path that still names the opened file as its only link, exits 0 (`claimed`
-only when this call's write is known to have committed it); anything else,
-including a read-back that fails or a path that has become a link or another
-file, is refused (exit 3, code
-`shared_database`). A synced or linked database path is
+retries the checkpoint, up to 5 attempts started within 1 second: it exits 0
+only when the name's claim is on record and a checkpoint finishes, the same
+proof as a claim with no error (`claimed` only when this call's write is known
+to have committed it). Anything else, including a claim on record whose
+checkpoint is still held when that budget is spent, or a read-back or
+checkpoint that fails, is refused (exit 3, code `shared_database`). A synced
+or linked database path is
 refused as every write verb refuses it (exit 3, codes `synced_path` and
 `db_symlink`), and no file is created. `--json` prints `system`, `path` and
 `claimed` (`false` for the repeat). Like every write verb it needs

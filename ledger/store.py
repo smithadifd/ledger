@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import random
 import re
 import sqlite3
@@ -31,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from .dbfile import UnsafeDatabaseFile, _check_main, _identity, checked_connect, precheck_files
+from .dbfile import checked_connect, precheck_files
 from .decisions import check_event as check_decision_event
 from .decisions import decision_records
 from .paths import SharedDatabaseError, SyncPathError, SyncPathWarning, resolve_db_path
@@ -52,6 +51,14 @@ from .schema import (
 
 BUSY_TIMEOUT_MS = 5_000
 APPEND_RETRIES = 8
+# Settling a claim after ``UnsettledClaimError`` (``Ledger.claim_outcome``):
+# up to CLAIM_SETTLE_ATTEMPTS checkpoints, none started after
+# CLAIM_SETTLE_SECONDS. Each waits at most CLAIM_SETTLE_WAIT_MS on other
+# connections, with CLAIM_SETTLE_PAUSE_SECONDS between attempts.
+CLAIM_SETTLE_ATTEMPTS = 5
+CLAIM_SETTLE_SECONDS = 1.0
+CLAIM_SETTLE_WAIT_MS = 150
+CLAIM_SETTLE_PAUSE_SECONDS = 0.05
 GENESIS_HASH = "0" * 64
 _MIGRATION_NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _RECORDED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
@@ -667,7 +674,8 @@ class UnsettledClaimError(SharedDatabaseError):
     the commit may or may not have landed. ``data_version`` is the
     connection's ``PRAGMA data_version`` read inside the transaction, under
     its write lock, or ``None`` when the error came before that read.
-    ``Ledger.claim_outcome`` re-reads the committed claim to decide.
+    ``Ledger.claim_outcome`` re-reads the committed claim and retries the
+    checkpoint to decide.
     """
 
     def __init__(
@@ -684,30 +692,12 @@ class UnsettledClaimError(SharedDatabaseError):
         self.data_version = data_version
 
 
-def _path_identity(path: Path) -> tuple[int, int] | None:
-    """The device and inode of the file at ``path`` now, or ``None`` if unreadable."""
-    try:
-        return _identity(os.lstat(path))
-    except OSError:
-        return None
-
-
 class Ledger:
     """Open database handle: append, query views, verify the hash chain."""
 
-    def __init__(
-        self,
-        conn: sqlite3.Connection,
-        path: Path,
-        *,
-        opened: tuple[int, int] | None = None,
-    ):
+    def __init__(self, conn: sqlite3.Connection, path: Path):
         self._conn = conn
         self.path = path
-        # The device and inode of the file ``path`` named when the connection
-        # was opened and checked (see ``open_ledger``), or ``None`` when not
-        # recorded; ``claim_outcome`` refuses to settle a claim without it.
-        self._opened = opened
         self._in_batch = False
 
     def close(self) -> None:
@@ -1199,8 +1189,9 @@ class Ledger:
         ``UnsettledClaimError``, a ``SharedDatabaseError`` that carries the
         claim event this call wrote, if any. A checkpoint runs after the
         commit, and an I/O error can come at the commit itself, so the claim
-        may be on record when either is raised: ``claim_outcome`` re-reads it
-        and reports what the transaction reached. Any other SQLite failure,
+        may be on record when either is raised: ``claim_outcome`` re-reads it,
+        retries the checkpoint, and reports what the transaction reached
+        only once the checkpoint finishes. Any other SQLite failure,
         such as a read-only file, is refused as a ``LedgerError`` that names
         it.
         """
@@ -1257,12 +1248,18 @@ class Ledger:
         return written is not None
 
     def claim_outcome(self, system: str, refusal: UnsettledClaimError) -> bool:
-        """Re-read the committed claim after ``claim_system`` raised ``refusal``.
+        """Settle the claim after ``claim_system`` raised ``refusal``, or raise it again.
 
-        When ``system``'s claim is on record and the database path still
-        names the file this handle opened, as its only link, return what the
-        claim's transaction reached: ``True`` when this call's write is the
-        claim on record, ``False`` when another write put it there.
+        Returns only on the proof the normal return of ``claim_system``
+        rests on: ``system``'s claim is on record, and ``PRAGMA
+        wal_checkpoint(TRUNCATE)`` returns busy=0, so the claim is in the
+        main database file. The checkpoint is retried within a bounded budget
+        (``CLAIM_SETTLE_ATTEMPTS`` attempts, none started after
+        ``CLAIM_SETTLE_SECONDS``): two callers racing on a fresh database each
+        checkpoint after their commit, and one can find the other's
+        checkpoint running, which clears in milliseconds. It then returns
+        what the claim's transaction reached: ``True`` when this call's write
+        is the claim on record, ``False`` when another write put it there.
 
         This call's write is the claim on record when the claim on record is
         the event it wrote (same id and hash) and that write is known to have
@@ -1276,13 +1273,13 @@ class Ledger:
         finished, the answer is ``False``.
 
         Otherwise raise ``refusal`` again: no claim on record, another
-        system's claim on record, a read that fails, a connection still
-        inside a transaction (its reads would see rows that were never
-        committed), or a database path that fails the open-time file checks
-        again (a symbolic link, a second hard link, or another file at the
-        path). A checkpoint that cannot finish may then be held through
-        another path to the file, and a connection on that path would not see
-        the claim. It never reports a claim that is not on record.
+        system's claim on record, a read or a checkpoint that raises (the
+        connection may be unusable after an I/O error), a checkpoint still
+        busy when the budget is spent (another connection, perhaps through
+        another path to the file, still holds the database), or a connection
+        still inside a transaction (its reads would see rows that were never
+        committed). It never reports a claim that is not on record, nor one
+        whose checkpoint has not finished.
         """
         conn = self._conn
         if conn.in_transaction:
@@ -1300,7 +1297,12 @@ class Ledger:
         on_record = _event_from_row(row)
         if on_record.payload.get("system") != system:
             raise refusal
-        self._refuse_unless_still_opened(refusal)
+        try:
+            settled = self._checkpoint_within_budget()
+        except sqlite3.Error:
+            raise refusal
+        if not settled:
+            raise refusal
         written = refusal.event
         if written is None or (on_record.id, on_record.hash) != (written.id, written.hash):
             return False
@@ -1308,19 +1310,32 @@ class Ledger:
             refusal.data_version is not None and version == refusal.data_version
         )
 
-    def _refuse_unless_still_opened(self, refusal: UnsettledClaimError) -> None:
-        """Raise ``refusal`` unless the path still names the opened file, singly linked.
+    def _checkpoint_within_budget(self) -> bool:
+        """Retry ``PRAGMA wal_checkpoint(TRUNCATE)`` until it returns busy=0.
 
-        The open-time checks again (``dbfile._check_main``): the path is not a
-        symbolic link, names a regular file with one link, and that file has
-        the device and inode the path named at open.
+        Up to ``CLAIM_SETTLE_ATTEMPTS`` attempts, none started after
+        ``CLAIM_SETTLE_SECONDS``, each waiting at most
+        ``CLAIM_SETTLE_WAIT_MS`` on other connections (the connection's busy
+        timeout, restored afterwards), with ``CLAIM_SETTLE_PAUSE_SECONDS``
+        between attempts. Returns ``True`` on the first busy=0 and ``False``
+        when the budget is spent. A ``sqlite3.Error`` propagates; the caller
+        refuses on it.
         """
+        conn = self._conn
+        deadline = time.monotonic() + CLAIM_SETTLE_SECONDS
+        conn.execute(f"PRAGMA busy_timeout = {CLAIM_SETTLE_WAIT_MS}")
         try:
-            named = _check_main(self.path, absent_ok=False)
-        except UnsafeDatabaseFile:
-            raise refusal
-        if self._opened is None or named is None or _identity(named) != self._opened:
-            raise refusal
+            for attempt in range(CLAIM_SETTLE_ATTEMPTS):
+                if attempt:
+                    time.sleep(CLAIM_SETTLE_PAUSE_SECONDS)
+                    if time.monotonic() >= deadline:
+                        return False
+                busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+                if not busy:
+                    return True
+            return False
+        finally:
+            conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
 
     def verify(self, *, system: str | None = None) -> None:
         """Walk events by id and refuse a broken hash chain or a bad payload.
@@ -1448,16 +1463,13 @@ def open_ledger(path: Path | str, *, create: bool = True) -> Ledger:
         raise LedgerError(f"database does not exist: {resolved}")
     _refuse_newer_schema_before_connect(resolved)
     conn = connect(resolved)
-    # connect has just checked that the path names the file the connection
-    # opened, singly linked; record that file for claim_outcome's re-check.
-    opened = _path_identity(resolved)
     try:
         _refuse_unknown_versions(_recorded_versions(conn), load_migrations())
         migrate(conn)
     except Exception:
         conn.close()
         raise
-    return Ledger(conn, resolved, opened=opened)
+    return Ledger(conn, resolved)
 
 
 def claim_database(

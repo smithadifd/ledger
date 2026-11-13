@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import json
 import os
-import shutil
 import sqlite3
 import subprocess
 import sys
@@ -360,6 +359,11 @@ conn.close()
 
 @contextlib.contextmanager
 def a_reader_holding(db: str):
+    """Hold a read transaction on ``db`` in another process; yield its release.
+
+    ``release()`` ends the read transaction and waits for the reader to exit;
+    it runs again (as a no-op) when the block ends.
+    """
     with running(
         [sys.executable, "-c", _READER, db],
         cwd=_LIB,
@@ -369,14 +373,22 @@ def a_reader_holding(db: str):
         text=True,
     ) as proc:
         read_ready_line(proc, "held")
-        try:
-            yield
-        finally:
+        errors: list[str] = []
+
+        def release() -> None:
+            if proc.returncode is not None:
+                return
             assert proc.stdin is not None
             proc.stdin.write("\n")
             proc.stdin.flush()
             _out, err = proc.communicate(timeout=30)
-            assert proc.returncode == 0, err
+            errors.append(err)
+
+        try:
+            yield release
+        finally:
+            release()
+            assert proc.returncode == 0, errors
 
 
 def outcome_reads(monkeypatch) -> list[str]:
@@ -392,31 +404,64 @@ def outcome_reads(monkeypatch) -> list[str]:
     return seen
 
 
-def test_a_claim_that_committed_before_its_checkpoint_failed_reports_claimed(
+def settling_checkpoints(monkeypatch, release=None) -> list[str]:
+    """Record each checkpoint the settlement starts, as SQLite starts it.
+
+    With ``release`` (a reader's release), call it just before the
+    settlement's second checkpoint starts: the first finds the reader, the
+    second does not.
+    """
+    started: list[str] = []
+    original = Ledger.claim_outcome
+
+    def settle(self, system, refusal):
+        def trace(sql: str) -> None:
+            if "wal_checkpoint" in sql:
+                started.append(sql)
+                if release is not None and len(started) == 2:
+                    release()
+
+        self._conn.set_trace_callback(trace)
+        try:
+            return original(self, system, refusal)
+        finally:
+            self._conn.set_trace_callback(None)
+
+    monkeypatch.setattr(Ledger, "claim_outcome", settle)
+    return started
+
+
+def test_a_claim_whose_checkpoint_clears_on_a_retry_reports_claimed(
     db, monkeypatch
 ) -> None:
     # The claim commits, then the checkpoint after it cannot finish while the
-    # reader holds the file. The library refuses; the transaction wrote the
-    # claim, so the verb reports claimed and exits 0.
+    # reader holds the file. The settlement's first checkpoint still finds the
+    # reader; the reader lets go before the second, which finishes. The claim
+    # is on record and in the main file, and this call wrote it: exit 0,
+    # claimed.
     with open_ledger(db):
         pass
     seen = outcome_reads(monkeypatch)
-    with a_reader_holding(db):
+    with a_reader_holding(db) as release:
+        started = settling_checkpoints(monkeypatch, release)
         code, payload, err = claim(monkeypatch, db, "work")
     assert code == 0, (payload, err)
     assert payload["data"]["claimed"] is True
     assert [e["system"] for e in claim_events(db)] == ["work"]
     assert len(seen) == 1 and "checkpoint of" in seen[0], seen
+    assert len(started) == 2, started
 
 
-def test_a_repeat_claim_whose_checkpoint_failed_reports_already_claimed(
+def test_a_repeat_claim_whose_checkpoint_clears_on_a_retry_reports_already_claimed(
     db, monkeypatch
 ) -> None:
     # The same name is on record before the call; an append after the reader
-    # took its snapshot leaves WAL frames the checkpoint cannot write back.
+    # took its snapshot leaves WAL frames the checkpoint cannot write back
+    # until the reader lets go, before the settlement's second checkpoint.
     claim_database(db, "work")
     seen = outcome_reads(monkeypatch)
-    with a_reader_holding(db):
+    with a_reader_holding(db) as release:
+        started = settling_checkpoints(monkeypatch, release)
         seed(monkeypatch, db, "it-1")
         before = event_count(db)
         code, payload, err = claim(monkeypatch, db, "work")
@@ -425,6 +470,28 @@ def test_a_repeat_claim_whose_checkpoint_failed_reports_already_claimed(
     assert event_count(db) == before
     assert [e["system"] for e in claim_events(db)] == ["work"]
     assert len(seen) == 1 and "checkpoint of" in seen[0], seen
+    assert len(started) == 2, started
+
+
+def test_a_claim_whose_checkpoint_stays_busy_past_the_retry_budget_is_refused(
+    db, monkeypatch
+) -> None:
+    # The claim commits, and the reader holds the file through every
+    # settlement checkpoint. The claim is on record but never reaches the
+    # main file, so it is not proven: exit 3, shared_database.
+    with open_ledger(db):
+        pass
+    seen = outcome_reads(monkeypatch)
+    started = settling_checkpoints(monkeypatch)
+    with a_reader_holding(db):
+        code, payload, err = claim(monkeypatch, db, "work")
+        # Read while the reader still holds: the claim is on record.
+        assert [e["system"] for e in claim_events(db)] == ["work"]
+    assert code == EXIT_REFUSED, (payload, err)
+    assert payload["error"]["code"] == "shared_database"
+    assert "checkpoint of" in payload["error"]["message"]
+    assert len(seen) == 1 and "checkpoint of" in seen[0], seen
+    assert 2 <= len(started) <= store.CLAIM_SETTLE_ATTEMPTS, started
 
 
 def _io_error() -> sqlite3.OperationalError:
@@ -570,6 +637,32 @@ def test_an_io_error_after_the_claim_committed_reports_claimed(db, monkeypatch) 
     assert len(seen) == 1 and "could not be read" in seen[0], seen
 
 
+def test_a_settling_checkpoint_that_raises_is_refused(db, monkeypatch) -> None:
+    # The claim commits and an I/O error follows; the read-back finds the
+    # claim, but the settlement's checkpoint raises (as it can on a connection
+    # an I/O error left unusable). The claim is on record, yet unproven: exit
+    # 3, shared_database.
+    with open_ledger(db):
+        pass
+
+    def deny_checkpoints(lg) -> None:
+        def authorizer(action, arg1, *_rest):
+            if action == sqlite3.SQLITE_PRAGMA and arg1 == "wal_checkpoint":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        lg._conn.set_authorizer(authorizer)
+
+    seen = outcome_reads(monkeypatch)
+    _commit_then_fail(monkeypatch, deny_checkpoints)
+    code, payload, err = claim(monkeypatch, db, "work")
+    assert code == EXIT_REFUSED, (payload, err)
+    assert payload["error"]["code"] == "shared_database"
+    assert "could not be read" in payload["error"]["message"]
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+    assert len(seen) == 1, seen
+
+
 def test_a_read_back_that_fails_is_refused(db, monkeypatch) -> None:
     # The claim commits and an I/O error follows; then the read-back itself
     # fails, so the outcome cannot be decided and the verb refuses.
@@ -652,6 +745,7 @@ def test_a_finished_commit_stays_claimed_when_another_write_lands_before_the_rea
     # holds the file. Before the read-back another caller commits an
     # unrelated event, so the connection's data version moves on; the
     # commit is known to have finished, so the claim is still this call's.
+    # The reader lets go before the settlement's second checkpoint.
     with open_ledger(db):
         pass
     original = Ledger.transaction
@@ -669,58 +763,44 @@ def test_a_finished_commit_stays_claimed_when_another_write_lands_before_the_rea
 
     seen = outcome_reads(monkeypatch)
     monkeypatch.setattr(Ledger, "transaction", transaction)
-    with a_reader_holding(db):
+    with a_reader_holding(db) as release:
+        started = settling_checkpoints(monkeypatch, release)
         code, payload, err = claim(monkeypatch, db, "work")
     assert code == 0, (payload, err)
     assert payload["data"]["claimed"] is True
     assert [e["system"] for e in claim_events(db)] == ["work"]
     assert len(seen) == 1 and "checkpoint of" in seen[0], seen
+    assert len(started) == 2, started
 
 
-def _add_a_hard_link(db: Path) -> None:
-    os.link(db, db.with_name("alias.db"))
-
-
-def _replace_with_a_copy(db: Path) -> None:
-    moved = db.with_name("moved.db")
-    os.rename(db, moved)
-    shutil.copyfile(moved, db)
-
-
-def _replace_with_a_symbolic_link(db: Path) -> None:
-    moved = db.with_name("moved.db")
-    os.rename(db, moved)
-    db.symlink_to(moved)
-
-
-@pytest.mark.parametrize(
-    "alter", [_add_a_hard_link, _replace_with_a_copy, _replace_with_a_symbolic_link]
-)
-def test_a_claim_whose_file_changed_before_settlement_is_refused(
-    db, monkeypatch, alter
-) -> None:
-    # The claim commits; then, before the checkpoint, the database path stops
-    # naming the opened file as its only link. The checkpoint cannot finish
-    # while the reader holds the file, and the claim must not be settled: a
-    # connection through another path may hold it and not see the claim.
+def test_a_claim_held_after_a_hard_link_was_added_is_refused(db, monkeypatch) -> None:
+    # The claim commits; then, before the checkpoint, a hard link to the
+    # database is added after the open-time link-count check. The reader
+    # holds the file through every checkpoint, so the claim never reaches the
+    # main file and is not settled, whatever the path now names: exit 3,
+    # shared_database.
     with open_ledger(db):
         pass
     original = Ledger.transaction
+    alias = Path(db).with_name("alias.db")
 
     @contextlib.contextmanager
     def transaction(self):
         with original(self):
             yield
-        alter(Path(db))
+        os.link(db, alias)
 
     seen = outcome_reads(monkeypatch)
+    started = settling_checkpoints(monkeypatch)
     monkeypatch.setattr(Ledger, "transaction", transaction)
     with a_reader_holding(db):
         code, payload, err = claim(monkeypatch, db, "work")
+    assert alias.exists()
     assert code == EXIT_REFUSED, (payload, err)
     assert payload["error"]["code"] == "shared_database"
     assert "checkpoint of" in payload["error"]["message"]
     assert len(seen) == 1 and "checkpoint of" in seen[0], seen
+    assert len(started) >= 2, started
 
 
 def test_an_error_on_a_database_claimed_for_another_system_is_refused(
