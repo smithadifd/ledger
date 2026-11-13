@@ -301,12 +301,31 @@ def _forge_spec(db: str, **override) -> None:
 @pytest.mark.parametrize(
     "override",
     [
+        # Each case leaves every other field readable, so it fails exactly one
+        # condition of the readability check.
         {"version": 0},
         {"version": True},
+        {"version": 1.0},
+        {"title": ""},
+        {"title": 5},
+        {"title": None},
+        {"body_md": ""},
+        {"body_md": 5},
+        {"body_md": None},
+        {"acceptance": ""},
+        {"acceptance": 5},
         {"size": "XL"},
+        {"size": ""},
         {"merge_class": "MC-9"},
+        {"merge_class": ""},
     ],
-    ids=["version-below-one", "version-a-bool", "size-outside-set", "merge-class-outside-set"],
+    ids=[
+        "version-below-one", "version-a-bool", "version-a-float",
+        "title-empty", "title-not-text", "title-null",
+        "body-empty", "body-not-text", "body-null",
+        "acceptance-empty", "acceptance-not-text",
+        "size-outside-set", "size-empty", "merge-class-outside-set", "merge-class-empty",
+    ],
 )
 def test_a_spec_failing_only_one_readability_condition_refuses_by_name(
     db, monkeypatch, repo, override
