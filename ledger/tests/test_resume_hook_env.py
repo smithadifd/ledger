@@ -1,11 +1,12 @@
 """``ledger resume --hook-env``: the session environment lines for a SessionStart hook.
 
-The flag reads one SessionStart hook input on stdin and prints up to four
+The flag reads one SessionStart hook input on stdin and prints up to three
 ``export NAME=<value>`` lines: ``LEDGER_SESSION`` always (when the input has a
-usable ``session_id``), then ``LEDGER_AGENT``, ``LEDGER_HARNESS`` and
-``LEDGER_MODEL`` only when each is absent from the environment. It never
-resolves, opens or creates the database. Each case runs the CLI as a hook
-does: a subprocess with the input on stdin.
+usable ``session_id``), then ``LEDGER_AGENT`` and ``LEDGER_HARNESS`` only when
+each is absent from the environment. It never prints ``LEDGER_MODEL``: a model
+switch during the session could not re-stamp it. It never resolves, opens or
+creates the database. Each case runs the CLI as a hook does: a subprocess with
+the input on stdin.
 """
 from __future__ import annotations
 
@@ -17,9 +18,16 @@ from pathlib import Path
 
 import pytest
 
+from ledger.store import open_ledger
+
 PKG_PARENT = Path(__file__).resolve().parents[2]  # makes ``python -m ledger`` importable
 SESSION = "3f2b8c1e-5d4a-4e7b-9a10-2c6d8e4f1a2b"
 MODEL = "claude-fixture-model"
+THREE_LINES = (
+    f"export LEDGER_SESSION={SESSION}\n"
+    "export LEDGER_AGENT=claude-code\n"
+    "export LEDGER_HARNESS=claude-code\n"
+)
 
 
 def hook(**changes) -> dict:
@@ -71,15 +79,10 @@ def db(tmp_path: Path) -> Path:
 # --- T21: the full output -----------------------------------------------------
 
 
-def test_t21_four_lines_in_order_and_no_database(db: Path) -> None:
+def test_t21_three_lines_in_order_and_no_database(db: Path) -> None:
     done = hook_env(db, json.dumps(hook()))
     assert (done.returncode, done.stderr) == (0, "")
-    assert done.stdout == (
-        f"export LEDGER_SESSION={SESSION}\n"
-        "export LEDGER_AGENT=claude-code\n"
-        "export LEDGER_HARNESS=claude-code\n"
-        f"export LEDGER_MODEL={MODEL}\n"
-    )
+    assert done.stdout == THREE_LINES
     assert not db.exists() and not db.parent.exists()
 
 
@@ -91,7 +94,6 @@ def test_t21_json_carries_the_same_map(db: Path) -> None:
             "LEDGER_SESSION": SESSION,
             "LEDGER_AGENT": "claude-code",
             "LEDGER_HARNESS": "claude-code",
-            "LEDGER_MODEL": MODEL,
         }},
         "error": None,
         "ok": True,
@@ -103,13 +105,13 @@ def test_t21_json_carries_the_same_map(db: Path) -> None:
 
 
 @pytest.mark.parametrize("value", ["already", ""], ids=["set", "set-empty"])
-@pytest.mark.parametrize("name", ["LEDGER_AGENT", "LEDGER_HARNESS", "LEDGER_MODEL"])
+@pytest.mark.parametrize("name", ["LEDGER_AGENT", "LEDGER_HARNESS"])
 def test_t22_a_variable_already_set_gets_no_line(db: Path, name: str, value: str) -> None:
     done = hook_env(db, json.dumps(hook()), env={name: value})
     assert done.returncode == 0, done.stderr
     names = [line.split("=", 1)[0] for line in done.stdout.splitlines()]
     assert f"export {name}" not in names
-    assert len(names) == 3
+    assert len(names) == 2
 
 
 def test_t22_all_three_set_leaves_only_the_session(db: Path) -> None:
@@ -127,20 +129,43 @@ def test_t22_the_session_line_is_printed_even_when_the_session_is_set(db: Path) 
 # --- T23: values --------------------------------------------------------------
 
 
-def test_t23_a_model_object_is_stamped_by_its_id(db: Path) -> None:
-    done = hook_env(db, json.dumps(hook(model={"id": "model-from-object",
-                                                "display_name": "x"})))
-    assert done.stdout.splitlines()[-1] == "export LEDGER_MODEL=model-from-object"
-
-
-@pytest.mark.parametrize("model", [..., None, 7, "", "a\nb", {"id": 7}, {"name": "x"}, ["m"]],
-                         ids=["missing", "null", "int", "empty", "newline", "id-int",
-                              "no-id", "list"])
-def test_t23_an_unusable_model_gets_no_line(db: Path, model) -> None:
+@pytest.mark.parametrize("model", [MODEL, {"id": "model-from-object", "display_name": "x"},
+                                   ..., None, 7, "", "a\nb", {"id": 7}, ["m"]],
+                         ids=["string", "object", "missing", "null", "int", "empty",
+                              "newline", "id-int", "list"])
+def test_t23_no_model_line_whatever_the_input_carries(db: Path, model) -> None:
+    # Only a few hook events may write CLAUDE_ENV_FILE and a model switch is not
+    # one of them, so a model stamped at session start would go stale.
     done = hook_env(db, json.dumps(hook(model=model)))
     assert (done.returncode, done.stderr) == (0, "")
     assert "LEDGER_MODEL" not in done.stdout
-    assert len(done.stdout.splitlines()) == 3
+    assert done.stdout == THREE_LINES
+    done = hook_env(db, json.dumps(hook(model=model)), "--json")
+    assert done.returncode == 0, done.stderr
+    assert "LEDGER_MODEL" not in json.loads(done.stdout)["data"]["env"]
+
+
+def test_t23_a_write_under_the_printed_environment_records_no_model(db: Path,
+                                                                     tmp_path: Path) -> None:
+    done = hook_env(db, json.dumps(hook()))
+    assert done.returncode == 0, done.stderr
+    env_file = tmp_path / "env-file"
+    env_file.write_text(done.stdout, encoding="utf-8")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
+    env.update(LEDGER_DB=str(db), PYTHONDONTWRITEBYTECODE="1")
+    wrote = subprocess.run(
+        ["/bin/sh", "-c", '. "$1" && exec "$2" -m ledger new --type gate --title stamped',
+         "sh", str(env_file), sys.executable],
+        env=env, capture_output=True, text=True, timeout=60, cwd=PKG_PARENT,
+    )
+    assert wrote.returncode == 0, wrote.stderr
+    with open_ledger(db, create=False) as lg:
+        events = lg.events()
+    assert events
+    for event in events:
+        assert (event.session, event.actor, event.harness) == (
+            SESSION, "claude-code", "claude-code")
+        assert event.model is None
 
 
 @pytest.mark.parametrize("session", [..., None, 7, "", "a\nb", "a b", "\ud800"],
@@ -162,12 +187,6 @@ def test_t23_a_session_id_survives_the_shell_exactly(db: Path, tmp_path: Path,
     first = done.stdout.splitlines()[0]
     assert first.startswith("export LEDGER_SESSION=") and "$'" not in first
     assert sourced(done.stdout, tmp_path, "LEDGER_SESSION") == session
-
-
-def test_t23_a_model_survives_the_shell_exactly(db: Path, tmp_path: Path) -> None:
-    model = "model 'with' $odd \\chars"
-    done = hook_env(db, json.dumps(hook(model=model)))
-    assert sourced(done.stdout, tmp_path, "LEDGER_MODEL") == model
 
 
 # --- T24: refusals ------------------------------------------------------------
@@ -224,6 +243,30 @@ def test_t25_a_database_in_a_missing_folder_is_never_created(tmp_path: Path) -> 
     )
     assert done.returncode == 0, done.stderr
     assert not (tmp_path / "no").exists()
+
+
+@pytest.mark.parametrize("target_exists", [True, False], ids=["to-a-file", "dangling"])
+def test_t25_a_symlinked_database_still_gets_its_lines(tmp_path: Path,
+                                                       target_exists: bool) -> None:
+    # Other verbs refuse a linked database (db_symlink). --hook-env never
+    # resolves the path, so a session with such a LEDGER_DB keeps its lines.
+    target = tmp_path / "real" / "ledger.db"
+    target.parent.mkdir()
+    if target_exists:
+        target.write_bytes(b"not a sqlite file")
+    link = tmp_path / "ledger.db"
+    link.symlink_to(target)
+    before = {p: p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")}
+    done = subprocess.run(
+        [sys.executable, "-m", "ledger", "resume", "--hook-env"],
+        input=json.dumps(hook()).encode("utf-8"),
+        env={**{k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")},
+             "LEDGER_DB": str(link), "PYTHONDONTWRITEBYTECODE": "1"},
+        capture_output=True, timeout=60, cwd=PKG_PARENT,
+    )
+    assert (done.returncode, done.stdout.decode("utf-8"), done.stderr) == (0, THREE_LINES, b"")
+    assert link.is_symlink()
+    assert {p: p.read_bytes() if p.is_file() else None for p in tmp_path.rglob("*")} == before
 
 
 def test_t25_hook_env_ignores_an_existing_database(tmp_path: Path) -> None:

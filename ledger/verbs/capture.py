@@ -26,9 +26,10 @@ the database is opened, so neither creates it. The result is the text line
   person's, whoever wrote it.
 - ``prompts_off``: ``capture_prompts`` is ``false`` in the ``config.json``
   beside the database. No file, no key, or ``true`` leaves prompt capture on.
-  A config that cannot be read or parsed, or a value that is not a JSON
-  boolean, is refused (``capture_config``, exit 3, nothing written), so a
-  typo never turns a person's ``false`` into stored prompts.
+  A config that cannot be read or parsed (a ``config.json`` symbolic link
+  that does not resolve included), or a value that is not a JSON boolean, is
+  refused (``capture_config``, exit 3, nothing written), so a typo never
+  turns a person's ``false`` into stored prompts.
 
 A valid input is checked first, so every refusal above still applies to a
 frame. ``--kind picker`` never reads the config.
@@ -62,6 +63,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
 from typing import Any, Mapping
 
@@ -186,6 +188,14 @@ def prompts_enabled(db: str) -> bool:
     """
     from ledger import search  # config.json is read in one place
 
+    path = search.config_file(db)
+    # load_config reads a link that resolves to nothing as no file, which here
+    # would turn a person's ``false`` into stored prompts.
+    if os.path.lexists(path) and not os.path.exists(path):
+        raise _config_refusal(
+            f"unreadable ledger config {path}: a symbolic link that does not resolve;"
+            " prompt capture refused"
+        )
     try:
         config = search.load_config(db)
     except search.SearchError as exc:

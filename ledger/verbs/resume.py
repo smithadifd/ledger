@@ -22,12 +22,14 @@ directory.
 stdin and prints the lines the hook appends to the session's environment file,
 each ``export NAME=<value>`` with the value shell-quoted, in this order:
 ``LEDGER_SESSION`` from ``session_id`` (even when the variable is already set);
-``LEDGER_AGENT`` and ``LEDGER_HARNESS`` as ``claude-code``, each only when the
-name is absent from this process's environment; ``LEDGER_MODEL`` from
-``model`` (a string, or an object whose ``id`` is one), only when absent. A
-value that is missing, not a string, empty, or holds a control character
-leaves its line out. Stdin that is not one UTF-8 JSON object is refused with
-``hook_env_bad_input``, and an input for another event with
+then ``LEDGER_AGENT`` and ``LEDGER_HARNESS`` as ``claude-code``, each only
+when the name is absent from this process's environment. A ``session_id``
+that is missing, not a string, empty, or holds a control character leaves
+its line out. It prints no ``LEDGER_MODEL`` line, whatever the input's
+``model``: only a few hook events may write the session's environment file
+and a model switch is not one of them, so a stamped model would go stale
+while later writes kept recording it. Stdin that is not one UTF-8 JSON object
+is refused with ``hook_env_bad_input``, and an input for another event with
 ``hook_env_not_session_start`` (exit 3, nothing on stdout). The flag never
 resolves, opens or creates the database, and it cannot be combined with
 ``--brief`` or ``--item``.
@@ -108,7 +110,8 @@ def add_arguments(parser) -> None:
         "--hook-env",
         action="store_true",
         help="read a SessionStart hook input on stdin and print the export lines"
-        " for the session's environment; opens no database",
+        " for LEDGER_SESSION, LEDGER_AGENT and LEDGER_HARNESS (never LEDGER_MODEL);"
+        " opens no database",
     )
 
 
@@ -167,12 +170,8 @@ def hook_env(hook: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, s
         env["LEDGER_AGENT"] = HOOK_AGENT
     if "LEDGER_HARNESS" not in environ:
         env["LEDGER_HARNESS"] = HOOK_HARNESS
-    model = hook.get("model")
-    if type(model) is dict:
-        model = model.get("id")
-    model = _usable(model)
-    if model is not None and "LEDGER_MODEL" not in environ:
-        env["LEDGER_MODEL"] = model
+    # No LEDGER_MODEL: the input's model is the one the session started on, and
+    # a model switch later in the session cannot re-stamp the environment file.
     return env
 
 

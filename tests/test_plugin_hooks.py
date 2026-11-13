@@ -246,7 +246,9 @@ def test_t2_session_start_appends_what_hook_env_prints(rig: Rig) -> None:
          ' "$LEDGER_MODEL"', "sh", str(env_file)],
         env={"PATH": BASE_PATH}, capture_output=True, text=True, timeout=30,
     )
-    assert sourced.stdout == f"{hook['session_id']}|claude-code|claude-code|{hook['model']}"
+    # The recorded input carries a model; the hook stamps none (it would go stale).
+    assert hook["model"] and "LEDGER_MODEL" not in env_file.read_text()
+    assert sourced.stdout == f"{hook['session_id']}|claude-code|claude-code|"
 
 
 def test_t2_without_claude_env_file_no_file_is_written_and_the_brief_prints(rig: Rig) -> None:

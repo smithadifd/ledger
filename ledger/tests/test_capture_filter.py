@@ -253,6 +253,24 @@ def test_an_unreadable_config_refuses(db: Path) -> None:
     assert not db.exists()
 
 
+@pytest.mark.parametrize("kind", ["dangling", "loop"])
+def test_a_config_link_that_does_not_resolve_refuses(db: Path, kind: str) -> None:
+    # The shared config reader takes such a link for no file at all; for prompt
+    # capture that would store prompts a person may have turned off.
+    db.parent.mkdir(parents=True)
+    path = db.parent / "config.json"
+    path.symlink_to(path if kind == "loop" else db.parent / "moved-away.json")
+    secret = "the person's private words"
+    code, env = run_json(db, "capture", "--kind", "prompt", stdin=prompt_hook(secret))
+    assert code == 3 and env["error"]["code"] == "capture_config"
+    assert str(path) in env["error"]["message"] and secret not in env["error"]["message"]
+    assert not db.exists()
+    asked = ask_and_answer(db)
+    code, env = run_json(db, "pick", ITEM, "--ask", str(asked))
+    assert code == 0, env
+    assert prompt_events(db) == []
+
+
 @pytest.mark.parametrize("name", sorted(INVALID_CONFIGS))
 def test_an_invalid_config_never_stops_a_picker_capture(db: Path, name: str) -> None:
     write_config(db, INVALID_CONFIGS[name])

@@ -403,8 +403,10 @@ has that name.)
 
 - **SessionStart** prints `ledger resume --brief` into the session, and with
   `ledger resume --hook-env` stamps the session's environment:
-  `LEDGER_SESSION` from the session id, and `LEDGER_AGENT`, `LEDGER_HARNESS`
-  and `LEDGER_MODEL` when they are not already set.
+  `LEDGER_SESSION` from the session id, and `LEDGER_AGENT` and
+  `LEDGER_HARNESS` when they are not already set. It stamps no
+  `LEDGER_MODEL`: the model can change during a session and the hook could
+  not follow it ([KNOWN-LIMITS.md](KNOWN-LIMITS.md)).
 - **UserPromptSubmit** passes the hook's input to `ledger capture --kind prompt`.
 - **PostToolUse** on AskUserQuestion passes it to
   `ledger capture --kind picker`: the capture `ledger pick ITEM --ask K` binds.

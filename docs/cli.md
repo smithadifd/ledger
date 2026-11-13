@@ -82,7 +82,10 @@ An optional `config.json` beside the database:
   boolean (`"false"`, `0` and `null` included), or a `config.json` that cannot
   be read or is not a JSON object, makes `capture --kind prompt` refuse with
   `capture_config` (exit 3) and write nothing, so a typo never turns a `false`
-  into stored prompts; picker capture still works.
+  into stored prompts; picker capture still works. A `config.json` that is a
+  symbolic link that does not resolve (its target is missing, or the link
+  loops) counts as unreadable here, though `search` and `claim` read it as no
+  file.
 
 ## Item verbs
 
@@ -409,8 +412,9 @@ the reason; `--json` carries `{"event": null, "skipped": "<reason>"}`.
   `origin: person` whoever wrote it, and a person who starts a prompt with a
   frame is not captured.
 - `prompts_off`: `capture_prompts` is `false` in `config.json` (see
-  [Configuration file](#configuration-file)). A config that cannot be read or
-  holds a non-boolean value refuses `capture_config` instead.
+  [Configuration file](#configuration-file)). A config that cannot be read
+  (a `config.json` link that does not resolve included) or holds a
+  non-boolean value refuses `capture_config` instead.
 
 Re-running one hook input: a picker input always carries `tool_use_id`, and
 its key is `capture:picker:<tool_use_id>`; a prompt input that carries
@@ -802,7 +806,13 @@ shell-quoted, in this order:
 | `LEDGER_SESSION=<session_id>` | the input's `session_id` is usable, even when `LEDGER_SESSION` is already set |
 | `LEDGER_AGENT=claude-code` | `LEDGER_AGENT` is absent from the environment |
 | `LEDGER_HARNESS=claude-code` | `LEDGER_HARNESS` is absent from the environment |
-| `LEDGER_MODEL=<model>` | `LEDGER_MODEL` is absent and the input's `model` (a string, or an object whose `id` is one) is usable |
+
+It prints no `LEDGER_MODEL` line, whatever the input's `model`. Only
+SessionStart, Setup, CwdChanged and FileChanged hooks can write
+`CLAUDE_ENV_FILE`, and a model switch during the session is none of them, so
+a model stamped at session start would go stale and every later write would
+record it. Writes in a session the plugin started record no model unless
+`LEDGER_MODEL` is already set in Claude Code's environment.
 
 A variable set to an empty value counts as set. A usable value is a non-empty
 string with no control character; any other value leaves its line out and is
