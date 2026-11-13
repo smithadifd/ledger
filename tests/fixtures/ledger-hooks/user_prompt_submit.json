@@ -1,0 +1,9 @@
+{
+  "session_id": "3f2b8c1e-5d4a-4e7b-9a10-2c6d8e4f1a2b",
+  "transcript_path": "/tmp/fixture/transcript.jsonl",
+  "cwd": "/tmp/fixture",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt_id": "6a1c0f3e-8b2d-4c5e-9f70-1d2e3f4a5b6c",
+  "prompt": "Ship the release notes today, and hold the migration until Friday."
+}

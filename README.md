@@ -145,6 +145,9 @@ Homebrew Python refuse it (PEP 668, `externally-managed-environment`). From a
 clone with nothing installed, `python3 -m ledger <verb>` is the same as
 `ledger <verb>`.
 
+To connect Claude Code to the ledger, install the plugin as well:
+[Claude Code plugin](#claude-code-plugin).
+
 ## Upgrade
 
 An install from a branch (or with no `@...` at all) upgrades in place:
@@ -385,10 +388,59 @@ trace.
 | `LEDGER_POINTER_SIDECAR` | env | an executable that returns conversation pointers for a card |
 | `search_roots` | `config.json` beside the database | absolute paths whose `standards/*.md` and `decisions/*.md` the search index includes |
 | `claim_ttl_seconds` | `config.json` beside the database | default claim lease (4 hours when unset) |
+| `capture_prompts` | `config.json` beside the database | `false` turns prompt capture off; picker capture stays on. A value that is not `true` or `false` makes prompt capture refuse (`capture_config`) |
 
 ## For agents
 
 An agent that has only the installed package should learn from the ledger itself that it exists and what to write. [docs/agent-contract.md](docs/agent-contract.md) is the one page for it: what to write without asking, the reading order, the actor stamps and how to end a session. `ledger resume --brief` prints its short form followed by every open item's stop point and the command to resume it, so a session-start hook can put both into the agent's context. If open items have no stop, it reports their count and points to `ledger query` instead of claiming there are no open items.
+
+## Claude Code plugin
+
+This repository is also a Claude Code plugin marketplace, `ledger-plugins`.
+Its one plugin, `ledger-hooks`, connects a Claude Code session to the ledger
+with three hooks. (It is not called `ledger` because another plugin already
+has that name.)
+
+- **SessionStart** prints `ledger resume --brief` into the session, and with
+  `ledger resume --hook-env` stamps the session's environment:
+  `LEDGER_SESSION` from the session id, and `LEDGER_AGENT`, `LEDGER_HARNESS`
+  and `LEDGER_MODEL` when they are not already set.
+- **UserPromptSubmit** passes the hook's input to `ledger capture --kind prompt`.
+- **PostToolUse** on AskUserQuestion passes it to
+  `ledger capture --kind picker`: the capture `ledger pick ITEM --ask K` binds.
+
+Install it from Claude Code:
+
+```sh
+claude plugin marketplace add smithadifd/ledger
+claude plugin install ledger-hooks@ledger-plugins
+```
+
+The ledger is on when a `ledger` command is on the `PATH` Claude Code runs
+hooks with and `LEDGER_DB` names a database in Claude Code's environment (set
+it in your shell before you start Claude Code, or in the `env` block of its
+settings). Otherwise every hook is silent: it prints nothing and writes
+nothing.
+
+No hook blocks a session. Each exits 0 on every path, within a timeout, and a
+failure prints one short line that never holds your text: the brief's goes
+into the session, the captures' to Claude Code's debug log. The hooks are
+shims of a few lines; every rule lives in the CLI, so an older plugin works
+with a newer ledger. `capture --kind prompt` skips harness frames (task
+notifications, cross-session and agent messages, system reminders, subagent
+hand-backs) and stores a prompt over 64 KiB as a pointer, and
+`"capture_prompts": false` in `config.json` turns prompt capture off while
+picker capture stays on ([docs/cli.md](docs/cli.md) has the details).
+
+A setup with no guard rail cannot stop an agent from running `ledger capture`
+itself. The hooks record what the harness showed and what was chosen; they do
+not prevent a forged capture. Without a rule that denies an agent
+`ledger capture`, a picker answer is only as trustworthy as the agent
+([KNOWN-LIMITS.md](KNOWN-LIMITS.md)).
+
+The skills collection below also ships a session-start hook. With both
+installed, each session prints the brief twice and writes the same
+environment lines twice, which is harmless.
 
 ## Working with agent skills
 

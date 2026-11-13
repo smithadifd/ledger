@@ -13,6 +13,26 @@ lets no other writer use a channel that starts with ``hook:``.
 as a pointer: a fixed text line plus ``omitted_bytes`` and
 ``omitted_sha256``.
 
+Two cases of ``--kind prompt`` write nothing and exit 0, both decided before
+the database is opened, so neither creates it. The result is the text line
+``skipped``, a tab and the reason (JSON ``data``:
+``{"event": null, "skipped": "<reason>"}``):
+
+- ``frame``: after its leading ASCII whitespace, the prompt starts with one of
+  ``HARNESS_FRAMES``, the text a harness puts in the prompt slot for a task
+  notification, a cross-session or agent message, a system reminder or a
+  subagent hand-back. The match is exact and case-sensitive. It is a label,
+  never proof of authorship: a prompt with no frame is stored as the
+  person's, whoever wrote it.
+- ``prompts_off``: ``capture_prompts`` is ``false`` in the ``config.json``
+  beside the database. No file, no key, or ``true`` leaves prompt capture on.
+  A config that cannot be read or parsed, or a value that is not a JSON
+  boolean, is refused (``capture_config``, exit 3, nothing written), so a
+  typo never turns a person's ``false`` into stored prompts.
+
+A valid input is checked first, so every refusal above still applies to a
+frame. ``--kind picker`` never reads the config.
+
 ``--kind picker`` takes the PostToolUse hook input for AskUserQuestion
 (``hook_event_name`` ``PostToolUse``, ``tool_name`` ``AskUserQuestion``,
 ``tool_use_id``, ``tool_input.questions`` and ``tool_response.answers``,
@@ -71,6 +91,20 @@ TOOL_ANSWER = "tool-answer"
 PROMPT_CAP_BYTES = 64 * 1024
 # The store appends a hook: capture only for a caller holding this.
 _CAPTURE_WRITER_CAPABILITY = object()
+# Text the harness itself puts in the prompt slot. A prompt that starts with
+# one of these, after leading ASCII whitespace, is not captured.
+HARNESS_FRAMES = (
+    "<task-notification>",
+    "<cross-session-message",
+    "<agent-message",
+    "<system-reminder>",
+    "[Subagent hand-back]",
+)
+# ASCII whitespace only: a frame after a no-break space is still captured, so
+# the filter fails toward capture.
+_ASCII_WHITESPACE = " \t\n\r\v\f"
+# The config.json key that turns prompt capture off; picker capture never reads it.
+PROMPTS_CONFIG_KEY = "capture_prompts"
 
 
 def _bad_input(message: str) -> CliError:
@@ -133,6 +167,38 @@ def prompt_capture(hook: Mapping[str, Any]) -> dict[str, Any]:
         if value is not None:
             payload[name] = value
     return payload
+
+
+def is_harness_frame(prompt: str) -> bool:
+    """True when ``prompt`` starts with a harness frame after ASCII whitespace."""
+    return prompt.lstrip(_ASCII_WHITESPACE).startswith(HARNESS_FRAMES)
+
+
+def _config_refusal(message: str) -> CliError:
+    return CliError(message, code="capture_config", exit_code=EXIT_REFUSED)
+
+
+def prompts_enabled(db: str) -> bool:
+    """Whether ``capture_prompts`` in the ``config.json`` beside ``db`` leaves
+    prompt capture on: yes with no file, no key or ``true``; no with ``false``.
+
+    Anything else is refused rather than read as on or off.
+    """
+    from ledger import search  # config.json is read in one place
+
+    try:
+        config = search.load_config(db)
+    except search.SearchError as exc:
+        raise _config_refusal(f"{exc}; prompt capture refused") from exc
+    if PROMPTS_CONFIG_KEY not in config:
+        return True
+    value = config[PROMPTS_CONFIG_KEY]
+    if type(value) is not bool:
+        raise _config_refusal(
+            f"{PROMPTS_CONFIG_KEY} in ledger config {search.config_file(db)} must be"
+            " true or false; prompt capture refused"
+        )
+    return value
 
 
 def _questions(tool_input: Any) -> list[dict[str, Any]]:
@@ -271,12 +337,24 @@ def add_arguments(parser) -> None:
     )
 
 
+def _skipped(reason: str) -> Result:
+    return Result(data={"event": None, "skipped": reason}, text=f"skipped\t{reason}")
+
+
 def run(args, ctx: Context) -> Result:
     try:
         raw = sys.stdin.read()
     except UnicodeDecodeError as exc:
         raise _bad_input(f"stdin is not UTF-8 text: {exc}") from exc
     hook = read_hook_input(raw)
+    if args.kind == "prompt":
+        # Validate first, so every refusal stands; then the two skips, both
+        # before open_db, which would create the database.
+        prompt_capture(hook)
+        if is_harness_frame(hook["prompt"]):
+            return _skipped("frame")
+        if not prompts_enabled(ctx.db):
+            return _skipped("prompts_off")
     lg = open_db(ctx, write=True)
     try:
         event = write_capture(lg, args.kind, hook, **actor_kwargs(ctx))
