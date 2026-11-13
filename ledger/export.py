@@ -9,21 +9,29 @@ export that holds event files without one.
 ``export --commit`` commits in the configured export directory only and never
 pushes. Pushing is ``export --push``.
 
-Before any event file is written, every pending inline ``doc.attached``
-event's bytes are scanned for credential shapes (``ledger.credscan``). A hit
-on an event without ``credential_override: true`` refuses the whole export
-(``ExportDocCredential``): no file is written and the watermark does not
-move. A by-path document's event file carries its stored path, sha256 and
-size and no bytes, so export scans the stored path and never opens a document
-file. ``commit_export`` stages the export directory into a private
-temporary index and scans the exact tree it will commit, and the new commit
-object, before any ref moves; ``push_export`` scans every commit, path and
-blob reachable from the pinned branch commit (the whole history) and then
-pushes exactly that commit, by its full sha, to the branch's push remote.
-Both apply one rule: a file at an event name must be the canonical bytes of
-a valid event record and passes the ``doc.attached`` check above, and every
-other file, every path name, every commit object and the branch name must
-hold no credential shape.
+Before any event file is written, every pending event, of every kind, is
+scanned for credential shapes (``ledger.credscan``,
+``unmarked_credential_reason``): every string the event file holds (the
+kind, the item id, the attribution fields, the idempotency key and every
+payload key and string value at any depth: a note's text, a spec's title and
+body, a claim's owner, a document's title), and a ``doc.attached`` event's
+inline bytes or, for a by-path document, its stored path. A hit, or a value
+the scan cannot read, refuses the whole export (``ExportDocCredential``): no
+file is written and the watermark does not move. ``credential_override:
+true`` exempts a ``doc.attached`` event only; on any other kind it changes
+nothing. A by-path document's event file carries its stored path, sha256 and
+size and no bytes, so export never opens a document file.
+``commit_export`` stages the export directory into a private temporary
+index and scans the exact tree it will commit, and the new commit object,
+before any ref moves; after the branch moves it merges the real index onto
+the new commit (``git read-tree -m -i``), so whatever the operator staged is
+kept, and it leaves the real index untouched when git cannot do that
+safely. ``push_export`` scans every commit, path and blob reachable from the
+pinned branch commit (the whole history) and then pushes exactly that
+commit, by its full sha, to the branch's push remote. Both apply one rule: a
+file at an event name must be the canonical bytes of a valid event record
+and pass the event scan above, and every other file, every path name, every
+commit object and the branch name must hold no credential shape.
 
 That export is the backup stream: restore replays it and checks the hash
 chain, so it keeps every event. ``item_export`` is the per-item export a
@@ -41,6 +49,7 @@ import secrets
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
+from dataclasses import fields as dataclass_fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -84,9 +93,10 @@ class ExportRefusal(LedgerError):
 
 
 class ExportDocCredential(ExportRefusal):
-    """A document holds a credential shape and carries no
-    ``credential_override``: at export nothing is written; at commit or push
-    nothing is committed or sent."""
+    """An event's free text, or a document's bytes or stored path, holds a
+    credential shape (or cannot be scanned), and the event is not a
+    ``doc.attached`` event carrying ``credential_override: true``: at export
+    nothing is written; at commit or push nothing is committed or sent."""
 
     code = EXPORT_DOC_CREDENTIAL
 
@@ -217,7 +227,8 @@ class Lag:
 class CommitResult:
     sha: str | None
     pushed: bool = False
-    # Whether the real index was set to the new commit's tree (best effort).
+    # Whether the real index was merged onto the new commit, keeping what the
+    # operator staged (best effort; False leaves it exactly as it was).
     index_refreshed: bool = False
 
 
@@ -448,19 +459,22 @@ def write_event_files(export_dir: Path, events: list[Event]) -> list[Path]:
 
 
 def refuse_unmarked_credentials(events: Sequence[Event]) -> None:
-    """Refuse ``ExportDocCredential`` when a ``doc.attached`` event in
-    ``events`` holds a credential shape and carries no
-    ``credential_override: true``. The message names the event, its item and
-    the shapes, never the matched bytes. A document whose inline bytes do
-    not decode cannot be scanned, and is refused the same way.
+    """Refuse ``ExportDocCredential`` when any event in ``events``, of any
+    kind, holds a credential shape in its free text, or a value the scan
+    cannot read, and is not a ``doc.attached`` event carrying
+    ``credential_override: true``. The message names the event, its item,
+    the field and the shapes, never the matched text (a kind or item id that
+    itself holds a shape is not shown either).
 
-    A by-path document (one carrying ``path`` and no ``content_b64``) holds
-    no bytes, so its file is never opened here; its event file carries the
-    stored path, so the path's UTF-8 bytes are scanned instead, and an
-    unmarked hit is refused the same way, naming the shapes as in the path
-    and never the path. A stored path that is not UTF-8 text cannot be
-    scanned and is refused too. An event carrying both keys is scanned as
-    inline (the schema refuses that shape, so it is never stored).
+    A ``doc.attached`` event is also scanned in its document: its inline
+    bytes (undecodable bytes cannot be scanned, and are refused the same
+    way), or for a by-path document (one carrying ``path`` and no
+    ``content_b64``), which holds no bytes and whose file is never opened
+    here, its stored path's UTF-8 bytes; an unmarked hit there names the
+    shapes as in the path and never the path. A stored path that is not
+    UTF-8 text cannot be scanned and is refused too. An event carrying both
+    keys is scanned as inline (the schema refuses that shape, so it is never
+    stored).
 
     The decision for one event is ``unmarked_credential_reason``, which the
     commit and push scans share."""
@@ -468,7 +482,10 @@ def refuse_unmarked_credentials(events: Sequence[Event]) -> None:
         reason = unmarked_credential_reason(event)
         if reason is None:
             continue
-        where = f"export refuses event {event.id} ({event.kind}) on item {event.item_id}"
+        where = (
+            f"export refuses event {event.id} ({_shown_text(event.kind)}) on item "
+            f"{_shown_text(event.item_id)}"
+        )
         tail = (
             ", and nothing was written"
             if reason.endswith(_PATH_NOT_SHOWN)
@@ -483,17 +500,127 @@ _PATH_NOT_SHOWN = "the path is not shown"
 def unmarked_credential_reason(event: Event) -> str | None:
     """Why export refuses ``event``, or None when it passes.
 
-    Only a ``doc.attached`` event without ``credential_override: true`` is
-    refused: when its inline bytes hold a credential shape or do not decode,
-    or when it is a by-path document whose stored path holds a shape or is
-    not UTF-8 text. The reason names the shapes, never the bytes or the
-    path."""
+    Every event kind is scanned, a kind this module does not know included.
+    A ``doc.attached`` event carrying ``credential_override: true`` passes
+    whole: the marker is honoured on that kind only, and on any other kind
+    it changes nothing. Every other event is refused when a string in its
+    event file holds a credential shape: the kind, the item id, the
+    attribution fields, the idempotency key, the recorded time, the hashes,
+    and every payload key and string value at any depth (a note's text, a
+    spec's title, body and acceptance, a claim's owner, a reason, a source,
+    a document's title, role and mime). It is refused as well when the event
+    holds a value the scan cannot read: a string that is not UTF-8 text, a
+    key that is not a string, or a value that is not JSON.
+
+    A ``doc.attached`` event without the marker is also refused when its
+    inline bytes hold a shape or do not decode, or when it is a by-path
+    document whose stored path holds a shape or is not UTF-8 text. Its
+    ``content_b64`` is scanned as the bytes it decodes to, not as base64
+    text. The reason names the field and the shapes, never the matched
+    text, the bytes or the path."""
+    doc = event.kind == DOC_KIND and type(event.payload) is dict
+    if doc and event.payload.get(DOC_CREDENTIAL_OVERRIDE) is True:
+        return None
+    if doc:
+        reason = _document_reason(event)
+        if reason is not None:
+            return reason
+    return _free_text_reason(event, doc=doc)
+
+
+def _scan_text(text: str) -> tuple[Any, ...] | None:
+    """The credential shapes in ``text``'s UTF-8 bytes; None when it is not
+    UTF-8 text (a lone surrogate), so it cannot be scanned."""
+    try:
+        data = text.encode("utf-8")
+    except UnicodeEncodeError:
+        return None
+    return scan_credentials(data)
+
+
+def _shown_text(value: object) -> str:
+    """``value`` escaped onto one line, or a placeholder when it holds a
+    credential shape or cannot be scanned, so a refusal never prints one."""
+    text = str(value)
+    hits = _scan_text(text)
+    if hits is None or hits:
+        return "(not shown: it holds a credential shape)"
+    return escape_name(text)
+
+
+def _free_text_reason(event: Event, *, doc: bool) -> str | None:
+    """Why the free text of ``event``'s file refuses it, or None. Every
+    string in the record is scanned, keys included; a document's
+    ``content_b64`` is left to ``_document_reason``, which scanned the bytes
+    it decodes to."""
+    # The event file's fields, read one level deep: the walk below goes
+    # deeper without recursion, so a deeply nested payload cannot overflow.
+    record: dict[str, Any] = {
+        field.name: getattr(event, field.name) for field in dataclass_fields(event)
+    }
+    if doc:
+        record["payload"] = {
+            key: value for key, value in event.payload.items() if key != "content_b64"
+        }
+    tail = (
+        "and it carries no credential_override"
+        if doc
+        else "and credential_override is honoured on doc.attached events only"
+    )
+    stack: list[tuple[str, Any]] = [(name, record[name]) for name in reversed(list(record))]
+    while stack:
+        where, value = stack.pop()
+        if value is None or type(value) in (bool, int, float):
+            continue
+        if type(value) is str:
+            hits = _scan_text(value)
+            if hits is None:
+                return (
+                    f"its {where} is not UTF-8 text, so it cannot be scanned for "
+                    "credential shapes"
+                )
+            if hits:
+                return (
+                    f"its free text holds a credential shape ({shape_names(hits)} in "
+                    f"{where}) {tail}"
+                )
+        elif type(value) is list:
+            for index in reversed(range(len(value))):
+                stack.append((f"{where}[{index}]", value[index]))
+        elif type(value) is dict:
+            children: list[tuple[str, Any]] = []
+            for key, item in value.items():
+                if type(key) is not str:
+                    return (
+                        f"its {where} holds a key that is not text, so it cannot be "
+                        "scanned for credential shapes"
+                    )
+                key_hits = _scan_text(key)
+                if key_hits is None:
+                    return (
+                        f"its {where} holds a key that is not UTF-8 text, so it cannot "
+                        "be scanned for credential shapes"
+                    )
+                if key_hits:
+                    return (
+                        f"its free text holds a credential shape ({shape_names(key_hits)} "
+                        f"in a key of {where}; the key is not shown) {tail}"
+                    )
+                children.append((f"{where}.{escape_name(key)}", item))
+            stack.extend(reversed(children))
+        else:
+            return (
+                f"its {where} holds a value that is not JSON, so it cannot be scanned "
+                "for credential shapes"
+            )
+    return None
+
+
+def _document_reason(event: Event) -> str | None:
+    """Why an unmarked ``doc.attached`` event's document refuses it: its
+    inline bytes, or a by-path document's stored path."""
     from .restore import inline_document_bytes
 
-    if event.kind != DOC_KIND:
-        return None
-    if event.payload.get(DOC_CREDENTIAL_OVERRIDE) is True:
-        return None
     if "path" in event.payload and "content_b64" not in event.payload:
         path = event.payload["path"]
         try:
@@ -1652,8 +1779,8 @@ class _Scanner:
             raise _refusal(
                 ExportDocCredential,
                 self._step,
-                f"{self._where(commit)}{escape_name(path)}: event {event.id} ({event.kind}) "
-                f"on item {escape_name(str(event.item_id))}: {reason}",
+                f"{self._where(commit)}{escape_name(path)}: event {event.id} "
+                f"({_shown_text(event.kind)}) on item {_shown_text(event.item_id)}: {reason}",
             )
 
 
@@ -1946,16 +2073,37 @@ def _swap(
     )
 
 
-def _refresh_index(export_dir: Path, ref: str, new: str) -> bool:
-    """Set the real index to ``new``'s tree, only if HEAD still names
-    ``ref`` and ``ref`` holds ``new``. Best effort: True when it ran."""
+def _refresh_index(export_dir: Path, ref: str, old: str | None, new: str) -> bool:
+    """Move the real index from ``old``'s tree (the empty tree when the
+    branch was unborn) onto ``new``'s, keeping what the operator staged, only
+    if HEAD still names ``ref`` and ``ref`` holds ``new``.
+
+    The move is git's two-tree merge, ``git read-tree -m -i <old> <new>``,
+    run on the real index under git's own index lock. It is index-only
+    (``-i``): the work tree is neither read nor written, as the commit was
+    staged from it already. A path the commit did not
+    change keeps its index entry (staged content, a staged deletion, a
+    staged new file and its flags), and a path the commit changed takes the
+    new content only where the index still held the old head's. When a
+    staged entry conflicts with the commit, the index has unmerged entries,
+    or anything else fails, git refuses the whole merge and the real index
+    is left exactly as it was. Never a plain ``read-tree <new>``, which
+    would drop every staged entry. Best effort: True when the merge ran."""
     head = _git(export_dir, "symbolic-ref", "-q", "HEAD")
     if head.returncode != 0 or _line(head.stdout) != os.fsencode(ref):
         return False
     tip = _git(export_dir, "rev-parse", "--verify", "--quiet", "--end-of-options", ref)
     if tip.returncode != 0 or _line(tip.stdout) != new.encode("ascii"):
         return False
-    return _git(export_dir, "read-tree", new).returncode == 0
+    base = old
+    if base is None:
+        # The empty tree's id in this repository's hash, computed and not
+        # written.
+        empty = _git(export_dir, "hash-object", "-t", "tree", "--stdin", input=b"")
+        if empty.returncode != 0:
+            return False
+        base = _line(empty.stdout).decode("ascii", "replace")
+    return _git(export_dir, "read-tree", "-m", "-i", base, new).returncode == 0
 
 
 def _remove_private_dir(path: str) -> None:
@@ -1980,8 +2128,10 @@ def commit_export(export_dir: Path, message: str = "ledger export") -> CommitRes
     rule; the commit's parent is the old head. Only the pinned branch moves,
     by a compare-and-swap from the old head, and only if HEAD names it when
     checked. Every refusal leaves HEAD, every ref and the real index as they
-    were. After the swap the real index is set to the new tree, best effort
-    (``index_refreshed``)."""
+    were. After the swap the real index is merged from the old head's tree
+    onto the new one (``_refresh_index``), best effort (``index_refreshed``):
+    whatever the operator had staged stays staged with the same content, and
+    when git cannot merge it safely the real index is left untouched."""
     export_dir = assert_export_repo(export_dir)
     step = "commit"
     branch = _pin_branch(export_dir, step)
@@ -2002,7 +2152,9 @@ def commit_export(export_dir: Path, message: str = "ledger export") -> CommitRes
     if new is None:
         return CommitResult(sha=None, pushed=False, index_refreshed=False)
     _swap(export_dir, step, ref, new, old, zero)
-    return CommitResult(sha=new, pushed=False, index_refreshed=_refresh_index(export_dir, ref, new))
+    return CommitResult(
+        sha=new, pushed=False, index_refreshed=_refresh_index(export_dir, ref, old, new)
+    )
 
 
 def _commit_tree(

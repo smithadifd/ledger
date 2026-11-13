@@ -718,16 +718,24 @@ Write events after the watermark as canonical JSON files. `--commit` scans,
 then makes one git commit in `DIR`, and never pushes; `--push` scans the
 branch's whole history, then pushes its commit; `--check` reports the lag
 and exits 3 when it is over the limits (100 events, 24 hours).
-Before any event file is written, every pending document is scanned for the
-credential shapes `doc add` refuses. A document holding one without the
-`credential_override` marker refuses the whole export
-`export_doc_credential` (exit 3), naming the event, its item and the shapes:
-nothing is written, the watermark does not move, and `--commit` does not
-run. A document attached with `--allow-credential-shapes` is exported. A
-by-path document's event file carries its stored path, sha256 and size and
-no bytes, so export never opens a document file; it scans the stored path
-instead, and an unmarked hit there refuses `export_doc_credential` the same
-way, naming the shapes as in the path and never the path.
+Before any event file is written, every pending event, of every kind, is
+scanned for the credential shapes `doc add` refuses: every text field the
+event file holds (a note's text, an item's title, a spec's title, body and
+acceptance, a claim's owner, a reason, a source, a document's title, the
+attribution fields and every other string or key in the payload), and a
+document's bytes. An event holding one refuses the whole export
+`export_doc_credential` (exit 3), naming the event, its item, the field and
+the shapes, never the text: nothing is written, the watermark does not
+move, and `--commit` does not run. A value the scan cannot read (text that
+is not UTF-8) is refused the same way. Only a document attached with
+`--allow-credential-shapes` (marked `credential_override: true`) is
+exported with a shape in it; the marker on any other event changes nothing.
+The ledger never removes an event, so an event refused here keeps refusing
+every later export. A by-path document's event file carries its stored
+path, sha256 and size and no bytes, so export never opens a document file;
+it scans the stored path instead, and an unmarked hit there refuses
+`export_doc_credential` the same way, naming the shapes as in the path and
+never the path.
 
 The guard guarantees that every byte the ledger's own commit and push send
 is reachable from a pinned commit whose full history passed the scan; it
@@ -740,17 +748,22 @@ repository's own, and scans the exact tree it will commit before it makes
 the commit. The temporary index does not carry skip-worktree bits from the
 repository index, so a skip-worktree file is staged from the work tree as
 it is on disk, not omitted. A file at an event name (sixteen digits and `.json`, at any
-depth) must be the canonical bytes of a valid event record, and its
-`doc.attached` document gets the same scan as at export; every other file,
+depth) must be the canonical bytes of a valid event record, and the event
+gets the same scan as at export, whatever its kind; every other file,
 every path name and the commit message are scanned for the credential
 shapes, with no override. The commit's parent is the head the step read,
 and only that branch moves, only if it still holds that head; the commit is
 also refused if HEAD no longer names that branch when checked. A refusal
 (codes below) commits nothing and leaves HEAD and the index as they were.
-After a commit the index is set to the new commit's tree when HEAD still
-names the branch, and the result's `index_refreshed` says whether that ran;
-when it did not, the text line ends with a warning, and `git read-tree HEAD`
-in the export directory sets the index. `--commit` signs its commit when
+After a commit, when HEAD still names the branch, the repository's index is
+merged from the old head onto the new commit (`git read-tree -m -i`): paths
+the commit changed take its content, and anything you had staged stays
+staged with the same content. When git cannot merge it safely (something
+staged at a path the commit also changed, for example), the index is left
+exactly as it was. The result's `index_refreshed` says whether the merge
+ran; when it did not, the text line ends with a warning, and `git status`
+in the export directory shows what is staged against the new commit.
+`--commit` signs its commit when
 `commit.gpgSign` is true, as `git commit` would, and refuses
 `export_commit_sign_failed` when signing fails.
 
@@ -785,7 +798,7 @@ Refusal codes of the export, commit and push steps, each exit 3:
 - `export_push_multiple_urls`: the push remote has more than one push destination when counted before the scan (push).
 - `export_repo_shallow`: the export repository is shallow (push).
 - `export_history_incomplete`: a listed commit's object names a parent that the history listing does not hold (push).
-- `export_doc_credential`: a valid `doc.attached` record holds an unmarked credential shape or undecodable bytes (export, commit, push).
+- `export_doc_credential`: an event's text fields hold a credential shape or cannot be scanned, or a `doc.attached` document's bytes or stored path hold one or cannot be scanned, and the event is not a `doc.attached` marked `credential_override: true` (export, commit, push).
 - `export_file_credential`: a credential shape in a file that is not at an event name, in a path name or in a commit object (commit, push).
 - `export_event_invalid`: a file at an event name is not the canonical bytes of a valid event record (commit, push).
 - `export_object_unreadable`: a missing object, a wrong object type, a submodule (gitlink), or a branch that does not hold a commit (commit, push).

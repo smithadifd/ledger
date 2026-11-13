@@ -111,8 +111,11 @@ export` refuses to write one (`export_doc_credential`), so an unmarked one
 never enters the store or an export file. A by-path document's event holds
 no bytes, so restore, replay and export scan its stored path and open no
 file. A hit in a stored path is named by its shape and said to be in the
-path; the path itself is not shown. A `--title`, like other text fields, is
-not scanned.
+path; the path itself is not shown. `doc add` does not scan a `--title`,
+like other text fields, but `ledger export` scans the text fields of every
+event, a document's title included, and refuses one holding a shape
+whatever its kind; only a document marked `credential_override: true` is
+exported with a shape in it.
 `export --commit` scans the exact tree it commits, and `export --push` scans
 the whole history it pushes, with the same rule (see `export` in
 [cli.md](cli.md)). The scan is a tripwire for common shapes, not a secret

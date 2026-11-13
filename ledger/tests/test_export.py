@@ -8,7 +8,11 @@ the branch's push remote.
 
 Tests are named for the design's T1 to T43 (T40 lives in the repository's
 docs test); T44 to T46 cover review findings on the push certificate,
-deeply nested event files and a branch name that is not UTF-8.
+deeply nested event files and a branch name that is not UTF-8. T47 to T49
+pin that the commit keeps what the operator staged in the export
+repository's own index, and T50 to T56 that the event scan covers the free
+text of every event kind, with ``credential_override`` honoured on
+``doc.attached`` only.
 Credential samples are assembled at run time
 (``test_credscan.SAMPLES``), so no complete shape appears in this file.
 Remotes are local bare repositories. Every git command here, the test's own
@@ -55,6 +59,8 @@ from ledger.export import (
     export_events,
     hash_body,
     push_export,
+    refuse_unmarked_credentials,
+    unmarked_credential_reason,
 )
 from ledger.store import Event, canonical_dumps, event_digest, open_ledger
 
@@ -1190,3 +1196,286 @@ def test_git_output_holding_a_shape_is_withheld(db, tmp_path):
     message = str(caught.value)
     assert "git output withheld: it holds a credential shape (openai-key)" in message
     assert_no_sample(message)
+
+
+# ---- the real index keeps what the operator staged -------------------------------
+
+
+def staged(repo: Path, rel: str) -> bytes:
+    """The bytes the real index holds at ``rel``."""
+    return git(repo, "show", f":{rel}").stdout
+
+
+def test_t47_staged_content_survives_the_commit_and_the_push(db, tmp_path, monkeypatch):
+    repo = committed_repo(tmp_path, db)
+    hand_commit(repo, "operator files", {"notes.txt": b"base\n", "keep.txt": b"keep\n"})
+    # Staged only: the index holds content the work tree and HEAD do not,
+    # and a staged deletion of a file still on disk.
+    (repo / "notes.txt").write_bytes(b"staged-only\n")
+    git(repo, "add", "notes.txt")
+    (repo / "notes.txt").write_bytes(b"base\n")
+    git(repo, "rm", "-q", "--cached", "keep.txt")
+    assert staged(repo, "notes.txt") == b"staged-only\n"
+    seed(monkeypatch, db, "it-2")
+    export(db, repo)
+
+    result = commit_export(repo)
+    assert result.sha is not None and ref(repo) == result.sha
+    assert result.index_refreshed is True
+    assert staged(repo, "notes.txt") == b"staged-only\n"
+    assert "keep.txt" not in out(repo, "ls-files").splitlines()
+    # The paths the commit changed are in the index at the new content.
+    changed = out(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", result.sha)
+    for rel in changed.splitlines():
+        assert staged(repo, rel) == (repo / rel).read_bytes(), rel
+    cached = git(repo, "diff", "--cached", "--name-status").stdout.decode()
+    assert cached.splitlines() == ["D\tkeep.txt", "M\tnotes.txt"]
+
+    index_before = (repo / ".git" / "index").read_bytes()
+    remote = with_remote(repo, bare(tmp_path / "remote.git"))
+    pushed = push_export(repo)
+    assert remote_refs(remote) == {"refs/heads/main": pushed.sha}
+    assert (repo / ".git" / "index").read_bytes() == index_before
+    assert staged(repo, "notes.txt") == b"staged-only\n"
+
+
+def test_t48_staged_content_on_a_path_the_commit_changes_leaves_the_index_alone(
+    db, tmp_path, monkeypatch
+):
+    repo = committed_repo(tmp_path, db)
+    # The operator stages other content at a path the next export rewrites,
+    # and the work tree keeps the export's own file.
+    on_disk = (repo / "watermark.json").read_bytes()
+    (repo / "watermark.json").write_bytes(b"operator\n")
+    git(repo, "add", "watermark.json")
+    (repo / "watermark.json").write_bytes(on_disk)
+    seed(monkeypatch, db, "it-2")
+    export(db, repo)
+    index_before = (repo / ".git" / "index").read_bytes()
+
+    result = commit_export(repo)
+    assert result.sha is not None and ref(repo) == result.sha
+    assert result.index_refreshed is False
+    assert (repo / ".git" / "index").read_bytes() == index_before
+    assert staged(repo, "watermark.json") == b"operator\n"
+
+
+def test_t49_an_unborn_branch_with_staged_content_leaves_the_index_alone(db, tmp_path):
+    repo = exported_repo(tmp_path, db)
+    (repo / "notes.txt").write_bytes(b"staged-only\n")
+    git(repo, "add", "notes.txt")
+    (repo / "notes.txt").write_bytes(b"work\n")
+    index_before = (repo / ".git" / "index").read_bytes()
+
+    result = commit_export(repo)
+    assert result.sha is not None and ref(repo) == result.sha
+    assert result.index_refreshed is False
+    assert (repo / ".git" / "index").read_bytes() == index_before
+    assert staged(repo, "notes.txt") == b"staged-only\n"
+
+
+# ---- every event kind's free text is scanned ---------------------------------------
+
+
+def hand_event(
+    event_id: int, kind: str, payload: dict, *, item_id: str | None = ITEM
+) -> Event:
+    """An event record of any kind built by hand with its hash computed."""
+    event = Event(
+        id=event_id, kind=kind, payload_version=1, payload=payload,
+        item_id=item_id, idempotency_key=f"hand-{event_id}", actor=None, harness="pytest",
+        model=None, session=None, channel=None, provenance_class=None,
+        recorded_at="2026-01-01T00:00:00.000Z", prev_hash="0" * 64, hash="",
+    )
+    return rehash(event)
+
+
+def _doc_with_title(event_id: int, title: str) -> Event:
+    event = doc_event(event_id, b"clean bytes\n")
+    return rehash(dataclasses.replace(event, payload={**event.payload, "title": title}))
+
+
+# Each holds the sample in one free-text field, and nothing else does.
+FREE_TEXT_CASES = {
+    "item.note": (
+        lambda: hand_event(HAND_ID, "item.note", {"text": f"see {SAMPLE_TEXT} here"}),
+        "payload.text",
+    ),
+    "item.created": (
+        lambda: hand_event(
+            HAND_ID, "item.created", {"type": "ticket", "title": f"t {SAMPLE_TEXT}"}
+        ),
+        "payload.title",
+    ),
+    "item.state-owner": (
+        lambda: hand_event(HAND_ID, "item.state", {"status": "claimed", "owner": SAMPLE_TEXT}),
+        "payload.owner",
+    ),
+    "item.spec-body": (
+        lambda: hand_event(
+            HAND_ID, "item.spec",
+            {"version": 1, "title": "t", "body_md": f"body\n{SAMPLE_TEXT}\n",
+             "content_hash": "0" * 64},
+        ),
+        "payload.body_md",
+    ),
+    "doc.attached-title": (lambda: _doc_with_title(HAND_ID, f"t {SAMPLE_TEXT}"), "payload.title"),
+}
+
+
+def assert_free_text_refusal(message: str, field: str) -> None:
+    assert "export_doc_credential" in message
+    assert f"event {HAND_ID}" in message
+    assert f"openai-key in {field}" in message
+    assert_no_sample(message)
+
+
+@pytest.mark.parametrize("case", sorted(FREE_TEXT_CASES))
+def test_t50_free_text_holding_a_shape_refuses_the_commit(db, tmp_path, case):
+    build, field = FREE_TEXT_CASES[case]
+    repo = committed_repo(tmp_path, db)
+    (repo / EVENT_NAME).write_bytes(record_bytes(build()))
+    before = snapshot(repo)
+    with pytest.raises(ExportDocCredential) as caught:
+        commit_export(repo)
+    assert caught.value.code == "export_doc_credential"
+    assert_free_text_refusal(str(caught.value), field)
+    assert snapshot(repo) == before
+
+
+@pytest.mark.parametrize("case", sorted(FREE_TEXT_CASES))
+def test_t51_free_text_holding_a_shape_refuses_the_push(db, tmp_path, case):
+    build, field = FREE_TEXT_CASES[case]
+    repo = committed_repo(tmp_path, db)
+    old = hand_commit(repo, "add event", {EVENT_NAME: record_bytes(build())})
+    hand_commit(repo, "remove event", {EVENT_NAME: None})
+    remote = with_remote(repo, bare(tmp_path / "remote.git"))
+    with pytest.raises(ExportDocCredential) as caught:
+        push_export(repo)
+    message = str(caught.value)
+    assert f"commit {old}: {EVENT_NAME}: event {HAND_ID}" in message
+    assert_free_text_refusal(message, field)
+    assert remote_refs(remote) == {}
+
+
+@pytest.mark.parametrize("verb", ["note", "new"])
+def test_t52_a_stored_event_holding_a_shape_refuses_export_and_commit(
+    db, tmp_path, monkeypatch, verb
+):
+    if verb == "note":
+        argv = ["--db", db, "note", ITEM, f"see {SAMPLE_TEXT} here"]
+        field = "payload.text"
+    else:
+        argv = ["--db", db, "new", "--id", "it-9", "--type", "ticket",
+                "--title", f"t {SAMPLE_TEXT}"]
+        field = "payload.title"
+    code, _out, err = invoke(monkeypatch, argv)
+    assert code == 0, err
+    repo = init_repo(tmp_path / "export")
+    text, as_json = cli(monkeypatch, "--db", db, "export", "--dir", str(repo), "--commit")
+    assert text[0] == 3 and "export_doc_credential" in text[2]
+    assert f"openai-key in {field}" in text[2]
+    envelope = json.loads(as_json[1])
+    assert as_json[0] == 3 and envelope["error"]["code"] == "export_doc_credential"
+    assert_no_sample(*text[1:], *as_json[1:])
+    assert sorted(os.listdir(repo)) == [".git"], "an event file was written"
+    assert ref(repo) is None
+    with open_ledger(db, create=False) as lg:
+        with pytest.raises(ExportDocCredential):
+            export_events(lg, repo)
+    assert sorted(os.listdir(repo)) == [".git"]
+
+
+def test_t53_an_override_marked_document_holding_a_shape_commits_and_pushes(db, tmp_path):
+    repo = committed_repo(tmp_path, db)
+    marked = doc_event(HAND_ID, wrap(SAMPLE), override=True)
+    marked = rehash(
+        dataclasses.replace(marked, payload={**marked.payload, "title": f"t {SAMPLE_TEXT}"})
+    )
+    assert unmarked_credential_reason(marked) is None
+    (repo / EVENT_NAME).write_bytes(record_bytes(marked))
+    result = commit_export(repo)
+    assert result.sha is not None and ref(repo) == result.sha
+    remote = with_remote(repo, bare(tmp_path / "remote.git"))
+    pushed = push_export(repo)
+    assert remote_refs(remote) == {"refs/heads/main": pushed.sha}
+
+
+class _Events:
+    """A ledger stand-in for ``export_events``: it hands over the given events."""
+
+    def __init__(self, events: list[Event]):
+        self._events = events
+
+    def events(self, after_id: int = 0) -> list[Event]:
+        return [event for event in self._events if event.id > after_id]
+
+
+def test_t54_credential_override_on_any_other_kind_changes_nothing(tmp_path):
+    marked_note = hand_event(
+        HAND_ID, "item.note", {"text": f"see {SAMPLE_TEXT}", "credential_override": True}
+    )
+    reason = unmarked_credential_reason(marked_note)
+    assert reason is not None
+    assert "openai-key in payload.text" in reason
+    assert "credential_override is honoured on doc.attached events only" in reason
+    target = tmp_path / "export"
+    with pytest.raises(ExportDocCredential) as caught:
+        export_events(_Events([marked_note]), target)
+    assert_no_sample(str(caught.value))
+    assert sorted(os.listdir(target)) == [], "an export file was written"
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["unknown-kind", "nested", "key", "surrogate", "not-json", "item-id", "attribution"],
+)
+def test_t55_every_string_of_every_kind_is_scanned_and_unreadable_values_refuse(case):
+    if case == "unknown-kind":
+        event = hand_event(HAND_ID, "made.up", {"anything": f"x {SAMPLE_TEXT}"})
+        expected = "openai-key in payload.anything"
+    elif case == "nested":
+        event = hand_event(HAND_ID, "made.up", {"a": [{"b": ["ok", SAMPLE_TEXT]}]})
+        expected = "openai-key in payload.a[0].b[1]"
+    elif case == "key":
+        event = hand_event(HAND_ID, "made.up", {SAMPLE_TEXT: "value"})
+        expected = "openai-key in a key of payload; the key is not shown"
+    elif case == "surrogate":
+        # Replaced after hashing: the hash itself cannot encode a lone surrogate.
+        event = dataclasses.replace(
+            hand_event(HAND_ID, "item.note", {"text": "x"}),
+            payload={"text": "lone \ud800 surrogate"},
+        )
+        expected = "its payload.text is not UTF-8 text"
+    elif case == "not-json":
+        event = dataclasses.replace(
+            hand_event(HAND_ID, "item.note", {"text": "x"}), payload={"text": b"bytes"}
+        )
+        expected = "its payload.text holds a value that is not JSON"
+    elif case == "item-id":
+        event = hand_event(HAND_ID, "item.note", {"text": "x"}, item_id=f"it-{SAMPLE_TEXT}")
+        expected = "openai-key in item_id"
+    else:
+        event = dataclasses.replace(
+            hand_event(HAND_ID, "item.note", {"text": "x"}), actor=SAMPLE_TEXT
+        )
+        expected = "openai-key in actor"
+    reason = unmarked_credential_reason(event)
+    assert reason is not None and expected in reason, reason
+    with pytest.raises(ExportDocCredential) as caught:
+        refuse_unmarked_credentials([event])
+    message = str(caught.value)
+    assert expected in message
+    assert_no_sample(message)
+
+
+def test_t56_a_documents_base64_is_scanned_as_its_bytes_not_as_text():
+    # The base64 text itself has a token shape; the bytes it decodes to do not.
+    encoded = SAMPLES["aws-access-key"].decode("ascii")
+    body = base64.b64decode(encoded)
+    assert base64.b64encode(body).decode("ascii") == encoded
+    event = doc_event(HAND_ID, body)
+    assert event.payload["content_b64"] == encoded
+    assert unmarked_credential_reason(event) is None
+    clean_note = hand_event(HAND_ID, "item.note", {"text": "nothing to see"})
+    assert unmarked_credential_reason(clean_note) is None

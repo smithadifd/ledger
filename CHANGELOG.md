@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.1 — 2026-11-13
+
+Two fixes to `ledger export --commit` and `--push`: committing no longer throws away what you staged in the export repository, and the credential scan now covers the text of every event, not only attached documents.
+
+- **`export --commit` keeps what you staged in the export repository.** 0.2.0 set the repository's index to the new commit's tree after every commit, which silently dropped anything you had staged there (a staged edit came back as the committed content, and the repository looked clean). The commit step now merges the index from the old head onto the new commit, as `git read-tree -m -i` does: paths the export changed take the new content, and every staged change, staged deletion and staged new file stays staged with the same content. When something staged sits on a path the commit also changed, the index is left exactly as it was and `index_refreshed` is false; the warning now points at `git status` rather than a command that would drop staged changes. `export --push` never touches the index.
+- **The export credential scan covers every event's text.** 0.2.0 scanned only `doc.attached` documents, so a credential pasted into a note, an item or spec title, a spec body, a claim owner or any other text field passed `export`, `export --commit` and `export --push` and could reach the remote. Every event kind is now scanned: every text field and key the event file holds, plus a document's bytes or stored path. A hit refuses with the existing `export_doc_credential` (exit 3), naming the event, its item, the field and the shapes, never the text; nothing is written, committed or pushed. Text the scan cannot read (not UTF-8) is refused the same way. `credential_override: true` still lets an attached document through, and only that: it changes nothing on any other event. The ledger never removes an event, so a refused event keeps refusing later exports, and an export repository whose history already holds such an event file refuses `--push` until that file is removed from its history with git (rotate the credential if it was pushed before).
+
+**Upgrading from 0.2.0.** There is no schema change and no migration. If you run a scheduled export, run `ledger export --dir DIR --commit` and then `--push` once by hand after upgrading, before the next scheduled run: an event already in the ledger, or already committed in the export repository, whose text holds a credential shape is now refused by name where 0.2.0 exported and pushed it.
+
+Upgrade with `@v0.2.1`.
+
 ## 0.2.0 — 2026-11-13
 
 The repository is now a Claude Code plugin marketplace, `ledger-plugins`, whose one plugin, `ledger-hooks`, prints the ledger's session brief and records prompts and question-picker answers; the release also adds `ledger claim-system`, `export-item --ticket` for a ledger-born ticket and `spec set --expect-revision`, and `export-item --ticket` now takes the also-at locator only from a keyed note.
