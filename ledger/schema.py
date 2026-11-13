@@ -688,9 +688,8 @@ ASK_CONTROL_CHARACTER = "ask_control_character"
 
 # Text a picker displays, per kind, as (field, is the question body). Only
 # the question body may hold a newline (a long question can run to several
-# lines, and a line feed alone cannot move the cursor back over text) or a
-# space other than U+0020 between its words. The header is ``ask K``, built
-# from the event id, so no payload field holds it.
+# lines, and a line feed alone cannot move the cursor back over text). The
+# header is ``ask K``, built from the event id, so no payload field holds it.
 _DISPLAYED_TEXT: dict[str, tuple[tuple[str, bool], ...]] = {
     "decision.asked": (("question", True), ("question_id", False), ("scope", False)),
     "decision.elected": (
@@ -702,13 +701,56 @@ _DISPLAYED_TEXT: dict[str, tuple[tuple[str, bool], ...]] = {
     ),
 }
 
+# The displayed text rule reads three Unicode tables written out below, because
+# Python's unicodedata has none of their properties: WHITE_SPACE_CODE_POINTS,
+# BLANK_CODE_POINTS and DEFAULT_IGNORABLE_RANGES. Each holds the Unicode
+# 16.0.0 data, and the rule reads it the same way on every interpreter whose
+# database UNICODE_TABLE_VERSIONS names (Python 3.11 carries 14.0.0, 3.12
+# 15.0.0, 3.13 15.1.0 and 3.14 16.0.0): a code point a table holds is decided
+# by the table, never by that interpreter's own database.
+#
+# Update rule: test_ask_display_text_rule.py fails on an interpreter whose
+# unicodedata.unidata_version is not in UNICODE_TABLE_VERSIONS. On a Unicode
+# version bump, run
+#     python3 -m pytest -q -p no:cacheprovider ledger/tests/test_ask_display_text_rule.py -k unicode_table
+# on the new interpreter. Then re-derive each table from that version's
+# Unicode Character Database (https://www.unicode.org/Public/<version>/ucd/):
+# White_Space from PropList.txt, Default_Ignorable_Code_Point from
+# DerivedCoreProperties.txt, and the blank table from UnicodeData.txt as the
+# comment on BLANK_CODE_POINTS says (the test prints every BLANK or FILLER
+# name it does not know). Update a table, the literal copy the test pins it
+# to, and the version list together.
+UNICODE_TABLE_VERSIONS = ("14.0.0", "15.0.0", "15.1.0", "16.0.0")
+
+# Unicode White_Space (PropList.txt): the 25 code points the property names,
+# the same in every version from 6.3.0 (which took U+180E out) to 16.0.0.
+# str.isspace() is another set (it adds U+001C-U+001F), so the set is written
+# out, and every interpreter decides these code points from this table, never
+# from its own database. Displayed text holds none of them but U+0020 (and a
+# newline inside the question).
+WHITE_SPACE_CODE_POINTS = frozenset({
+    0x0009, 0x000A, 0x000B, 0x000C, 0x000D, 0x0020, 0x0085, 0x00A0, 0x1680,
+    0x2000, 0x2001, 0x2002, 0x2003, 0x2004, 0x2005, 0x2006, 0x2007, 0x2008,
+    0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
+})
+
+# Code points that render as blank space but are not White_Space. Source: the
+# characters whose name in UnicodeData.txt holds the word BLANK or FILLER,
+# less the ones whose glyph is a visible mark: U+2422 BLANK SYMBOL and the
+# scribal gap and line fillers (U+A8F9, U+10AF6, U+1144E, U+11945, U+11F48).
+# That leaves the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0 (default
+# ignorable too), U+2800 BRAILLE PATTERN BLANK, U+13441 EGYPTIAN HIEROGLYPH
+# FULL BLANK and U+13442 EGYPTIAN HIEROGLYPH HALF BLANK (which Unicode says
+# are rendered as whitespace), and U+16FE4 KHITAN SMALL SCRIPT FILLER (it
+# marks an empty place in a Khitan cluster and draws nothing).
+BLANK_CODE_POINTS = frozenset({
+    0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0, 0x13441, 0x13442, 0x16FE4,
+})
+
 # Unicode Default_Ignorable_Code_Point (DerivedCoreProperties.txt) as
 # inclusive ranges: code points a renderer may draw as nothing, so text that
-# holds one looks the same as text without it. Python's unicodedata has no
-# such property, so the list is written out. It is the same list in Unicode
-# 14.0, 15.0, 15.1 and 16.0, the databases DEFAULT_IGNORABLE_UNICODE_VERSIONS
-# names; a test fails when Python carries another database, so a new one is
-# read against this list before it is trusted.
+# holds one looks the same as text without it. It is the same list in
+# Unicode 14.0.0 to 16.0.0.
 DEFAULT_IGNORABLE_RANGES: tuple[tuple[int, int], ...] = (
     (0x00AD, 0x00AD),
     (0x034F, 0x034F),
@@ -728,11 +770,6 @@ DEFAULT_IGNORABLE_RANGES: tuple[tuple[int, int], ...] = (
     (0x1D173, 0x1D17A),
     (0xE0000, 0xE0FFF),
 )
-DEFAULT_IGNORABLE_UNICODE_VERSIONS = ("14.0.0", "15.0.0", "15.1.0", "16.0.0")
-# Code points that render as blank space but are no space character:
-# U+2800 BRAILLE PATTERN BLANK (category So) and the Hangul fillers (Lo),
-# which are default ignorable too. One table, so it is tested whole.
-BLANK_CODE_POINTS = frozenset({0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0})
 _COMBINING_MARKS = ("Mn", "Mc", "Me")
 
 
@@ -762,28 +799,41 @@ def _default_ignorable(code: int) -> bool:
     return any(low <= code <= high for low, high in DEFAULT_IGNORABLE_RANGES)
 
 
+def _white_space_class(code: int) -> str:
+    """The class named for a White_Space code point, from the code point
+    alone, so it is the same on every interpreter."""
+    if code in (0x2028, 0x2029):
+        return "a line or paragraph separator"
+    if code <= 0x000D or code == 0x0085:
+        return "a control character"
+    return "a space other than U+0020"
+
+
 def _refused_code_point(char: str, *, question: bool) -> str | None:
     """The class that refuses ``char`` anywhere in displayed text, else
-    None. A category this rule does not name is refused, never let through."""
+    None. The two pinned tables decide first, so a White_Space or blank code
+    point gets one answer on every interpreter whatever its database holds;
+    a category this rule does not name is refused, never let through."""
+    code = ord(char)
+    if char == " " or (question and char == "\n"):
+        return None
+    if code in WHITE_SPACE_CODE_POINTS:
+        return _white_space_class(code)
+    if code in BLANK_CODE_POINTS:
+        return "a blank character"
     category = unicodedata.category(char)
     if category == "Cc":
-        return None if question and char == "\n" else "a control character"
+        return "a control character"
     if category == "Cf":
         return "a format character"
-    if category in ("Zl", "Zp"):
-        return "a line or paragraph separator"
     if category == "Cs":
         return "a surrogate"
     if category == "Co":
         return "a private-use character"
     if category == "Cn":
         return "an unassigned character"
-    if _default_ignorable(ord(char)):
+    if _default_ignorable(code):
         return "an invisible character"
-    if ord(char) in BLANK_CODE_POINTS:
-        return "a blank character"
-    if category == "Zs":
-        return None if question or char == " " else "a space other than U+0020"
     if category[:1] not in ("L", "M", "N", "P", "S"):
         return "a character of unknown category"
     return None
@@ -813,19 +863,20 @@ def display_text_problem(text: str, *, question: bool = False) -> tuple[str, str
     picker as it is stored, else None. ``question`` is True for the question
     body only.
 
-    Displayed text holds no code point of category Cc (a newline is allowed
-    in the question), Cf (the bidi embeddings, overrides and isolates, the
-    zero-width space and joiners), Zl, Zp, Cs, Co or Cn; no
-    Default_Ignorable_Code_Point (DEFAULT_IGNORABLE_RANGES, which adds the
-    variation selectors such as U+FE0F, U+034F and the Hangul fillers); and
-    no blank (BLANK_CODE_POINTS, so U+2800). There is no emoji exception:
-    U+200D and U+FE0F are refused in the question too. Outside the question
-    no space other than U+0020 is allowed. It does not start or end with
-    whitespace (any Z* code point, a tab or a newline), does not start with
-    a combining mark, and is NFC, so one visible string has one stored
-    spelling. The class is a phrase for a message (``a format character``,
-    ``an invisible character``, ``text that is not NFC``); the code point is
-    written as ``U+XXXX`` so a message that names it never carries it.
+    Displayed text holds no White_Space code point but U+0020
+    (WHITE_SPACE_CODE_POINTS; a newline is allowed inside the question), no
+    blank (BLANK_CODE_POINTS: U+2800, the Hangul fillers, the Egyptian
+    hieroglyph blanks and the Khitan filler), no code point of category Cc,
+    Cf (the bidi embeddings, overrides and isolates, the zero-width space and
+    joiners), Cs, Co or Cn, and no Default_Ignorable_Code_Point
+    (DEFAULT_IGNORABLE_RANGES, which adds the variation selectors such as
+    U+FE0F and U+034F). There is no emoji exception: U+200D and U+FE0F are
+    refused in the question too. It does not start or end with whitespace
+    (any Z* code point, a tab or a newline), does not start with a combining
+    mark, and is NFC, so one visible string has one stored spelling. The
+    class is a phrase for a message (``a format character``, ``an invisible
+    character``, ``text that is not NFC``); the code point is written as
+    ``U+XXXX`` so a message that names it never carries it.
     """
     for char in text:
         found = _refused_code_point(char, question=question)

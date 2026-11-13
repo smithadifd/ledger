@@ -96,13 +96,16 @@ label and description, and the answer binds to exactly that text, so what is
 shown must be what is stored. None of it may hold a control character (C0
 U+0000-U+001F, which includes ESC and so every ANSI escape; DEL U+007F; C1
 U+0080-U+009F), a format character (Unicode Cf: the bidi embeddings,
-overrides and isolates, the zero-width space and joiners), a line or
-paragraph separator (U+2028, U+2029), a surrogate, private-use or unassigned
-code point, a default-ignorable code point (which adds the variation
-selectors such as U+FE0F, U+034F and the Hangul fillers), or U+2800 BRAILLE
-PATTERN BLANK. Each must be in Unicode NFC, must not start with a combining
-mark, and must not start or end with whitespace; only the question may hold
-a space other than U+0020. Such an ask is refused when you write it
+overrides and isolates, the zero-width space and joiners), a surrogate,
+private-use or unassigned code point, a default-ignorable code point (which
+adds the variation selectors such as U+FE0F and U+034F), a White_Space
+character other than U+0020 (so no other space, no line or paragraph
+separator and no tab), or a blank: U+2800 BRAILLE PATTERN BLANK, the Hangul
+fillers (U+115F, U+1160, U+3164, U+FFA0), U+13441 EGYPTIAN HIEROGLYPH FULL
+BLANK, U+13442 EGYPTIAN HIEROGLYPH HALF BLANK and U+16FE4 KHITAN SMALL SCRIPT
+FILLER. Each must be in Unicode NFC, must not start with a combining mark,
+and must not start or end with whitespace. Such an ask is refused when you
+write it
 (`ask_control_character:<field>`, the one reason for every class, naming
 the field, for example `ask_control_character:question_id`); the one
 exception is a newline (U+000A) inside the question text, which a long
@@ -113,10 +116,29 @@ question, but a joined emoji (code points joined by U+200D, such as a family
 emoji) or an emoji followed by U+FE0F is refused, so write one emoji code
 point or words instead. An ask stored before this rule that holds one reads
 `ask_not_pickable` (the reason names the field, the class, such as "control
-character" or "invisible character", and the code point), and no pick,
+character", "invisible character" or "blank character", and the code
+point), and no pick,
 election or grant binds through it. The same text in an election is refused
 the same way. The rule refuses; it never strips, escapes or normalizes, so
 write the ask again without the character.
+
+The White_Space and blank lists are written out in `ledger/schema.py`
+(`WHITE_SPACE_CODE_POINTS` and `BLANK_CODE_POINTS`, beside
+`DEFAULT_IGNORABLE_RANGES`) instead of being read from the interpreter's
+Unicode database, so every supported Python decides those characters the
+same way. Their source is the Unicode Character Database, version 16.0.0:
+White_Space is the property in PropList.txt (the same 25 code points since
+Unicode 6.3.0), and the blanks are the characters whose name in
+UnicodeData.txt holds the word BLANK or FILLER, less those drawn as a
+visible mark (U+2422 BLANK SYMBOL and the scribal gap and line fillers
+U+A8F9, U+10AF6, U+1144E, U+11945 and U+11F48). To update them on a Unicode
+version bump: on the new Python, `python3 -m pytest -q -p no:cacheprovider
+ledger/tests/test_ask_display_text_rule.py -k unicode_table` fails on the
+unlisted version and lists every BLANK or FILLER name the blank list does
+not know. Re-derive the lists from that version's PropList.txt,
+DerivedCoreProperties.txt (Default_Ignorable_Code_Point) and UnicodeData.txt,
+then change each list, its copy in that test and `UNICODE_TABLE_VERSIONS`
+together.
 
 A typed answer in the chat can still be recorded as evidence with
 `ledger elect`, quoting the harness's capture of that prompt, but no gate

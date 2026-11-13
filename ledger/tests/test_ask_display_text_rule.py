@@ -15,6 +15,12 @@ displayed field:
 
 There is no emoji exception: a joined emoji (U+200D) and U+FE0F are refused
 in the question too; a single emoji code point still passes.
+
+No field holds a White_Space code point other than U+0020 (a newline is
+allowed inside the question), or a code point of the pinned blank table
+(U+2800, the Hangul fillers, the Egyptian hieroglyph blanks U+13441 and
+U+13442, the Khitan filler U+16FE4). Both tables are written out and decide
+before any category, so every interpreter gives the same answer for them.
 """
 from __future__ import annotations
 
@@ -28,7 +34,8 @@ from ledger import schema
 from ledger.schema import (
     BLANK_CODE_POINTS,
     DEFAULT_IGNORABLE_RANGES,
-    DEFAULT_IGNORABLE_UNICODE_VERSIONS,
+    UNICODE_TABLE_VERSIONS,
+    WHITE_SPACE_CODE_POINTS,
     display_text_problem,
 )
 from test_ask_control_characters import seat_picker, write_legacy
@@ -64,6 +71,9 @@ RED_HEART = "❤️"
 # Round 3 design probe: a category-keyed emoji exception let this through.
 ROUND3_PROBE = "¦‍¦"
 GRINNING = "\U0001F600"
+# Round 1 pull request review: rendered as whitespace, and not White_Space.
+FULL_BLANK = "\U00013441"
+HALF_BLANK = "\U00013442"
 
 FORMAT = "a format character"
 SEPARATOR = "a line or paragraph separator"
@@ -107,7 +117,7 @@ CASES = [
     pytest.param("question_id", "grant:x️", INVISIBLE, "U+FE0F", id="id-fe0f"),
     pytest.param("question_id", "grant:x͏", INVISIBLE, "U+034F", id="id-cgj"),
     pytest.param("question_id", "grant:­x", FORMAT, "U+00AD", id="id-soft-hyphen"),
-    pytest.param("question_id", "grant:xㅤ", INVISIBLE, "U+3164", id="id-hangul-filler"),
+    pytest.param("question_id", "grant:xㅤ", BLANK, "U+3164", id="id-hangul-filler"),
     pytest.param("question_id", "grant:x￹", FORMAT, "U+FFF9", id="id-cf-not-ignorable"),
     pytest.param("question_id", "grant: x", SPACE, "U+00A0", id="id-nbsp-inside"),
     pytest.param("question_id", "grant:　x", SPACE, "U+3000", id="id-ideographic-space"),
@@ -135,6 +145,19 @@ CASES = [
                  id="question-braille-blank"),
     pytest.param("question", "Stand grant:x?\n", TRAILING, "U+000A",
                  id="question-trailing-newline"),
+    pytest.param("question_id", f"grant:x{FULL_BLANK}", BLANK, "U+13441",
+                 id="id-egyptian-full-blank"),
+    pytest.param("question_id", f"grant:x{HALF_BLANK}", BLANK, "U+13442",
+                 id="id-egyptian-half-blank"),
+    pytest.param("question_id", "grant:x\U00016FE4", BLANK, "U+16FE4", id="id-khitan-filler"),
+    pytest.param("scope", f"the grant{HALF_BLANK} only", BLANK, "U+13442",
+                 id="scope-egyptian-half-blank"),
+    pytest.param("options[0].label", f"{FULL_BLANK}granted", BLANK, "U+13441",
+                 id="label-egyptian-full-blank"),
+    pytest.param("question", "Stand grant:x?\u3000Now.", SPACE, "U+3000",
+                 id="question-ideographic-space-inside"),
+    pytest.param("question", "Stand grant:x?\u2007Now.", SPACE, "U+2007",
+                 id="question-figure-space-inside"),
 ]
 
 
@@ -242,6 +265,8 @@ def standing_attempt(monkeypatch, db: str, payload: dict) -> tuple[int, dict]:
     pytest.param("question_id", "grant:x️", id="round1-id-fe0f"),
     pytest.param("scope", "the grant only‍", id="round1-scope-zwj"),
     pytest.param("question_id", "grant:x⠀", id="round2-id-braille-blank"),
+    pytest.param("question_id", f"grant:x{FULL_BLANK}", id="pr-round1-id-egyptian-full-blank"),
+    pytest.param("question_id", f"grant:x{HALF_BLANK}", id="pr-round1-id-egyptian-half-blank"),
 ])
 def test_the_design_round_probes_no_longer_reach_standing(db, monkeypatch, field, value) -> None:
     code, env = standing_attempt(monkeypatch, db, grant_payload(field, value))
@@ -250,13 +275,133 @@ def test_the_design_round_probes_no_longer_reach_standing(db, monkeypatch, field
     assert code_name == "grant_unverified" and "(ask_not_pickable)" in message
 
 
+# Every displayed field of an ask, and the ones an election adds.
+ASK_FIELDS = ("question", "question_id", "scope", "options[0].label",
+              "options[1].description")
+ELECTION_FIELDS = ("chosen", "chosen_description", "rejected[0]")
+
+
+def at(where: str, char: str, text: str) -> str:
+    return {"start": char + text, "middle": text[:2] + char + text[2:],
+            "end": text + char}[where]
+
+
+@pytest.mark.parametrize("where", ["start", "middle", "end"])
+@pytest.mark.parametrize("blank", [FULL_BLANK, HALF_BLANK], ids=["full-blank", "half-blank"])
+@pytest.mark.parametrize("field", ASK_FIELDS)
+def test_an_egyptian_blank_in_any_ask_field_is_refused_at_write_by_name(
+        db, monkeypatch, field, blank, where) -> None:
+    plain = {"question": "Stand grant:x?", "question_id": "grant:x",
+             "scope": "the grant only", "options[0].label": "granted",
+             "options[1].description": "The grant is withdrawn"}[field]
+    payload = grant_payload(field, at(where, blank, plain))
+    code, env = append(monkeypatch, db, "decision.asked", payload)
+    assert code == 3, env
+    assert refusal(env) == ("validation", f"ask_control_character:{field}")
+    assert schema.display_control_character("decision.asked", payload) == (
+        field, BLANK, f"U+{ord(blank):04X}")
+    assert event_count(db, "decision.asked") == 0
+
+
+@pytest.mark.parametrize("where", ["start", "middle", "end"])
+@pytest.mark.parametrize("blank", [FULL_BLANK, HALF_BLANK], ids=["full-blank", "half-blank"])
+@pytest.mark.parametrize("field", ELECTION_FIELDS)
+def test_an_egyptian_blank_in_an_election_field_is_refused_at_write_by_name(
+        db, monkeypatch, field, blank, where) -> None:
+    asked = ask(monkeypatch, db)
+    capture_id = answer(monkeypatch, db, asked, "apply")
+    if field == "rejected[0]":
+        changes = {"rejected": [at(where, blank, "hold")]}
+    else:
+        changes = {field: at(where, blank, "apply it")}
+    code, env = append(monkeypatch, db, "decision.elected",
+                       forged(db, asked, capture_id, **changes))
+    assert code == 3
+    assert refusal(env) == ("validation", f"ask_control_character:{field}")
+    assert event_count(db, "decision.elected") == 0
+
+
+@pytest.mark.parametrize("where", ["start", "middle", "end"])
+@pytest.mark.parametrize("blank", [FULL_BLANK, HALF_BLANK], ids=["full-blank", "half-blank"])
+def test_an_egyptian_blank_grant_id_binds_neither_its_own_id_nor_the_visible_one(
+        db, monkeypatch, blank, where) -> None:
+    stored_id = {"start": f"{blank}grant:x", "middle": f"grant:{blank}x",
+                 "end": f"grant:x{blank}"}[where]
+    payload = grant_payload("question_id", stored_id)
+    code, env = standing_attempt(monkeypatch, db, payload)
+    assert code == 3
+    code_name, message = refusal(env)
+    if where == "start":
+        # No grant prefix, so no grant at all.
+        assert code_name == "grant_unknown"
+    else:
+        assert code_name == "grant_unverified" and "(ask_not_pickable)" in message
+    # The id the picker shows looks like grant:x; no ask ever named it.
+    code, env = grant_check(monkeypatch, db, "grant:x")
+    assert code == 3
+    assert refusal(env)[0] == "grant_unknown"
+
+
+def displayed_payload(kind: str, field: str, value: str) -> dict:
+    """A payload holding plain text in every displayed field of ``kind`` and
+    ``value`` in ``field``."""
+    if kind == "decision.asked":
+        payload = grant_payload("question_id", "grant:x")
+        return grant_payload(field, value) if field in ASK_FIELDS else payload
+    payload = {"question": "Stand grant:x?", "question_id": "grant:x",
+               "scope": "the grant only", "chosen": "granted",
+               "chosen_description": "The grant stands", "rejected": ["withdrawn"]}
+    if field == "rejected[0]":
+        payload["rejected"] = [value]
+    else:
+        payload[field] = value
+    return payload
+
+
+def white_space_class(code: int) -> str:
+    if code in (0x2028, 0x2029):
+        return SEPARATOR
+    if code <= 0x0D or code == 0x85:
+        return "a control character"
+    return SPACE
+
+
+@pytest.mark.parametrize("code", sorted(WHITE_SPACE_CODE_POINTS | BLANK_CODE_POINTS),
+                         ids=lambda code: f"U+{code:04X}")
+def test_unicode_table_every_white_space_and_blank_code_point_is_refused_at_write(
+        code) -> None:
+    char = chr(code)
+    walks = [("decision.asked", field) for field in ASK_FIELDS]
+    walks += [("decision.elected", field)
+              for field in ("question", "question_id", "scope", *ELECTION_FIELDS)]
+    for kind, field in walks:
+        for where in ("start", "middle", "end"):
+            payload = displayed_payload(kind, field, at(where, char, "go on"))
+            inside_ok = code == 0x20 or (code == 0x0A and field == "question")
+            if where == "middle" and inside_ok:
+                assert schema.display_control_character(kind, payload) is None
+                schema.refuse_display_control_characters(kind, payload)
+                continue
+            with pytest.raises(schema.ValidationError) as caught:
+                schema.refuse_display_control_characters(kind, payload)
+            assert caught.value.reason == f"ask_control_character:{field}"
+            if inside_ok:
+                problem = LEADING if where == "start" else TRAILING
+            elif code in BLANK_CODE_POINTS:
+                problem = BLANK
+            else:
+                problem = white_space_class(code)
+            assert schema.display_control_character(kind, payload) == (
+                field, problem, f"U+{code:04X}"), (kind, field, where)
+
+
 # --- what still passes --------------------------------------------------------
 
 
 @pytest.mark.parametrize("question", [
     pytest.param(f"Stand grant:x? {GRINNING}", id="single-emoji"),
     pytest.param("Stand grant:x? ❤", id="bare-heart"),
-    pytest.param("Stand grant:x?\nIt changes　the gate.", id="inner-spaces-newline"),
+    pytest.param("Stand grant:x?\nIt changes the gate.", id="inner-space-newline"),
 ])
 def test_a_question_with_a_single_emoji_or_inner_spaces_binds_and_the_grant_stands(
         db, monkeypatch, question) -> None:
@@ -305,15 +450,21 @@ def table_code_points() -> list[int]:
     return [code for low, high in DEFAULT_IGNORABLE_RANGES for code in range(low, high + 1)]
 
 
-def test_the_default_ignorable_table_is_pinned_to_the_unicode_database() -> None:
-    assert unicodedata.unidata_version in DEFAULT_IGNORABLE_UNICODE_VERSIONS
+def test_unicode_table_versions_name_this_interpreter_s_database() -> None:
+    # A new database is read against the three tables before it is added
+    # here (the update rule above WHITE_SPACE_CODE_POINTS in ledger/schema.py).
+    assert UNICODE_TABLE_VERSIONS == ("14.0.0", "15.0.0", "15.1.0", "16.0.0")
+    assert unicodedata.unidata_version in UNICODE_TABLE_VERSIONS
+
+
+def test_unicode_table_default_ignorable_is_pinned() -> None:
     assert DEFAULT_IGNORABLE_RANGES == DESIGN_TABLE
     for (_low, high), (next_low, _next_high) in zip(DEFAULT_IGNORABLE_RANGES,
                                                      DEFAULT_IGNORABLE_RANGES[1:]):
         assert high < next_low
 
 
-def test_the_table_holds_every_format_character_and_variation_selector_it_should() -> None:
+def test_unicode_table_default_ignorable_holds_every_format_and_selector() -> None:
     table = set(table_code_points())
     for code in range(0x110000):
         char = chr(code)
@@ -330,11 +481,54 @@ def test_every_table_code_point_is_refused_in_every_field(question) -> None:
         assert found is not None and found[1] == f"U+{code:04X}", f"U+{code:04X}"
 
 
-def test_every_blank_is_refused_and_the_braille_blank_is_named() -> None:
-    assert BLANK_CODE_POINTS == {0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0}
+# PropList.txt White_Space, the same 25 code points from Unicode 6.3.0 to
+# 16.0.0: U+0009..U+000D, U+0020, U+0085, U+00A0, U+1680, U+2000..U+200A,
+# U+2028, U+2029, U+202F, U+205F, U+3000.
+PROPLIST_WHITE_SPACE = (
+    set(range(0x0009, 0x000E)) | {0x0020, 0x0085, 0x00A0, 0x1680}
+    | set(range(0x2000, 0x200B)) | {0x2028, 0x2029, 0x202F, 0x205F, 0x3000}
+)
+# The blank table's source: names in UnicodeData.txt (16.0.0) that hold the
+# word BLANK or FILLER. The pinned blanks, and the ones whose glyph is a
+# visible mark, which the table leaves out.
+PINNED_BLANKS = {0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0, 0x13441, 0x13442, 0x16FE4}
+VISIBLE_BLANK_OR_FILLER = {0x2422, 0xA8F9, 0x10AF6, 0x1144E, 0x11945, 0x11F48}
+
+
+def test_unicode_table_white_space_is_the_proplist_set() -> None:
+    assert WHITE_SPACE_CODE_POINTS == PROPLIST_WHITE_SPACE
+    assert len(WHITE_SPACE_CODE_POINTS) == 25
+    # This interpreter agrees: str.isspace() is White_Space plus U+001C..U+001F,
+    # and every Z* code point it knows is White_Space.
+    spaces = {code for code in range(0x110000) if chr(code).isspace()}
+    assert spaces - set(range(0x001C, 0x0020)) == WHITE_SPACE_CODE_POINTS
+    separators = {code for code in range(0x110000)
+                  if unicodedata.category(chr(code)).startswith("Z")}
+    assert separators <= WHITE_SPACE_CODE_POINTS
+
+
+def test_unicode_table_blanks_are_the_names_holding_blank_or_filler() -> None:
+    assert BLANK_CODE_POINTS == PINNED_BLANKS
+    assert not BLANK_CODE_POINTS & WHITE_SPACE_CODE_POINTS
+    named = {code for code in range(0x110000)
+             if {"BLANK", "FILLER"} & set(unicodedata.name(chr(code), "").split())}
+    known = PINNED_BLANKS | VISIBLE_BLANK_OR_FILLER
+    unknown = sorted(named - known)
+    assert not unknown, "read these against the blank table: " + ", ".join(
+        f"U+{code:04X} {unicodedata.name(chr(code))}" for code in unknown)
+    # An older database lacks a name only for a code point it has not assigned.
+    for code in known - named:
+        assert unicodedata.category(chr(code)) == "Cn", f"U+{code:04X}"
+
+
+def test_every_blank_is_refused_and_named_on_every_interpreter() -> None:
     for code in BLANK_CODE_POINTS:
-        assert display_text_problem(f"a{chr(code)}b", question=True) is not None
+        for question in (False, True):
+            assert display_text_problem(f"a{chr(code)}b", question=question) == (
+                BLANK, f"U+{code:04X}")
     assert display_text_problem(f"a{BRAILLE_BLANK}b", question=True) == (BLANK, "U+2800")
+    assert display_text_problem(f"{FULL_BLANK}{HALF_BLANK}", question=True) == (
+        BLANK, "U+13441")
 
 
 def test_there_is_no_emoji_exception() -> None:
@@ -373,20 +567,16 @@ def test_a_code_point_of_an_unknown_category_is_refused(monkeypatch) -> None:
     assert display_text_problem("abc") is None
 
 
-def test_only_the_question_holds_a_space_other_than_u0020_and_only_inside() -> None:
+def test_no_field_holds_a_space_other_than_u0020_and_only_the_question_a_newline() -> None:
     spaces = [code for code in range(0x110000)
               if unicodedata.category(chr(code)) == "Zs" and code != 0x20]
-    assert 0xA0 in spaces and 0x3000 in spaces
+    assert 0xA0 in spaces and 0x2007 in spaces and 0x205F in spaces and 0x3000 in spaces
     for code in spaces:
         char = chr(code)
-        assert display_text_problem(f"a{char}b") == (SPACE, f"U+{code:04X}")
-        if unicodedata.normalize("NFC", char) == char:
-            assert display_text_problem(f"a{char}b", question=True) is None
-        else:  # U+2000 and U+2001 are canonical copies of U+2002 and U+2003
-            assert display_text_problem(f"a{char}b", question=True) == (
-                NOT_NFC, f"U+{code:04X}")
-        assert display_text_problem(f"{char}a", question=True) == (LEADING, f"U+{code:04X}")
-        assert display_text_problem(f"a{char}", question=True) == (TRAILING, f"U+{code:04X}")
+        for question in (False, True):
+            for text in (f"a{char}b", f"{char}a", f"a{char}"):
+                assert display_text_problem(text, question=question) == (
+                    SPACE, f"U+{code:04X}")
     assert display_text_problem("a b") is None
     assert display_text_problem("a\nb", question=True) is None
     assert display_text_problem("\na", question=True) == (LEADING, "U+000A")

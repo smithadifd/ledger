@@ -50,11 +50,11 @@ An ask is pickable when it has a scope, two to four options, no two options
 with one label, an ``ask K`` header of at most 12 characters, and every text
 the picker displays (the question id, the scope, an option label or
 description, the question) keeps ``ledger.schema.display_text_problem``: no
-control, format, line or paragraph separator, surrogate, private-use,
-unassigned, default-ignorable or blank code point (no emoji exception, so
-U+200D and U+FE0F are refused in the question too), NFC, no leading combining
-mark, no leading or trailing whitespace, and no space other than U+0020
-outside the question (where a newline is allowed too). The write path refuses
+control, format, surrogate, private-use, unassigned, default-ignorable or
+blank code point (no emoji exception, so U+200D and U+FE0F are refused in the
+question too), no White_Space code point but U+0020 (a newline is allowed
+inside the question), NFC, no leading combining mark, and no leading or
+trailing whitespace. The write path refuses
 such an ask; one stored before that rule reads ``ask_not_pickable`` naming
 the field, the class and the code point, so no pick, election or grant binds
 through it.
