@@ -175,6 +175,22 @@ def test_since_until_and_combined_filters(tmp_path, monkeypatch):
     assert [row["item_id"] for row in questions(body)] == ["it-ticket"]
 
 
+def test_since_after_until_is_a_usage_error(tmp_path, monkeypatch):
+    db = tmp_path / "ledger.db"
+    seed(db)
+    code, body, err = run_json(
+        monkeypatch,
+        db,
+        "questions",
+        "--since",
+        "2026-03-01",
+        "--until",
+        "2026-02-01",
+    )
+    assert code == EXIT_USAGE, err
+    assert body["error"]["message"] == "--since is after --until"
+
+
 def test_limit_and_truncated(tmp_path, monkeypatch):
     db = tmp_path / "ledger.db"
     seed(db)
