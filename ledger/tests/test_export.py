@@ -1320,6 +1320,11 @@ FREE_TEXT_CASES = {
         "payload.body_md",
     ),
     "doc.attached-title": (lambda: _doc_with_title(HAND_ID, f"t {SAMPLE_TEXT}"), "payload.title"),
+    # The refusal names the item; an item id holding the shape must not be printed.
+    "item-id": (
+        lambda: hand_event(HAND_ID, "item.note", {"text": "x"}, item_id=f"it-{SAMPLE_TEXT}"),
+        "item_id",
+    ),
 }
 
 
