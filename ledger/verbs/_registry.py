@@ -18,6 +18,7 @@ from ledger.verbs import backup
 from ledger.verbs import capture
 from ledger.verbs import card
 from ledger.verbs import claim
+from ledger.verbs import claim_system
 from ledger.verbs import context
 from ledger.verbs import contract
 from ledger.verbs import decisions
@@ -56,6 +57,7 @@ MODULES = (
     capture,
     card,
     claim,
+    claim_system,
     context,
     contract,
     decisions,
