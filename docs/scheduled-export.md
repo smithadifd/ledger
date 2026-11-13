@@ -1,11 +1,11 @@
 # A scheduled export without the toolkit
 
 The export is the ledger's durable copy of its events, and it only helps if it
-runs. This page sets up three jobs that keep it current, with nothing but the
-`ledger` command, `git`, and your own scheduler (launchd or cron): one writes
-the events and commits them, one pushes the commit to a private repository, and
-one checks that the export has not fallen behind. Do the steps in order. It
-assumes a working ledger, so do [Start here](start-here.md) first.
+runs. This page sets up two jobs that keep it current, with nothing but the
+`ledger` command, `git`, `/bin/sh` and your own scheduler (launchd or cron): one
+writes the events, commits them and then pushes the commit to a private
+repository, and one checks that the export has not fallen behind. Do the steps
+in order. It assumes a working ledger, so do [Start here](start-here.md) first.
 
 ## 1. Create a private repository
 
@@ -59,7 +59,7 @@ pushed 66ac6940070cb8c7cd00b83a9e21cbf98d53ab43 to refs/heads/main at origin
 ok lag events=0 hours=0.0 watermark=2
 ```
 
-## 3. What each job does
+## 3. What each command does
 
 - **`ledger export --commit`** writes every event after the watermark into the
   folder and makes one git commit there. It never pushes. With nothing new it
@@ -67,7 +67,8 @@ ok lag events=0 hours=0.0 watermark=2
 - **`ledger export --push`** pushes the branch's current commit to its push
   remote. It writes no events and makes no commit, so it sends whatever the
   last `--commit` made; run with nothing new, it pushes the same commit again
-  and exits 0. Schedule it after the commit job.
+  and exits 0. It must run after the `--commit` it depends on, which is why the
+  export job below runs both in one command.
 - **`ledger export --check`** compares the database with the export folder. It
   prints `ok lag events=N hours=H watermark=N` and exits 0, or, when more than
   100 events or 24 hours are unexported, prints
@@ -77,8 +78,8 @@ ok lag events=0 hours=0.0 watermark=2
 
 The scheduler only records the exit status of a job. Nothing on this page sends
 an alert: read each job's log, and look at the check job's exit status in your
-scheduler, to learn that something is wrong. Run each job once by hand first;
-a refusal prints its code, and [docs/cli.md](cli.md) lists them all.
+scheduler, to learn that something is wrong. Run each command once by hand
+first; a refusal prints its code, and [docs/cli.md](cli.md) lists them all.
 
 A scheduler gives its jobs a short `PATH`. The job files below name `ledger` by
 absolute path (`command -v ledger` prints yours); the ledger also runs `git`, so
@@ -92,20 +93,29 @@ Replace each `/path/to/...` with an absolute path: `ledger` is the program, the
 database is `LEDGER_DB`, the clone is `LEDGER_EXPORT_DIR`, and the logs go in a
 folder of your own that is not the clone. Create the log folder first.
 
+There are two jobs. The export job runs `ledger export --commit` and then,
+only if that succeeded, `ledger export --push`, joined by `&&` in one
+`/bin/sh -c` command. Commit and push share one job because a push that runs
+before its commit leaves the remote behind while `--check` still reports no lag;
+in one job the push cannot start first, and a failed commit stops it. The check
+job only reads the export folder's watermark, so it may run at any time. If a
+path contains a space, put quotes around it inside the command.
+
 ### launchd
 
 One property list per job, each running every hour (`StartInterval` is in
-seconds). Save each as `~/Library/LaunchAgents/<Label>.plist`, check it with
-`plutil -lint <file>`, and load it yourself:
+seconds). Neither job depends on the other's timing. Save each as
+`~/Library/LaunchAgents/<Label>.plist`, check it with `plutil -lint <file>`,
+and load it yourself:
 
 ```sh
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.ledger-export-commit.plist
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.ledger-export.plist
 ```
 
-To stop a job: `launchctl bootout gui/$(id -u)/local.ledger-export-commit`.
+To stop a job: `launchctl bootout gui/$(id -u)/local.ledger-export`.
 Nothing on this page loads, installs or edits a job for you.
 
-`local.ledger-export-commit.plist`:
+`local.ledger-export.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -113,12 +123,12 @@ Nothing on this page loads, installs or edits a job for you.
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>local.ledger-export-commit</string>
+  <string>local.ledger-export</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/path/to/ledger</string>
-    <string>export</string>
-    <string>--commit</string>
+    <string>/bin/sh</string>
+    <string>-c</string>
+    <string>/path/to/ledger export --commit &amp;&amp; /path/to/ledger export --push</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
@@ -130,41 +140,9 @@ Nothing on this page loads, installs or edits a job for you.
   <key>StartInterval</key>
   <integer>3600</integer>
   <key>StandardOutPath</key>
-  <string>/path/to/logs/ledger-export-commit.log</string>
+  <string>/path/to/logs/ledger-export.log</string>
   <key>StandardErrorPath</key>
-  <string>/path/to/logs/ledger-export-commit.log</string>
-</dict>
-</plist>
-```
-
-`local.ledger-export-push.plist`:
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>local.ledger-export-push</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/path/to/ledger</string>
-    <string>export</string>
-    <string>--push</string>
-  </array>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>LEDGER_DB</key>
-    <string>/path/to/work.db</string>
-    <key>LEDGER_EXPORT_DIR</key>
-    <string>/path/to/ledger-export</string>
-  </dict>
-  <key>StartInterval</key>
-  <integer>3600</integer>
-  <key>StandardOutPath</key>
-  <string>/path/to/logs/ledger-export-push.log</string>
-  <key>StandardErrorPath</key>
-  <string>/path/to/logs/ledger-export-push.log</string>
+  <string>/path/to/logs/ledger-export.log</string>
 </dict>
 </plist>
 ```
@@ -204,13 +182,13 @@ Nothing on this page loads, installs or edits a job for you.
 ### cron
 
 Run `crontab -e` and add one line per job. Each sets the same two variables
-inline and runs at a different minute of every hour, the push ten minutes after
-the commit:
+inline and runs once an hour. The export line wraps both commands in
+`/bin/sh -c '...'` so that the variables reach both of them and the push runs
+only after a successful commit:
 
 ```text
-0 * * * * LEDGER_DB=/path/to/work.db LEDGER_EXPORT_DIR=/path/to/ledger-export /path/to/ledger export --commit >> /path/to/logs/ledger-export-commit.log 2>&1
-10 * * * * LEDGER_DB=/path/to/work.db LEDGER_EXPORT_DIR=/path/to/ledger-export /path/to/ledger export --push >> /path/to/logs/ledger-export-push.log 2>&1
-20 * * * * LEDGER_DB=/path/to/work.db LEDGER_EXPORT_DIR=/path/to/ledger-export /path/to/ledger export --check >> /path/to/logs/ledger-export-check.log 2>&1
+0 * * * * LEDGER_DB=/path/to/work.db LEDGER_EXPORT_DIR=/path/to/ledger-export /bin/sh -c '/path/to/ledger export --commit && /path/to/ledger export --push' >> /path/to/logs/ledger-export.log 2>&1
+30 * * * * LEDGER_DB=/path/to/work.db LEDGER_EXPORT_DIR=/path/to/ledger-export /path/to/ledger export --check >> /path/to/logs/ledger-export-check.log 2>&1
 ```
 
 ## 5. Check that the pushed copy restores
@@ -248,7 +226,7 @@ size, and the file stays in that root: the folder beside the database named
 after it plus `.documents`, so `work.db.documents` beside `work.db`. The export
 and `ledger backup` carry the paths and digests, not the bytes. Copy the root by
 other means (a file copy, `rsync`, your backup tool); the ledger never writes
-under it, and none of the jobs above copy it. Documents added without
+under it, and neither job above copies it. Documents added without
 `--by-path` are inline and are in the export. A ledger with no by-path
 documents has no root to copy.
 
