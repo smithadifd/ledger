@@ -1053,7 +1053,13 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
         card = project_card(reader, "dc-1")
     finally:
         reader.close()
+    # Pin the flake: a599 in the revision hash must not fail the ask-line check.
+    card = dataclasses.replace(
+        card,
+        revision_hash="deadbeefa599cafe0123456789abcdef0123456789abcdef0123456789ab",
+    )
     text = format_card(card)
+    assert "a599" in text
     # Exact: the cut pays for its own marker and the Truncated line.
     assert word_count(text) == WORD_LIMIT
     # The ask is shortened, not dropped, and nothing else was capped.
@@ -1108,18 +1114,6 @@ def test_long_ask_is_shortened_first(tmp_path: Path, monkeypatch) -> None:
         }
     ]
     assert "a599" not in data["open_questions"][0]["ask"]
-
-
-def test_a599_in_revision_hash_does_not_fail_ask_line_check() -> None:
-    """The shortened-ask check is immune to a599 in the revision hash."""
-    text = (
-        "# dc-1\n"
-        "revision: 12 deadbeefa599cafe0123456789abcdef0123456789abcdef0123456789ab\n"
-        "  ask: a000 a001 … (+1 words cut; full text in event 3; "
-        "ledger export-item --json -- dc-1)\n"
-    )
-    assert "a599" in text
-    assert "a599" not in _ask_text_line(text)
 
 
 def test_ask_text_line_fails_by_name_when_missing() -> None:
