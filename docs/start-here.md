@@ -91,7 +91,24 @@ ledger new --type ticket --title "My first item" --id first-1
 It prints one line that starts with `created` and names `first-1`. Run it
 only once: a second run with the same id is refused.
 
-## 7. Check with `doctor`
+## 7. Claim the database for its system
+
+```sh
+ledger claim-system work
+```
+
+Use the same short name you chose in step 4. Each system, for example `work`
+and `home`, has its own database file, and this step writes the system's name
+inside that file. The claim is part of the file, so any path or link that
+reaches the file reaches the claim: the boundary between two systems is the
+file itself, not a naming habit, and an export or a restore carries it. The
+command prints `claimed for work: <path>`. Running it again with the same name
+prints `already claimed for work` and changes nothing; running it with another
+name is refused, so two systems cannot end up in one database. A system name is
+a lowercase letter followed by lowercase letters, digits, `_` or `-`, up to 64
+characters.
+
+## 8. Check with `doctor`
 
 ```sh
 ledger doctor

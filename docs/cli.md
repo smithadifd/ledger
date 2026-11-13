@@ -104,6 +104,25 @@ Set the item's status.
 Claim the item with a lease. The holder defaults to the actor. `--capacity`
 refuses the claim when N items are already claimed.
 
+**`claim-system NAME`** Claim this database for a system, for example `work` or
+`home`. A system name is 1 to 64 characters: a lowercase letter, then lowercase
+letters, digits, `_` or `-`; anything else is refused with exit 2 before the
+database is opened. An unclaimed database is claimed and the verb exits 0. The
+same name again exits 0, says the database is already claimed for that name and
+writes nothing (a read-only database file refuses even the repeat, as every
+write verb does). A different name is refused (exit 3, code `shared_database`,
+naming both systems) and writes nothing. A synced or linked database path is
+refused as every write verb refuses it (exit 3, codes `synced_path` and
+`db_symlink`), and no file is created. `--json` prints `system`, `path` and
+`claimed` (`false` for the repeat). Like every write verb it needs
+`LEDGER_HARNESS`. The claim is one event inside the database file, so any path
+that reaches the file reaches the claim, and an export or restore carries it;
+`verify --system NAME` and `restore --system NAME` check it.
+
+```sh
+ledger claim-system work
+```
+
 **`link ITEM TARGET [--rel REL]`** Link the item. The target is given once,
 after the item or as `--target TARGET`, and may be a local file path. `REL`
 defaults to `url` and is one of `pr`, `branch`, `session`, `item`, `url`,
