@@ -150,6 +150,6 @@ day-to-day reads and writes should go through the CLI. The setup calls are:
 
 - `ledger.resolve_system_paths({name: path, ...})`: resolve every system's
   database path and refuse two that share a file;
-- `ledger.claim_database(path, system)`: bind a database to its system;
+- `ledger.claim_database(path, system, *, actor=None, harness=None, model=None, session=None)`: bind a database to its system, stamping the claim with the caller's attribution when given;
 - `ledger.resolve_db_path(path)`: expand and resolve a path, refusing a
   synced folder.

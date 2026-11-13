@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from ledger import open_ledger
+from ledger import claim_database, open_ledger
 from ledger.verbs import EXIT_REFUSED, EXIT_USAGE, discover_verbs
 
 from test_cli import invoke, seed
@@ -270,6 +270,33 @@ def test_the_library_claim_stamps_only_what_it_is_given(db) -> None:
     with open_ledger(db) as lg:
         lg.claim_system("work")
     assert claim_row(db) == {"actor": None, "harness": None, "model": None, "session": None}
+
+
+def test_claim_database_records_the_callers_attribution(db) -> None:
+    claim_database(
+        db,
+        "work",
+        actor="alice/builder",
+        harness="claude-code",
+        model="model-x",
+        session="sess-42",
+    )
+    assert claim_row(db) == {
+        "actor": "alice/builder",
+        "harness": "claude-code",
+        "model": "model-x",
+        "session": "sess-42",
+    }
+
+
+def test_claim_database_with_no_attribution_writes_no_stamps(db) -> None:
+    claim_database(db, "work")
+    assert claim_row(db) == {
+        "actor": None,
+        "harness": None,
+        "model": None,
+        "session": None,
+    }
 
 
 def test_the_report_comes_from_the_claim_not_from_a_read_before_it(
