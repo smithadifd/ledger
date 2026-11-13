@@ -173,6 +173,31 @@ Run them in this order. Each has a check that proves it.
 
 ### 3.1 The ledger
 
+First check how this machine installed the ledger. Run:
+
+```sh
+command -v ledger
+type -a ledger
+```
+
+`command -v` shows the copy that runs; `type -a` (bash or zsh) or `which -a`
+shows every copy. If the path ends `.../bin/ledger` inside a virtual
+environment folder that is not pipx's, the ledger was installed with that
+venv's pip, and the pipx line below would add a second install, so PATH order
+would decide which one runs. Choose one:
+
+- Upgrade with that venv's own pip, and skip the pipx line. `<venv>` is the
+  folder that holds that `bin/ledger`:
+
+  ```sh
+  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.1.22"
+  ```
+
+- Or remove that venv, then run the pipx line below.
+
+Either way, `command -v ledger` then shows one path and `ledger --version`
+prints `ledger 0.1.22`.
+
 ```sh
 pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.1.22
 ```
