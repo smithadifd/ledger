@@ -159,6 +159,12 @@ content with the same source (or with no `--source`) again reports
 it over the same content writes a new version with the same content and the new
 source, and moving it back is another change. `--source-rev` is not compared. `show [--version N]`
 prints a version; `diff ITEM [FROM [TO]]` prints the change field by field.
+`set ... --expect-revision ID` writes only while the item's newest event is
+still `ID`, with the values and refusals `note` takes. The check runs in the
+same write transaction as the compare, after the not-found check (a missing
+item still exits 1) and before the unchanged compare: a stale value exits 5
+(`stale_revision`) and writes nothing, even when the content and source are
+unchanged. `none` never matches, since every item has its creation event.
 A claim stamps the spec version it was made against, and the card shows
 `spec moved: vN → vM` when the spec's content changed under a claim. A version
 written only to move the source leaves the content hash as it was and prints
