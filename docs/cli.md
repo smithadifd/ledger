@@ -603,6 +603,23 @@ table row do not count) refuses with `row_source_anchor_not_found`, and one
 repeated (two ticket headings of either form with that id),
 `row_source_anchor_ambiguous` (exit 1), reading nothing.
 
+An item whose source names no file prints its current spec instead of
+refusing, when it has one. The source names no file when it is empty, when it
+is neither a locator nor a row key (a follow-up's `PARENT:slug` source), or
+when it is a row key with no valid `also at` note. The text is `spec: vN`, then
+`title:`, `size:` and `merge_class:` (each only when the spec records it), a
+`## Body` section and, when recorded, a `## Acceptance` section. With
+`--json`, `data` carries the usual `item_id` and `ticket` (that text) and a
+`spec` object with `version`, `title`, `size`, `merge_class`, `body_md` and
+`acceptance`; a field the spec does not record is `null`. An item that read a
+ticket from a file has no `spec` key. A source that does name a file reads and
+refuses exactly as above: a broken locator, a missing file or a missing or
+repeated anchor refuses even when the item has a spec, and the spec never
+stands in for it. An item with no spec keeps the refusal it had
+(`row_source_no_also_at`, `no source locator on ITEM` or `invalid source
+locator: SOURCE`, all `not_found`, exit 1). A spec event that cannot be read is
+refused `spec_unreadable` (exit 3), printing no text.
+
 **`search WORD... [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
 Full-text search, ranked by BM25; the words may be quoted or separate.
 Types: `item`, `decision`, `utterance`, `standard`, `adr`, `doc`. Rebuilds

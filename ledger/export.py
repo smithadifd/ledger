@@ -958,6 +958,13 @@ def newest_also_at_locator(events: Sequence[Event]) -> str | None:
     return None
 
 
+class TicketSourceNamesNoFile(ValueError):
+    """The item's source names no file ``--ticket`` could read: it is empty, it
+    is neither a valid locator nor a row key, or it is a row key with no valid
+    ``also at`` note. A source that names a file never raises this, whatever is
+    wrong with the file or its anchor; those stay plain ``ValueError``."""
+
+
 def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> str:
     """The recorded ticket section for one imported item (``ticket_section``).
 
@@ -966,7 +973,9 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
     either ``rel:line@commit`` or the anchor form ``rel#ID`` (the committed
     ``HEAD`` copy of ``rel``, the section of the ticket heading for ``ID``); an item with
     none, or an anchor that is absent or repeated, is refused by name, and no
-    section is guessed.
+    section is guessed. A source that names no file at all raises
+    ``TicketSourceNamesNoFile`` (a ``ValueError`` with the same message as ever),
+    so the ``export-item`` verb can print the item's spec instead.
     """
     events = lg.events(item_id=item_id)
     created = next((event for event in events if event.kind == "item.created"), None)
@@ -974,14 +983,14 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
         raise ValueError(f"no item.created on {item_id}")
     source = created.payload.get("source") or ""
     if not source:
-        raise ValueError(f"no source locator on {item_id}")
+        raise TicketSourceNamesNoFile(f"no source locator on {item_id}")
     locator = source
     # A source that is a valid locator is always read as one, so a path that
     # happens to be named ``row`` keeps its meaning.
     if not valid_source_locator(source) and is_row_source(source):
         found = newest_also_at_locator(events)
         if found is None:
-            raise ValueError(
+            raise TicketSourceNamesNoFile(
                 f"row_source_no_also_at: {item_id} has the row source {source} "
                 "and no valid 'also at <locator>' note"
             )
@@ -997,6 +1006,10 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
                     f"in {locator}"
                 )
             return ticket_section(blob, line)
+    elif not valid_source_locator(source):
+        # Neither a locator nor a row key (a follow-up's PARENT:slug source):
+        # it names no file. Same message read_source_blob would have raised.
+        raise TicketSourceNamesNoFile(f"invalid source locator: {source}")
     blob = read_source_blob(locator, cwd=cwd)
     _rel, line, _sha = split_source_locator(locator)
     return ticket_section(blob, line)
