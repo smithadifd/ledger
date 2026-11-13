@@ -65,7 +65,8 @@ An optional `config.json` beside the database:
 ```json
 {
   "search_roots": ["/absolute/path/to/a/notes/repo"],
-  "claim_ttl_seconds": 14400
+  "claim_ttl_seconds": 14400,
+  "capture_prompts": true
 }
 ```
 
@@ -74,6 +75,19 @@ An optional `config.json` beside the database:
   names. Without the key, only the ledger itself is indexed.
 - `claim_ttl_seconds`: the default claim lease. A malformed value makes
   `claim` refuse unless `--ttl` is given.
+- `capture_prompts`: `false` turns prompt capture off: `capture --kind prompt`
+  writes nothing and prints `skipped` with reason `prompts_off`. Picker
+  capture (`capture --kind picker`) never reads this key, so it stays on. No
+  file, no key, or `true` leaves prompt capture on. A value that is not a JSON
+  boolean (`"false"`, `0` and `null` included), or a `config.json` that cannot
+  be read or is not a JSON object, makes `capture --kind prompt` refuse with
+  `capture_config` (exit 3) and write nothing, so a typo never turns a `false`
+  into stored prompts; picker capture still works. Prompt capture decides
+  with one `lstat`: no entry named `config.json` means no file; any entry (a
+  file, a link, anything else) is opened and read once, and any failure to
+  open, read or parse it refuses `capture_config` with the cause it saw. A
+  link whose target is missing, loops or vanishes before the open counts as
+  unreadable here, though `search` and `claim` read such a link as no file.
 
 ## Item verbs
 
@@ -407,8 +421,36 @@ AskUserQuestion and writes one event per call on channel `hook:picker`
 `questions` array verbatim, its fingerprint, the answers map, any
 annotations, the chosen option position of a one-question picker, and the
 ask an `[ask K]` tag at the start of the first question names. Refusals
-(exit 3): `capture_not_prompt`, `capture_not_picker`, `capture_bad_input`.
-A retry of one tool call returns the stored event.
+(exit 3): `capture_not_prompt`, `capture_not_picker`, `capture_bad_input`,
+and `capture_config` (below).
+
+Two cases of `--kind prompt` write nothing and exit 0. Both are decided after
+the input is checked (so every refusal above still applies) and before the
+database is opened (so neither creates it). Each prints `skipped`, a tab and
+the reason; `--json` carries `{"event": null, "skipped": "<reason>"}`.
+
+- `frame`: after its leading ASCII whitespace (space, tab, newline, carriage
+  return, vertical tab, form feed), the prompt starts with one of the harness
+  frames `<task-notification>`, `<cross-session-message`, `<agent-message`,
+  `<system-reminder>` or `[Subagent hand-back]`: text the harness put in the
+  prompt slot, not the person's. The match is exact and case-sensitive. The
+  size rule comes after it, so a frame over 64 KiB is skipped too. The filter
+  is a label, not proof of authorship: a prompt with no frame is stored with
+  `origin: person` whoever wrote it, and a person who starts a prompt with a
+  frame is not captured.
+- `prompts_off`: `capture_prompts` is `false` in `config.json` (see
+  [Configuration file](#configuration-file)). A `config.json` entry that
+  cannot be opened, read or parsed (a link that does not resolve included) or
+  holds a non-boolean value refuses `capture_config` instead.
+
+Re-running one hook input: a picker input always carries `tool_use_id`, and
+its key is `capture:picker:<tool_use_id>`; a prompt input that carries
+`prompt_id` is keyed `capture:prompt:<prompt_id>`. For either, running it
+twice leaves one capture: the retry returns the stored event, and a different
+payload under the same key is refused (`conflict`). A prompt input without
+`prompt_id` (older Claude Code) gets a random key, because a re-run and a
+second identical submission look the same: a re-run may store a duplicate; it
+never merges two submissions.
 
 **`lint-quotes [--item ITEM]`** Re-check every election's quotes.
 
@@ -783,7 +825,7 @@ for whatever reads it: the ledger records it and enforces nothing.
 
 ## Resume
 
-**`resume [--item ID] [--brief]`**
+**`resume [--item ID] [--brief] [--hook-env]`**
 For each open item that has an `item.stopped` event, print the newest stop
 (its point, the skills to invoke next, the files to read) and the commands
 that continue it, using the command prefix the person ran. The printed command
@@ -802,6 +844,34 @@ stop recorded and so are not in `items` (0 when there are none, and 0 with
 ```json
 {"data": {"items": [], "open_without_stop": 2}, "error": null, "ok": true}
 ```
+
+`--hook-env` is for a SessionStart hook (the plugin's runs it). It reads the
+hook's JSON input on stdin and prints the lines the hook appends to Claude
+Code's `CLAUDE_ENV_FILE`, each `export NAME=<value>` with the value
+shell-quoted, in this order:
+
+| Line | Printed when |
+|------|--------------|
+| `LEDGER_SESSION=<session_id>` | the input's `session_id` is usable, even when `LEDGER_SESSION` is already set |
+| `LEDGER_AGENT=claude-code` | `LEDGER_AGENT` is absent from the environment |
+| `LEDGER_HARNESS=claude-code` | `LEDGER_HARNESS` is absent from the environment |
+
+It prints no `LEDGER_MODEL` line, whatever the input's `model`. Only
+SessionStart, Setup, CwdChanged and FileChanged hooks can write
+`CLAUDE_ENV_FILE`, and a model switch during the session is none of them, so
+a model stamped at session start would go stale and every later write would
+record it. Writes in a session the plugin started record no model unless
+`LEDGER_MODEL` is already set in Claude Code's environment.
+
+A variable set to an empty value counts as set. A usable value is a non-empty
+string with no control character; any other value leaves its line out and is
+not an error. The command exits 0 even when it prints no line; `--json`
+carries `{"env": {NAME: value, ...}}`. Stdin that is not UTF-8, not JSON or not
+an object is refused with `hook_env_bad_input`, and an input whose
+`hook_event_name` is not `SessionStart` with `hook_env_not_session_start`
+(exit 3, nothing on stdout). With `--brief` or `--item` it is a usage error
+(exit 2). It never resolves, opens or creates the database, though `--db` or
+`LEDGER_DB` is still required, as for every verb.
 
 ## Contract
 

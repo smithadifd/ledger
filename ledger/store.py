@@ -1327,10 +1327,25 @@ def open_ledger(path: Path | str, *, create: bool = True) -> Ledger:
     return Ledger(conn, resolved)
 
 
-def claim_database(db: Path | str, system: str) -> Path:
-    """Open ``db``, claim it for ``system`` (see ``Ledger.claim_system``), close."""
+def claim_database(
+    db: Path | str,
+    system: str,
+    *,
+    actor: str | None = None,
+    harness: str | None = None,
+    model: str | None = None,
+    session: str | None = None,
+) -> Path:
+    """Open ``db``, claim it for ``system`` (see ``Ledger.claim_system``), close.
+
+    The keyword-only ``actor``, ``harness``, ``model`` and ``session`` stamp
+    the claim event as ``Ledger.claim_system`` stamps its own (all default
+    to ``None``).
+    """
     with open_ledger(db) as lg:
-        lg.claim_system(system)
+        lg.claim_system(
+            system, actor=actor, harness=harness, model=model, session=session
+        )
         return lg.path
 
 

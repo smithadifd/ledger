@@ -1,0 +1,16 @@
+{
+  "name": "ledger-plugins",
+  "owner": {
+    "name": "smithadifd"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for the ledger: an append-only work-item and decision log driven by one CLI."
+  },
+  "plugins": [
+    {
+      "name": "ledger-hooks",
+      "source": "./plugins/ledger-hooks",
+      "description": "Prints the ledger's session brief at session start and records submitted prompts and question-picker answers through the ledger CLI; silent unless a ledger is configured."
+    }
+  ]
+}

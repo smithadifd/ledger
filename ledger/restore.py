@@ -282,6 +282,10 @@ def restore_export(
     system: str | None,
     accept_loop_events: bool = False,
     on_accept_loop_events: Callable[[int, tuple[str, ...]], None] | None = None,
+    actor: str | None = None,
+    harness: str | None = None,
+    model: str | None = None,
+    session: str | None = None,
 ) -> RestoreResult:
     """Verify the export, replay into a new database, and verify the chain.
 
@@ -291,7 +295,10 @@ def restore_export(
     ``SharedDatabaseError`` before any file is written. An unclaimed export,
     such as one from before claims existed, is claimed for ``system`` after
     the replay, as ``Ledger.claim_system`` claims an unclaimed database; the
-    restored chain is then verified against ``system``.
+    restored chain is then verified against ``system``. The keyword-only
+    ``actor``, ``harness``, ``model`` and ``session`` stamp that claim (and
+    the restore's ``session.opened`` receipt, when one is written) as
+    ``Ledger.claim_system`` stamps its own; omitted, they stay ``None``.
     """
     if system is None:
         raise ValidationError("restore-needs-system")
@@ -337,9 +344,15 @@ def restore_export(
                 },
                 idempotency_key=f"restore:loop-events:{export_digest}",
                 provenance_class="restored-export",
+                actor=actor,
+                harness=harness,
+                model=model,
+                session=session,
             )
         if export_system is None:
-            lg.claim_system(system)
+            lg.claim_system(
+                system, actor=actor, harness=harness, model=model, session=session
+            )
         lg.verify(system=system)
         restored = lg.events()
     except BaseException:

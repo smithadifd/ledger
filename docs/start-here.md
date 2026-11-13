@@ -138,10 +138,26 @@ Once the ledger works, [A scheduled export without the toolkit](scheduled-export
 sets up a private git repository and jobs that export, push and check it on a
 schedule, and shows how to prove the pushed copy restores.
 
+## 10. Optional: connect Claude Code
+
+To have Claude Code print the ledger's brief when a session starts and record
+your prompts and question-picker answers, install the ledger's plugin from
+Claude Code:
+
+```sh
+claude plugin marketplace add smithadifd/ledger
+claude plugin install ledger-hooks@ledger-plugins
+```
+
+Its hooks do nothing until `ledger` is on Claude Code's `PATH` and `LEDGER_DB`
+is set in the environment Claude Code starts with. The README's
+[Claude Code plugin](../README.md#claude-code-plugin) section says what each
+hook does.
+
 ## Next
 
 - The [README](../README.md) has a longer quick start, the model, and the verb table.
 - [docs/cli.md](cli.md) is the reference for every verb, flag and exit code.
-- Optional, to use the ledger from Claude Code: the plugin and its session-start
-  hook live in the skills repository, https://github.com/smithadifd/skills.
+- Optional: skills for Claude Code that keep their state in the ledger live in
+  the skills repository, https://github.com/smithadifd/skills.
   Follow the steps there; this page does not repeat them.

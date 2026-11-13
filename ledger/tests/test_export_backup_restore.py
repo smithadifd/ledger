@@ -760,6 +760,73 @@ def test_restore_round_trips_empty_ledger_export(tmp_path: Path) -> None:
         lg.close()
 
 
+def _claim_stamps(db: Path) -> dict:
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        rows = conn.execute(
+            "SELECT actor, harness, model, session, operator "
+            "FROM v_events WHERE kind = 'ledger.system'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(rows) == 1
+    return dict(rows[0])
+
+
+def test_cli_restore_of_unclaimed_export_records_the_callers_attribution(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = _db(tmp_path)
+    export_dir = tmp_path / "export"
+    _seed(db, 1)
+    lg = open_ledger(db)
+    export_events(lg, export_dir)
+    lg.close()
+    dest = tmp_path / "restored.db"
+    env = {
+        "LEDGER_HARNESS": "claude-code",
+        "LEDGER_OPERATOR": "alice",
+        "LEDGER_AGENT": "builder",
+        "LEDGER_MODEL": "model-x",
+        "LEDGER_SESSION": "sess-42",
+    }
+    code, _out, err = invoke(
+        monkeypatch,
+        ["--json", "--db", str(dest), "restore", "--dir", str(export_dir),
+         "--system", "home"],
+        env=env,
+    )
+    assert code == 0, err
+    assert _claim_stamps(dest) == {
+        "actor": "alice/builder",
+        "harness": "claude-code",
+        "model": "model-x",
+        "session": "sess-42",
+        "operator": "alice",
+    }
+
+
+def test_restore_export_with_no_attribution_writes_no_stamps(
+    tmp_path: Path,
+) -> None:
+    db = _db(tmp_path)
+    export_dir = tmp_path / "export"
+    _seed(db, 1)
+    lg = open_ledger(db)
+    export_events(lg, export_dir)
+    lg.close()
+    dest = tmp_path / "fresh.db"
+    restore_export(export_dir, dest, system="home")
+    assert _claim_stamps(dest) == {
+        "actor": None,
+        "harness": None,
+        "model": None,
+        "session": None,
+        "operator": "",
+    }
+
+
 @pytest.mark.parametrize(
     "watermark",
     ["true", "2.5", '"3"', "-1", None],

@@ -17,24 +17,46 @@ not exist yet is not an error: the output says there are no open items and the
 exit status is 0 (an unknown ``--item`` is ``not_found``, exit 1). Every
 command printed carries the database's resolved path, so it runs from any
 directory.
+
+``--hook-env`` is for a SessionStart hook. It reads the hook's JSON input on
+stdin and prints the lines the hook appends to the session's environment file,
+each ``export NAME=<value>`` with the value shell-quoted, in this order:
+``LEDGER_SESSION`` from ``session_id`` (even when the variable is already set);
+then ``LEDGER_AGENT`` and ``LEDGER_HARNESS`` as ``claude-code``, each only
+when the name is absent from this process's environment. A ``session_id``
+that is missing, not a string, empty, or holds a control character leaves
+its line out. It prints no ``LEDGER_MODEL`` line, whatever the input's
+``model``: only a few hook events may write the session's environment file
+and a model switch is not one of them, so a stamped model would go stale
+while later writes kept recording it. Stdin that is not one UTF-8 JSON object
+is refused with ``hook_env_bad_input``, and an input for another event with
+``hook_env_not_session_start`` (exit 3, nothing on stdout). The flag never
+resolves, opens or creates the database, and it cannot be combined with
+``--brief`` or ``--item``.
 """
 from __future__ import annotations
 
+import os
+import shlex
+import sys
 import unicodedata
-from typing import Any
+from typing import Any, Mapping
 
 from ledger.paths import resolve_db_path
 from ledger.store import open_ledger_readonly
 from ledger.verbs import (
     EXIT_NOT_FOUND,
+    EXIT_REFUSED,
     CliError,
     Context,
     Result,
+    UsageError,
     Verb,
     invocation_prefix,
     quote_command_arg,
     require_item,
 )
+from ledger.verbs.capture import read_hook_input
 
 NO_OPEN_ITEMS = "no open items"
 
@@ -85,6 +107,13 @@ def add_arguments(parser) -> None:
         action="store_true",
         help="print the agent contract's short form first",
     )
+    parser.add_argument(
+        "--hook-env",
+        action="store_true",
+        help="read a SessionStart hook input on stdin and print the export lines"
+        " for LEDGER_SESSION, LEDGER_AGENT and LEDGER_HARNESS (never LEDGER_MODEL);"
+        " opens no database",
+    )
 
 
 _NAMED = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
@@ -109,6 +138,72 @@ def _escape(text: str) -> str:
         else:
             out.append(f"\\u{ord(ch):04x}")
     return "".join(out)
+
+
+# What --hook-env stamps for a variable the environment does not set.
+HOOK_AGENT = "claude-code"
+HOOK_HARNESS = "claude-code"
+
+
+def _hook_env_refusal(code: str, message: str) -> CliError:
+    return CliError(message, code=code, exit_code=EXIT_REFUSED)
+
+
+def _usable(value: object) -> str | None:
+    """A non-empty UTF-8 string with no control character, else None."""
+    if type(value) is not str or value == "" or any(_is_control(ch) for ch in value):
+        return None
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:  # a lone surrogate from a JSON escape
+        return None
+    return value
+
+
+def hook_env(hook: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, str]:
+    """The variables ``--hook-env`` prints for a SessionStart ``hook`` input,
+    in order, given the process environment ``environ``."""
+    env: dict[str, str] = {}
+    session = _usable(hook.get("session_id"))
+    if session is not None:
+        env["LEDGER_SESSION"] = session
+    if "LEDGER_AGENT" not in environ:
+        env["LEDGER_AGENT"] = HOOK_AGENT
+    if "LEDGER_HARNESS" not in environ:
+        env["LEDGER_HARNESS"] = HOOK_HARNESS
+    # No LEDGER_MODEL: the input's model is the one the session started on, and
+    # a model switch later in the session cannot re-stamp the environment file.
+    return env
+
+
+def _read_stdin() -> str:
+    buffer = getattr(sys.stdin, "buffer", None)
+    try:
+        if buffer is None:
+            return sys.stdin.read()
+        return buffer.read().decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _hook_env_refusal(
+            "hook_env_bad_input", f"stdin is not UTF-8 text: {exc}"
+        ) from exc
+
+
+def _run_hook_env(args) -> Result:
+    if args.brief or args.item_id is not None:
+        raise UsageError("--hook-env cannot be combined with --brief or --item")
+    raw = _read_stdin()
+    try:
+        hook = read_hook_input(raw)
+    except CliError as exc:
+        raise _hook_env_refusal("hook_env_bad_input", str(exc)) from exc
+    if hook.get("hook_event_name") != "SessionStart":
+        raise _hook_env_refusal(
+            "hook_env_not_session_start",
+            "resume --hook-env takes a SessionStart hook input",
+        )
+    env = hook_env(hook, os.environ)
+    lines = [f"export {name}={shlex.quote(value)}" for name, value in env.items()]
+    return Result(data={"env": env}, text="\n".join(lines))
 
 
 def _commands(item_id: str, prefix: str = "ledger") -> tuple[str, str]:
@@ -184,6 +279,10 @@ def _entry_text(entry: dict[str, Any]) -> str:
 
 
 def run(args, ctx: Context) -> Result:
+    if args.hook_env:
+        # Before resolve_db_path: the flag never resolves, opens or creates
+        # the database.
+        return _run_hook_env(args)
     resolved = resolve_db_path(ctx.db)
     entries: list[dict[str, Any]] = []
     open_without_stop = 0
