@@ -2,7 +2,8 @@
 
 An item minted from a roadmap row has ``row:<ID>`` as its created source, not
 a ``path:line@commit`` locator. Its ticket is read at the locator in its newest
-valid ``also at <locator>`` note. With no such note the view refuses by name
+valid ``also at <locator>`` note whose idempotency key starts with
+``row-item:also-at:``. With no such keyed note the view refuses by name
 (``row_source_no_also_at``) and reads nothing. A source that is a locator is
 read as it always was, and the write-side check ``valid_source_locator`` is
 unchanged.
@@ -91,7 +92,22 @@ def _item(db: Path, item_id: str, source: str, notes: tuple[str, ...] = ()) -> N
         {"type": "ticket", "title": "A ticket", "source": source}, f"create-{item_id}",
     )
     for number, text in enumerate(notes):
-        _append(db, item_id, "item.note", {"text": text}, f"note-{item_id}-{number}")
+        _append(
+            db, item_id, "item.note", {"text": text},
+            f"row-item:also-at:{item_id}-{number}",
+        )
+
+
+def _item_keyed(
+    db: Path, item_id: str, source: str, notes: tuple[tuple[str, str], ...]
+) -> None:
+    """Create a row-source item with notes as ``(text, idempotency_key)`` pairs."""
+    _append(
+        db, item_id, "item.created",
+        {"type": "ticket", "title": "A ticket", "source": source}, f"create-{item_id}",
+    )
+    for text, key in notes:
+        _append(db, item_id, "item.note", {"text": text}, key)
 
 
 def _run(db: Path, repo: Path, item_id: str, *flags: str) -> subprocess.CompletedProcess[str]:
@@ -305,6 +321,42 @@ def test_other_sources_keep_the_invalid_locator_refusal(tmp_path, repo, source):
 def test_row_key_is_still_not_a_valid_write_side_locator():
     assert not valid_source_locator("row:SL1")
     assert valid_source_locator(f"a.md:1@{SHA}")
+
+
+def test_newest_hand_note_does_not_win_over_an_older_keyed_note(tmp_path, repo):
+    root, sha = repo
+    db = tmp_path / "ledger.db"
+    _item_keyed(
+        db, "rw-ns-a", "row:SL1",
+        (
+            (f"also at a.md:1@{sha}", "row-item:also-at:rw-ns-a-0"),
+            (f"also at b.md:1@{sha}", "row-item:hand:rw-ns-a"),
+        ),
+    )
+    assert _ticket(db, root, "rw-ns-a") == TICKET_A
+
+
+def test_only_an_unkeyed_also_at_note_is_refused_by_name(tmp_path, repo):
+    root, sha = repo
+    db = tmp_path / "ledger.db"
+    _item_keyed(
+        db, "rw-ns-b", "row:SL1",
+        ((f"also at a.md:1@{sha}", "hand:rw-ns-b"),),
+    )
+    assert _refusal(db, root, "rw-ns-b").startswith(f"{REFUSAL}: ")
+
+
+def test_keyed_invalid_newest_falls_back_to_the_previous_keyed_one(tmp_path, repo):
+    root, sha = repo
+    db = tmp_path / "ledger.db"
+    _item_keyed(
+        db, "rw-ns-c", "row:SL1",
+        (
+            (f"also at b.md:1@{sha}", "row-item:also-at:rw-ns-c-0"),
+            ("also at ", "row-item:also-at:rw-ns-c-1"),
+        ),
+    )
+    assert _ticket(db, root, "rw-ns-c") == TICKET_B
 
 
 # --- the anchor form ``rel#ID`` the importer and row-item.sh write -------------

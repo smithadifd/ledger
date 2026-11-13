@@ -126,7 +126,10 @@ def _item(db: Path, item_id: str, source: str, *notes: str) -> None:
         {"type": "ticket", "title": "A ticket", "source": source}, f"create-{item_id}",
     )
     for number, text in enumerate(notes):
-        _append(db, item_id, "item.note", {"text": text}, f"note-{item_id}-{number}")
+        _append(
+            db, item_id, "item.note", {"text": text},
+            f"row-item:also-at:{item_id}-{number}",
+        )
 
 
 def _run(db: Path, repo: Path, item_id: str) -> subprocess.CompletedProcess[str]:
