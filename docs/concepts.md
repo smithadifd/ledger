@@ -169,7 +169,7 @@ places (`ledger/paths.py`, `ledger/store.py`):
 
 Writing the claim is a setup step, not an everyday verb: `restore --system
 NAME` claims an unclaimed export as it replays it, and an installer claims a
-new database with the library call `ledger.claim_database(path, "NAME")`.
+new database with the library call `ledger.claim_database(path, "NAME")` (keyword-only `actor`, `harness`, `model` and `session`, default `None`).
 `ledger.system` is a reserved kind, so `append` cannot write it. Checking the
 claim is a CLI step: `verify --system NAME` exits 3 on an unclaimed database
 (`system-unclaimed:NAME`) and on another system's (`shared_database`).
