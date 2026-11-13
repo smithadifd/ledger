@@ -59,6 +59,14 @@ When you start, or come back to an item:
    when the card shows a cut (a `Truncated` section), because the card is a
    projection and the events are the record.
 
+## Finding things
+
+- `ledger search WORD...`: a decision or a topic, by words; reach for it when you have words for it but no id.
+- `ledger context ITEM`: an item with what it links to; reach for it when you take the item up, for a bounded orientation pack.
+- `ledger links ITEM`: the links to and from an item; reach for it when you need every link, in both directions, which the bounded pack may cut.
+- `ledger questions`: what waits on the person; reach for it before you ask something that may already be asked.
+- `ledger decisions`: what was settled, with each decision's standing; reach for it before you reopen a choice, and read the standing on each row.
+
 ## Electing a ratification
 
 A ratification, a choice between options, or any "yes, do it that way" from

@@ -88,6 +88,7 @@ and item.stopped; write each with one plain ledger append. The harness captures 
 person's words; never write them yourself.
 Reading order: ledger resume, ledger card ITEM, then ledger export-item ITEM
 when the card shows a cut.
+Finding things: ledger search WORD... (a decision or a topic, by words); ledger context ITEM (an item with what it links to); ledger links ITEM (the links to and from an item); ledger questions (what waits on the person); ledger decisions (what was settled, with each decision's standing).
 Actor stamps: LEDGER_OPERATOR (the person), LEDGER_AGENT (this seat),
 LEDGER_HARNESS (the runtime; writes refuse without it), LEDGER_MODEL (the
 model), LEDGER_SESSION (the session id), all exported before you write.

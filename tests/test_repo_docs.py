@@ -16,6 +16,7 @@ from pathlib import Path
 
 from ledger import cli
 from ledger.paths import SUPPORTED_LOCATION
+from ledger.verbs import discover_verbs
 from ledger.verbs.resume import SHORT_FORM
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -109,6 +110,102 @@ def test_readme_and_contract_page_never_say_pick_up() -> None:
         assert "pick up" not in path.read_text(encoding="utf-8").lower(), path
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "docs/agent-contract.md" in readme and "ledger resume --brief" in readme
+
+
+# ---- the finding verbs ---------------------------------------------------------
+
+# One line per verb, nothing else: ``- `ledger VERB [ARGS]`: GIST; reach for it ...``.
+# The gist is what the short form repeats beside the command.
+_FINDING_LINE = re.compile(
+    r"^- `(?P<command>ledger (?P<verb>[a-z][a-z0-9-]*)(?: [^`]*)?)`: "
+    r"(?P<gist>[^;`]+); (?P<when>reach for it [^`]+\.)$"
+)
+_FINDING_PREFIX = "Finding things: "
+
+
+def _finding_section(text: str) -> str:
+    assert "\n## Finding things\n" in text, "the contract page has no '## Finding things' section"
+    return text.split("## Finding things\n", 1)[1].split("\n## ", 1)[0]
+
+
+def _finding_entries(text: str) -> list[dict[str, str]]:
+    """The finding section's lines, parsed; a line outside the grammar raises.
+
+    A blank line is the only thing the section may hold besides a verb line.
+    """
+    entries = []
+    for line in _finding_section(text).splitlines():
+        if not line.strip():
+            continue
+        match = _FINDING_LINE.match(line)
+        assert match, f"finding section line is not `- `ledger VERB ...`: GIST; reach for it ...`: {line!r}"
+        entries.append(match.groupdict())
+    assert entries, "the finding section holds no verb line"
+    verbs = [entry["verb"] for entry in entries]
+    assert len(verbs) == len(set(verbs)), f"a verb has two lines in the finding section: {verbs}"
+    return entries
+
+
+def _short_form_finding_lines() -> list[str]:
+    return [ln for ln in SHORT_FORM.splitlines() if ln.startswith(_FINDING_PREFIX)]
+
+
+def test_finding_section_names_the_five_finding_verbs() -> None:
+    verbs = {entry["verb"] for entry in _finding_entries(PAGE.read_text(encoding="utf-8"))}
+    assert {"search", "context", "links", "questions", "decisions"} <= verbs, verbs
+
+
+def test_every_verb_the_finding_section_names_is_registered() -> None:
+    registered = set(discover_verbs())
+    for entry in _finding_entries(PAGE.read_text(encoding="utf-8")):
+        assert entry["verb"] in registered, (
+            f"the finding section names `{entry['command']}` but {entry['verb']!r} "
+            f"is not a registered verb: {sorted(registered)}"
+        )
+
+
+def test_the_finding_section_refuses_an_unregistered_verb_and_a_line_off_the_grammar() -> None:
+    page = PAGE.read_text(encoding="utf-8")
+    good = _finding_entries(page)
+    registered = set(discover_verbs())
+    planted = page.replace(
+        "## Electing a ratification\n",
+        "- `ledger frobnicate WORD`: a thing; reach for it when you need a thing.\n\n"
+        "## Electing a ratification\n",
+        1,
+    )
+    names = [entry["verb"] for entry in _finding_entries(planted)]
+    assert names == [entry["verb"] for entry in good] + ["frobnicate"]
+    assert "frobnicate" not in registered
+    for off_grammar in (
+        "- `ledger links ITEM`: both ways.",  # no "; reach for it"
+        "- ledger links ITEM: both ways; reach for it when you need them.",  # no backticks
+        "* `ledger links ITEM`: both ways; reach for it when you need them.",  # not a "-" bullet
+        "A sentence about `ledger links ITEM` that names no verb line.",
+    ):
+        bad = page.replace(
+            "## Electing a ratification\n", off_grammar + "\n\n## Electing a ratification\n", 1
+        )
+        try:
+            _finding_entries(bad)
+        except AssertionError:
+            continue
+        raise AssertionError(f"a finding line off the grammar was accepted: {off_grammar!r}")
+
+
+def test_short_form_has_one_finding_line_with_the_pages_words() -> None:
+    entries = _finding_entries(PAGE.read_text(encoding="utf-8"))
+    lines = _short_form_finding_lines()
+    assert len(lines) == 1, f"the short form needs exactly one {_FINDING_PREFIX!r} line: {lines}"
+    [line] = lines
+    for entry in entries:
+        piece = f"{entry['command']} ({entry['gist']})"
+        assert piece in line, f"the short form's finding line lacks {piece!r}: {line!r}"
+    # Nothing else rides on the line: it is exactly the pieces, in the page's order.
+    expected = _FINDING_PREFIX + "; ".join(
+        f"{entry['command']} ({entry['gist']})" for entry in entries
+    ) + "."
+    assert line == expected, (line, expected)
 
 
 # ---- the agent contract ships with the package -------------------------------
