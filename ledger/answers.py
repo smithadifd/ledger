@@ -47,12 +47,17 @@ Refusal reasons, checked in this order (the first failure is the reason):
 ==========================  =====================================================
 
 An ask is pickable when it has a scope, two to four options, no two options
-with one label, an ``ask K`` header of at most 12 characters, and no control
-character (C0, DEL or C1) in any text the picker displays: the question id,
-the scope, an option label or description, or the question (where a newline
-alone is allowed). The write path refuses such an ask; one stored before that
-rule reads ``ask_not_pickable`` naming the field, so no pick, election or
-grant binds through it.
+with one label, an ``ask K`` header of at most 12 characters, and every text
+the picker displays (the question id, the scope, an option label or
+description, the question) keeps ``ledger.schema.display_text_problem``: no
+control, format, line or paragraph separator, surrogate, private-use,
+unassigned, default-ignorable or blank code point (no emoji exception, so
+U+200D and U+FE0F are refused in the question too), NFC, no leading combining
+mark, no leading or trailing whitespace, and no space other than U+0020
+outside the question (where a newline is allowed too). The write path refuses
+such an ask; one stored before that rule reads ``ask_not_pickable`` naming
+the field, the class and the code point, so no pick, election or grant binds
+through it.
 """
 from __future__ import annotations
 
@@ -161,9 +166,8 @@ def option_description(option: Mapping[str, Any]) -> str:
 
 def _require_displayable(asked_event_id: int, ask: Mapping[str, Any]) -> None:
     """Fail closed on the text the picker will show: every displayed field
-    must be a string, and none may hold a control character (a newline alone
-    is allowed in the question). The reason names the field and the code
-    point, never the character."""
+    must be a string that keeps ``display_text_problem``. The reason names
+    the field, the class and the code point, never the character."""
     question = ask.get("question")
     if not isinstance(question, str) or question == "":
         raise AskNotPickable(f"ask {asked_event_id} has no question text")
@@ -182,8 +186,9 @@ def _require_displayable(asked_event_id: int, ask: Mapping[str, Any]) -> None:
             )
     hit = display_control_character("decision.asked", ask)
     if hit is not None:
+        field, problem, code_point = hit
         raise AskNotPickable(
-            f"ask {asked_event_id} holds a control character ({hit[1]}) in {hit[0]},"
+            f"ask {asked_event_id} holds {problem} ({code_point}) in {field},"
             " which the picker would display: write a new ask without it"
         )
 

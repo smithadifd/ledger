@@ -92,18 +92,31 @@ was not the one `ask-display` printed (`display_differs`). Ask again with a
 fresh ask; never work around a refusal.
 
 The picker prints the ask's question id, scope, question, and each option's
-label and description, and the answer binds to exactly that text. So none of
-it may hold a control character: C0 (U+0000-U+001F, which includes ESC and so
-every ANSI escape), DEL (U+007F) or C1 (U+0080-U+009F). Such an ask is
-refused when you write it (`ask_control_character:<field>`, naming the
-field, for example `ask_control_character:question_id`); the one exception
-is a newline (U+000A) in the question text, which a long question may use.
-The question id, scope, labels and descriptions take no newline, and a
-carriage return or tab is refused everywhere. An ask stored before this rule
-that holds one reads `ask_not_pickable` (the reason names the field and
-"control character"), and no pick, election or grant binds through it. The
-same text in an election is refused the same way. The rule refuses; it never
-strips or escapes, so write the ask again without the character.
+label and description, and the answer binds to exactly that text, so what is
+shown must be what is stored. None of it may hold a control character (C0
+U+0000-U+001F, which includes ESC and so every ANSI escape; DEL U+007F; C1
+U+0080-U+009F), a format character (Unicode Cf: the bidi embeddings,
+overrides and isolates, the zero-width space and joiners), a line or
+paragraph separator (U+2028, U+2029), a surrogate, private-use or unassigned
+code point, a default-ignorable code point (which adds the variation
+selectors such as U+FE0F, U+034F and the Hangul fillers), or U+2800 BRAILLE
+PATTERN BLANK. Each must be in Unicode NFC, must not start with a combining
+mark, and must not start or end with whitespace; only the question may hold
+a space other than U+0020. Such an ask is refused when you write it
+(`ask_control_character:<field>`, the one reason for every class, naming
+the field, for example `ask_control_character:question_id`); the one
+exception is a newline (U+000A) inside the question text, which a long
+question may use. The question id, scope, labels and descriptions take no
+newline, and a carriage return or tab is refused everywhere. There is no
+emoji exception: a single emoji code point such as U+1F600 is fine in the
+question, but a joined emoji (code points joined by U+200D, such as a family
+emoji) or an emoji followed by U+FE0F is refused, so write one emoji code
+point or words instead. An ask stored before this rule that holds one reads
+`ask_not_pickable` (the reason names the field, the class, such as "control
+character" or "invisible character", and the code point), and no pick,
+election or grant binds through it. The same text in an election is refused
+the same way. The rule refuses; it never strips, escapes or normalizes, so
+write the ask again without the character.
 
 A typed answer in the chat can still be recorded as evidence with
 `ledger elect`, quoting the harness's capture of that prompt, but no gate
