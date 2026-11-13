@@ -910,14 +910,20 @@ def anchor_ticket_line(text: str, ticket_id: str) -> int | None:
 
 # An item minted from a roadmap row has the row key ``row:<ID>`` as its created
 # source, not a locator. Its locator is the one its newest ``also at <locator>``
-# note names. The note text is exactly ``also at `` and then a locator in
+# note names, provided that note's idempotency_key starts with
+# ``row-item:also-at:`` (``ALSO_AT_KEY_PREFIX``), the namespace the helper and
+# the importer write. The note text is exactly ``also at `` and then a locator in
 # either form: ``rel:line@commit`` (``valid_source_locator``) or the anchor
 # form ``rel#ID`` (``valid_anchor_locator``). No other case, no extra or
 # trailing whitespace, no line break or control character, no bullet or fence.
-# A note of any other shape, or of another kind, is not an also-at note and is
-# skipped, never repaired. The newest note of either form wins.
+# A note of any other shape, of another kind, or whose key is outside that
+# namespace (a hand-written also-at note) is not an also-at note and is
+# skipped, never repaired. Never fall back to an unkeyed note. The newest keyed
+# note of either form wins. With no keyed note the item is refused
+# ``row_source_no_also_at``.
 ROW_SOURCE_PREFIX = "row:"
 ALSO_AT_PREFIX = "also at "
+ALSO_AT_KEY_PREFIX = "row-item:also-at:"
 
 
 def is_row_source(source: str) -> bool:
@@ -947,10 +953,18 @@ def also_at_note_locator(text: object) -> str | None:
 
 
 def newest_also_at_locator(events: Sequence[Event]) -> str | None:
-    """The locator of the last valid ``also at`` note in event order (oldest
-    first), or None when the item has none."""
+    """The locator of the last valid keyed ``also at`` note in event order
+    (oldest first), or None when the item has none.
+
+    A note supplies the locator only when its ``idempotency_key`` starts with
+    ``ALSO_AT_KEY_PREFIX`` and its text is a valid also-at note. A note with no
+    key, another key, or a key in the namespace but invalid text is skipped.
+    The walk never falls back to an unkeyed note.
+    """
     for event in reversed(events):
         if event.kind != "item.note":
+            continue
+        if not event.idempotency_key.startswith(ALSO_AT_KEY_PREFIX):
             continue
         locator = also_at_note_locator(event.payload.get("text"))
         if locator is not None:

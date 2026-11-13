@@ -73,7 +73,8 @@ def _create(db: str, source: str | None, notes: tuple[str, ...] = ()) -> None:
                   idempotency_key="create", harness="pytest", actor="tester")
         for number, text in enumerate(notes):
             lg.append(kind="item.note", payload={"text": text}, item_id=ITEM,
-                      idempotency_key=f"note-{number}", harness="pytest", actor="tester")
+                      idempotency_key=f"row-item:also-at:{ITEM}-{number}",
+                      harness="pytest", actor="tester")
 
 
 def _spec(db: str, **content) -> None:
