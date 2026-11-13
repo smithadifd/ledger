@@ -127,10 +127,14 @@ writes nothing (a read-only database file refuses even the repeat, as every
 write verb does). A different name is refused (exit 3, code `shared_database`,
 naming both systems) and writes nothing. The verb reports the outcome its
 transaction reached: two callers claiming the same name at once both exit 0 and
-exactly one says `claimed`. When an I/O error, or a checkpoint that cannot
-finish because another connection still holds the file, follows the write, the
-verb reads the claim back: the name's claim on record exits 0 (`claimed` when
-this call wrote it), and anything else is refused (exit 3, code
+exactly one says `claimed`. After an I/O error in the claim's transaction
+(before the write or after it) or a checkpoint that cannot finish because
+another connection still holds the file, the verb reads the claim back and
+checks the database path again as at open: the name's claim on record, through
+a path that still names the opened file as its only link, exits 0 (`claimed`
+only when this call's write is known to have committed it); anything else,
+including a read-back that fails or a path that has become a link or another
+file, is refused (exit 3, code
 `shared_database`). A synced or linked database path is
 refused as every write verb refuses it (exit 3, codes `synced_path` and
 `db_symlink`), and no file is created. `--json` prints `system`, `path` and

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
 import re
 import sqlite3
@@ -30,7 +31,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from .dbfile import checked_connect, precheck_files
+from .dbfile import UnsafeDatabaseFile, _check_main, _identity, checked_connect, precheck_files
 from .decisions import check_event as check_decision_event
 from .decisions import decision_records
 from .paths import SharedDatabaseError, SyncPathError, SyncPathWarning, resolve_db_path
@@ -660,22 +661,53 @@ class UnsettledClaimError(SharedDatabaseError):
     transaction and for a checkpoint that cannot finish after the commit.
     ``event`` is the claim event this call wrote inside the transaction, or
     ``None`` when it wrote none (the system was already on record, or the
-    error came before the write). The error alone does not say whether a
-    written event committed; ``Ledger.claim_outcome`` re-reads the committed
-    claim to decide.
+    error came before the write). ``committed`` is ``True`` when the
+    transaction is known to have committed (only the checkpoint after it
+    failed) and ``False`` when the error came inside the transaction, where
+    the commit may or may not have landed. ``data_version`` is the
+    connection's ``PRAGMA data_version`` read inside the transaction, under
+    its write lock, or ``None`` when the error came before that read.
+    ``Ledger.claim_outcome`` re-reads the committed claim to decide.
     """
 
-    def __init__(self, message: str, *, event: Event | None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        event: Event | None,
+        committed: bool,
+        data_version: int | None,
+    ):
         super().__init__(message)
         self.event = event
+        self.committed = committed
+        self.data_version = data_version
+
+
+def _path_identity(path: Path) -> tuple[int, int] | None:
+    """The device and inode of the file at ``path`` now, or ``None`` if unreadable."""
+    try:
+        return _identity(os.lstat(path))
+    except OSError:
+        return None
 
 
 class Ledger:
     """Open database handle: append, query views, verify the hash chain."""
 
-    def __init__(self, conn: sqlite3.Connection, path: Path):
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        path: Path,
+        *,
+        opened: tuple[int, int] | None = None,
+    ):
         self._conn = conn
         self.path = path
+        # The device and inode of the file ``path`` named when the connection
+        # was opened and checked (see ``open_ledger``), or ``None`` when not
+        # recorded; ``claim_outcome`` refuses to settle a claim without it.
+        self._opened = opened
         self._in_batch = False
 
     def close(self) -> None:
@@ -1173,8 +1205,13 @@ class Ledger:
         it.
         """
         written: Event | None = None
+        version: int | None = None
         try:
             with self.transaction():
+                # Read under the write lock: no other connection can commit
+                # until this transaction ends, so a later read that differs
+                # means another connection committed after it.
+                version = self._conn.execute("PRAGMA data_version").fetchone()[0]
                 if _claimed_system(self._conn) != system:
                     written = self._append(
                         kind=SYSTEM_CLAIM_KIND,
@@ -1198,6 +1235,8 @@ class Ledger:
                 f"system {system!r}: {self.path} could not be read ({exc}); "
                 "another path may share this database",
                 event=written,
+                committed=False,
+                data_version=version,
             ) from exc
         # Fold the claim into the main file, whose WAL another path's
         # connection would not read. A checkpoint that cannot finish means
@@ -1212,20 +1251,38 @@ class Ledger:
                 f"({done} of {wal_frames} WAL frames written back): another "
                 "connection, perhaps through another path to this file, holds the database",
                 event=written,
+                committed=True,
+                data_version=version,
             )
         return written is not None
 
     def claim_outcome(self, system: str, refusal: UnsettledClaimError) -> bool:
         """Re-read the committed claim after ``claim_system`` raised ``refusal``.
 
-        When ``system``'s claim is on record, return what the claim's
-        transaction reached: ``True`` when the claim on record is the event
-        this call wrote (``refusal.event``, compared by hash), ``False`` when
-        another write put it there. Otherwise raise ``refusal`` again: no
-        claim on record, another system's claim on record, a read that fails,
-        or a connection still inside a transaction (its reads would see rows
-        that were never committed). It never reports a claim that is not on
-        record.
+        When ``system``'s claim is on record and the database path still
+        names the file this handle opened, as its only link, return what the
+        claim's transaction reached: ``True`` when this call's write is the
+        claim on record, ``False`` when another write put it there.
+
+        This call's write is the claim on record when the claim on record is
+        the event it wrote (same id and hash) and that write is known to have
+        committed: the commit finished and only the checkpoint after it
+        failed (``refusal.committed``), or no other connection has committed
+        since this call's transaction took its write lock (``PRAGMA
+        data_version`` is unchanged). Two callers with the same attribution
+        can write byte-identical claim events in the same millisecond, so the
+        event alone cannot say whose commit landed: when another connection
+        has committed since, and this call's commit is not known to have
+        finished, the answer is ``False``.
+
+        Otherwise raise ``refusal`` again: no claim on record, another
+        system's claim on record, a read that fails, a connection still
+        inside a transaction (its reads would see rows that were never
+        committed), or a database path that fails the open-time file checks
+        again (a symbolic link, a second hard link, or another file at the
+        path). A checkpoint that cannot finish may then be held through
+        another path to the file, and a connection on that path would not see
+        the claim. It never reports a claim that is not on record.
         """
         conn = self._conn
         if conn.in_transaction:
@@ -1235,6 +1292,7 @@ class Ledger:
                 "SELECT * FROM events WHERE kind = ? ORDER BY id LIMIT 1",
                 (SYSTEM_CLAIM_KIND,),
             ).fetchone()
+            version = conn.execute("PRAGMA data_version").fetchone()[0]
         except sqlite3.Error:
             raise refusal
         if row is None:
@@ -1242,7 +1300,27 @@ class Ledger:
         on_record = _event_from_row(row)
         if on_record.payload.get("system") != system:
             raise refusal
-        return refusal.event is not None and on_record.hash == refusal.event.hash
+        self._refuse_unless_still_opened(refusal)
+        written = refusal.event
+        if written is None or (on_record.id, on_record.hash) != (written.id, written.hash):
+            return False
+        return refusal.committed or (
+            refusal.data_version is not None and version == refusal.data_version
+        )
+
+    def _refuse_unless_still_opened(self, refusal: UnsettledClaimError) -> None:
+        """Raise ``refusal`` unless the path still names the opened file, singly linked.
+
+        The open-time checks again (``dbfile._check_main``): the path is not a
+        symbolic link, names a regular file with one link, and that file has
+        the device and inode the path named at open.
+        """
+        try:
+            named = _check_main(self.path, absent_ok=False)
+        except UnsafeDatabaseFile:
+            raise refusal
+        if self._opened is None or named is None or _identity(named) != self._opened:
+            raise refusal
 
     def verify(self, *, system: str | None = None) -> None:
         """Walk events by id and refuse a broken hash chain or a bad payload.
@@ -1370,13 +1448,16 @@ def open_ledger(path: Path | str, *, create: bool = True) -> Ledger:
         raise LedgerError(f"database does not exist: {resolved}")
     _refuse_newer_schema_before_connect(resolved)
     conn = connect(resolved)
+    # connect has just checked that the path names the file the connection
+    # opened, singly linked; record that file for claim_outcome's re-check.
+    opened = _path_identity(resolved)
     try:
         _refuse_unknown_versions(_recorded_versions(conn), load_migrations())
         migrate(conn)
     except Exception:
         conn.close()
         raise
-    return Ledger(conn, resolved)
+    return Ledger(conn, resolved, opened=opened)
 
 
 def claim_database(

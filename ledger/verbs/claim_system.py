@@ -55,9 +55,13 @@ def run(args, ctx: Context) -> Result:
             # either of which can come after the claim committed: two callers
             # racing on a fresh database each checkpoint after their commit,
             # and one checkpoint finds the other running. claim_outcome
-            # re-reads the committed claim: this name on record exits 0
-            # (claimed when this call wrote it, already claimed otherwise);
-            # anything else re-raises the refusal (exit 3, shared_database).
+            # re-reads the committed claim and re-runs the open-time file
+            # checks: this name on record, through a path that still names the
+            # opened file as its only link, exits 0 (claimed when this call's
+            # write is known to have committed it, already claimed otherwise);
+            # anything else re-raises the refusal (exit 3, shared_database),
+            # since a checkpoint held through another path to the file leaves
+            # the claim unseen there.
             wrote = lg.claim_outcome(name, refusal)
         path = str(lg.path)
     finally:
