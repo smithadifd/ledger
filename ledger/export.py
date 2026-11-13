@@ -14,7 +14,7 @@ event's bytes are scanned for credential shapes (``ledger.credscan``). A hit
 on an event without ``credential_override: true`` refuses the whole export
 (``ExportDocCredential``): no file is written and the watermark does not
 move. A by-path document's event file carries its stored path, sha256 and
-size and no bytes, so it is not scanned, and export never opens a document
+size and no bytes, so export scans the stored path and never opens a document
 file. ``commit_export`` stages the export directory into a private
 temporary index and scans the exact tree it will commit, and the new commit
 object, before any ref moves; ``push_export`` scans every commit, path and
