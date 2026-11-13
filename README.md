@@ -425,6 +425,13 @@ it in your shell before you start Claude Code, or in the `env` block of its
 settings). Otherwise every hook is silent: it prints nothing and writes
 nothing.
 
+Each hook runs the first `ledger` on that `PATH`, so a different `ledger`
+earlier on the `PATH` runs instead and receives your prompts and picker
+answers. The plugin takes no absolute path and has no setting for one, so
+`PATH` order is the only control: check that `command -v ledger`, in the
+environment Claude Code starts with, names the ledger you installed
+([KNOWN-LIMITS.md](KNOWN-LIMITS.md)).
+
 No hook blocks a session. Each exits 0 on every path, within a timeout, and a
 failure prints one short line that never holds your text: the brief's goes
 into the session, the captures' to Claude Code's debug log. The hooks are

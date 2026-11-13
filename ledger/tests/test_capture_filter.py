@@ -6,19 +6,25 @@ false`` in the ``config.json`` beside the database skips every prompt
 (``skipped<TAB>prompts_off``); an unreadable or invalid config refuses
 ``capture_config``. Neither skip opens the database, and picker capture never
 reads the config. Each case runs the CLI as a hook does: a subprocess with the
-hook input on stdin.
+hook input on stdin. The few cases that stand between the config's ``lstat``
+and its open run the CLI in this process instead, so they can patch the open.
 """
 from __future__ import annotations
 
+import errno
+import io
 import json
 import os
 import subprocess
 import sys
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import pytest
 
+from ledger.cli import main
 from ledger.store import open_ledger
+from ledger.verbs import capture
 from ledger.verbs.capture import HARNESS_FRAMES, PROMPT_CAP_BYTES
 
 PKG_PARENT = Path(__file__).resolve().parents[2]  # makes ``python -m ledger`` importable
@@ -249,7 +255,10 @@ def test_an_unreadable_config_refuses(db: Path) -> None:
     (db.parent / "config.json").mkdir()
     code, env = run_json(db, "capture", "--kind", "prompt", stdin=prompt_hook("words"))
     assert code == 3 and env["error"]["code"] == "capture_config"
-    assert str(db.parent / "config.json") in env["error"]["message"]
+    message = env["error"]["message"]
+    assert str(db.parent / "config.json") in message
+    # The refusal names the cause it saw, not a link it never saw.
+    assert os.strerror(errno.EISDIR) in message and "symbolic link" not in message
     assert not db.exists()
 
 
@@ -264,11 +273,110 @@ def test_a_config_link_that_does_not_resolve_refuses(db: Path, kind: str) -> Non
     code, env = run_json(db, "capture", "--kind", "prompt", stdin=prompt_hook(secret))
     assert code == 3 and env["error"]["code"] == "capture_config"
     assert str(path) in env["error"]["message"] and secret not in env["error"]["message"]
+    assert "a symbolic link that does not resolve" in env["error"]["message"]
     assert not db.exists()
     asked = ask_and_answer(db)
     code, env = run_json(db, "pick", ITEM, "--ask", str(asked))
     assert code == 0, env
     assert prompt_events(db) == []
+
+
+def capture_in_process(monkeypatch, db: Path, prompt: str) -> tuple[int, dict]:
+    """``capture --kind prompt --json`` in this process, so a test can patch the
+    config's open; the exit code and the JSON envelope."""
+    for key in [key for key in os.environ if key.startswith("LEDGER_")]:
+        monkeypatch.delenv(key)
+    monkeypatch.setenv("LEDGER_HARNESS", "pytest")
+    monkeypatch.setattr(sys, "stdin", io.StringIO(prompt_hook(prompt)))
+    out = io.StringIO()
+    with redirect_stdout(out):
+        code = main(["--json", "--db", str(db), "capture", "--kind", "prompt"])
+    return code, json.loads(out.getvalue())
+
+
+def before_the_open(monkeypatch, path: Path, action) -> list[Path]:
+    """Run ``action`` inside capture's open of ``path``, just before the real
+    open; the list of those opens, filled as they happen."""
+    real_open = open
+    seen: list[Path] = []
+
+    def patched(file, *args, **kwargs):
+        if Path(file) == path:
+            seen.append(Path(file))
+            action()
+        return real_open(file, *args, **kwargs)
+
+    monkeypatch.setattr(capture, "open", patched, raising=False)
+    return seen
+
+
+def config_entry(db: Path, entry: str) -> tuple[Path, Path]:
+    """``config.json`` turning prompts off, as a file or as a link to one; the
+    path and the file that holds the text."""
+    db.parent.mkdir(parents=True)
+    path = db.parent / "config.json"
+    target = path if entry == "file" else db.parent / "real-config.json"
+    target.write_text('{"capture_prompts": false}', encoding="utf-8")
+    if entry == "link":
+        path.symlink_to(target)
+    return path, target
+
+
+@pytest.mark.parametrize("entry", ["link", "file"])
+def test_a_config_that_vanishes_between_the_lstat_and_the_open_refuses(
+        monkeypatch, db: Path, entry: str) -> None:
+    # lstat sees the entry; then the text that turns prompts off is gone before
+    # the open. The surviving link (or the vanished file) must not read as no
+    # config, which would store the prompt.
+    path, target = config_entry(db, entry)
+    seen = before_the_open(monkeypatch, path, target.unlink)
+    secret = "the person's private words"
+    code, env = capture_in_process(monkeypatch, db, secret)
+    assert seen == [path]
+    assert code == 3 and env["error"]["code"] == "capture_config", env
+    message = env["error"]["message"]
+    assert str(path) in message and secret not in message
+    assert os.strerror(errno.ENOENT) in message
+    assert ("a symbolic link that does not resolve" in message) == (entry == "link")
+    assert path.is_symlink() == (entry == "link")
+    assert not db.exists()
+
+
+@pytest.mark.parametrize("entry", ["link", "file"])
+def test_a_config_that_cannot_be_opened_names_the_cause(monkeypatch, db: Path,
+                                                        entry: str) -> None:
+    path, _target = config_entry(db, entry)
+
+    def deny() -> None:
+        raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(path))
+
+    before_the_open(monkeypatch, path, deny)
+    code, env = capture_in_process(monkeypatch, db, "words")
+    assert code == 3 and env["error"]["code"] == "capture_config", env
+    message = env["error"]["message"]
+    assert str(path) in message and os.strerror(errno.EACCES) in message
+    # A link that resolves but cannot be opened is not "a link that does not resolve".
+    assert "symbolic link" not in message
+    assert not db.exists()
+
+
+def test_a_config_whose_lstat_fails_refuses(monkeypatch, db: Path) -> None:
+    # Only a missing entry is no config; an lstat that fails otherwise cannot
+    # tell, so it refuses rather than store the prompt.
+    path, _target = config_entry(db, "file")
+    real_lstat = os.lstat
+
+    def lstat(file, *args, **kwargs):
+        if Path(file) == path:
+            raise PermissionError(errno.EACCES, os.strerror(errno.EACCES), str(file))
+        return real_lstat(file, *args, **kwargs)
+
+    monkeypatch.setattr(os, "lstat", lstat)
+    code, env = capture_in_process(monkeypatch, db, "words")
+    assert code == 3 and env["error"]["code"] == "capture_config", env
+    message = env["error"]["message"]
+    assert str(path) in message and os.strerror(errno.EACCES) in message
+    assert not db.exists()
 
 
 @pytest.mark.parametrize("name", sorted(INVALID_CONFIGS))

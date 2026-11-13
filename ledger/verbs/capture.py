@@ -26,10 +26,13 @@ the database is opened, so neither creates it. The result is the text line
   person's, whoever wrote it.
 - ``prompts_off``: ``capture_prompts`` is ``false`` in the ``config.json``
   beside the database. No file, no key, or ``true`` leaves prompt capture on.
-  A config that cannot be read or parsed (a ``config.json`` symbolic link
-  that does not resolve included), or a value that is not a JSON boolean, is
-  refused (``capture_config``, exit 3, nothing written), so a typo never
-  turns a person's ``false`` into stored prompts.
+  A config that cannot be read or parsed, or a value that is not a JSON
+  boolean, is refused (``capture_config``, exit 3, nothing written), so a
+  typo never turns a person's ``false`` into stored prompts. One ``lstat``
+  decides whether there is a config: no entry named ``config.json`` means
+  none; any entry (a file, a link, anything else) is opened and read once,
+  and any failure to open, read or parse it refuses, a link whose target is
+  missing, loops or vanishes before the open included.
 
 A valid input is checked first, so every refusal above still applies to a
 frame. ``--kind picker`` never reads the config.
@@ -61,9 +64,11 @@ stored event; a differing payload under the same id is refused.
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
+import stat
 import sys
 from typing import Any, Mapping
 
@@ -180,32 +185,61 @@ def _config_refusal(message: str) -> CliError:
     return CliError(message, code="capture_config", exit_code=EXIT_REFUSED)
 
 
+def _unreadable(path: os.PathLike[str], cause: str) -> CliError:
+    return _config_refusal(f"unreadable ledger config {path}: {cause}; prompt capture refused")
+
+
+def _read_prompt_config(path: os.PathLike[str]) -> dict[str, Any] | None:
+    """The ``config.json`` at ``path`` for prompt capture, decided by one lstat.
+
+    No entry at ``path`` is no config (``None``). Any entry, whatever its type,
+    is opened and read once through that one open and must parse as a JSON
+    object; every failure refuses ``capture_config`` and names the cause seen.
+    ``search.load_config`` checks for the file and then reads it, so a link
+    whose target vanishes between the two reads there as no config, which here
+    would turn a person's ``false`` into stored prompts.
+    """
+    try:
+        entry = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise _unreadable(path, exc.strerror or str(exc)) from exc
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+    except OSError as exc:
+        cause = exc.strerror or str(exc)
+        if stat.S_ISLNK(entry.st_mode) and exc.errno in (errno.ENOENT, errno.ELOOP):
+            cause = f"a symbolic link that does not resolve ({cause})"
+        raise _unreadable(path, cause) from exc
+    try:
+        config = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError) as exc:
+        raise _unreadable(path, str(exc)) from exc
+    if not isinstance(config, dict):
+        raise _config_refusal(
+            f"ledger config {path} must be a JSON object; prompt capture refused"
+        )
+    return config
+
+
 def prompts_enabled(db: str) -> bool:
     """Whether ``capture_prompts`` in the ``config.json`` beside ``db`` leaves
     prompt capture on: yes with no file, no key or ``true``; no with ``false``.
 
     Anything else is refused rather than read as on or off.
     """
-    from ledger import search  # config.json is read in one place
+    from ledger import search  # where config.json lives is decided in one place
 
     path = search.config_file(db)
-    # load_config reads a link that resolves to nothing as no file, which here
-    # would turn a person's ``false`` into stored prompts.
-    if os.path.lexists(path) and not os.path.exists(path):
-        raise _config_refusal(
-            f"unreadable ledger config {path}: a symbolic link that does not resolve;"
-            " prompt capture refused"
-        )
-    try:
-        config = search.load_config(db)
-    except search.SearchError as exc:
-        raise _config_refusal(f"{exc}; prompt capture refused") from exc
-    if PROMPTS_CONFIG_KEY not in config:
+    config = _read_prompt_config(path)
+    if config is None or PROMPTS_CONFIG_KEY not in config:
         return True
     value = config[PROMPTS_CONFIG_KEY]
     if type(value) is not bool:
         raise _config_refusal(
-            f"{PROMPTS_CONFIG_KEY} in ledger config {search.config_file(db)} must be"
+            f"{PROMPTS_CONFIG_KEY} in ledger config {path} must be"
             " true or false; prompt capture refused"
         )
     return value

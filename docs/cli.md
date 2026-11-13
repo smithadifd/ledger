@@ -82,10 +82,12 @@ An optional `config.json` beside the database:
   boolean (`"false"`, `0` and `null` included), or a `config.json` that cannot
   be read or is not a JSON object, makes `capture --kind prompt` refuse with
   `capture_config` (exit 3) and write nothing, so a typo never turns a `false`
-  into stored prompts; picker capture still works. A `config.json` that is a
-  symbolic link that does not resolve (its target is missing, or the link
-  loops) counts as unreadable here, though `search` and `claim` read it as no
-  file.
+  into stored prompts; picker capture still works. Prompt capture decides
+  with one `lstat`: no entry named `config.json` means no file; any entry (a
+  file, a link, anything else) is opened and read once, and any failure to
+  open, read or parse it refuses `capture_config` with the cause it saw. A
+  link whose target is missing, loops or vanishes before the open counts as
+  unreadable here, though `search` and `claim` read such a link as no file.
 
 ## Item verbs
 
@@ -437,9 +439,9 @@ the reason; `--json` carries `{"event": null, "skipped": "<reason>"}`.
   `origin: person` whoever wrote it, and a person who starts a prompt with a
   frame is not captured.
 - `prompts_off`: `capture_prompts` is `false` in `config.json` (see
-  [Configuration file](#configuration-file)). A config that cannot be read
-  (a `config.json` link that does not resolve included) or holds a
-  non-boolean value refuses `capture_config` instead.
+  [Configuration file](#configuration-file)). A `config.json` entry that
+  cannot be opened, read or parsed (a link that does not resolve included) or
+  holds a non-boolean value refuses `capture_config` instead.
 
 Re-running one hook input: a picker input always carries `tool_use_id`, and
 its key is `capture:picker:<tool_use_id>`; a prompt input that carries
