@@ -19,7 +19,8 @@ in the question too; a single emoji code point still passes.
 No field holds a White_Space code point other than U+0020 (a newline is
 allowed inside the question), or a code point of the pinned blank table
 (U+2800, the Hangul fillers, the Egyptian hieroglyph blanks U+13441 and
-U+13442, the Khitan filler U+16FE4). Both tables are written out and decide
+U+13442, the Khitan filler U+16FE4, and U+FFFC and U+1D159, which a fallback
+font draws with no ink). Both tables are written out and decide
 before any category, so every interpreter gives the same answer for them.
 """
 from __future__ import annotations
@@ -74,6 +75,9 @@ GRINNING = "\U0001F600"
 # Round 1 pull request review: rendered as whitespace, and not White_Space.
 FULL_BLANK = "\U00013441"
 HALF_BLANK = "\U00013442"
+# Round 2 build probe: a fallback font draws these with no ink.
+OBJECT_REPLACEMENT = "\uFFFC"
+NULL_NOTEHEAD = "\U0001D159"
 
 FORMAT = "a format character"
 SEPARATOR = "a line or paragraph separator"
@@ -158,6 +162,14 @@ CASES = [
                  id="question-ideographic-space-inside"),
     pytest.param("question", "Stand grant:x?\u2007Now.", SPACE, "U+2007",
                  id="question-figure-space-inside"),
+    pytest.param("question_id", f"grant:x{OBJECT_REPLACEMENT}", BLANK, "U+FFFC",
+                 id="id-object-replacement"),
+    pytest.param("question_id", f"grant:x{NULL_NOTEHEAD}", BLANK, "U+1D159",
+                 id="id-null-notehead"),
+    pytest.param("scope", f"the grant{OBJECT_REPLACEMENT} only", BLANK, "U+FFFC",
+                 id="scope-object-replacement"),
+    pytest.param("options[0].label", f"{NULL_NOTEHEAD}granted", BLANK, "U+1D159",
+                 id="label-null-notehead"),
 ]
 
 
@@ -267,6 +279,9 @@ def standing_attempt(monkeypatch, db: str, payload: dict) -> tuple[int, dict]:
     pytest.param("question_id", "grant:x⠀", id="round2-id-braille-blank"),
     pytest.param("question_id", f"grant:x{FULL_BLANK}", id="pr-round1-id-egyptian-full-blank"),
     pytest.param("question_id", f"grant:x{HALF_BLANK}", id="pr-round1-id-egyptian-half-blank"),
+    pytest.param("question_id", f"grant:x{OBJECT_REPLACEMENT}",
+                 id="build-r2-id-object-replacement"),
+    pytest.param("question_id", f"grant:x{NULL_NOTEHEAD}", id="build-r2-id-null-notehead"),
 ])
 def test_the_design_round_probes_no_longer_reach_standing(db, monkeypatch, field, value) -> None:
     code, env = standing_attempt(monkeypatch, db, grant_payload(field, value))
@@ -274,6 +289,11 @@ def test_the_design_round_probes_no_longer_reach_standing(db, monkeypatch, field
     code_name, message = refusal(env)
     assert code_name == "grant_unverified" and "(ask_not_pickable)" in message
 
+
+# The blanks found after the design: the review's Egyptian blanks and the
+# build probe's no-ink characters.
+REVIEW_BLANKS = [FULL_BLANK, HALF_BLANK, OBJECT_REPLACEMENT, NULL_NOTEHEAD]
+REVIEW_BLANK_IDS = ["full-blank", "half-blank", "object-replacement", "null-notehead"]
 
 # Every displayed field of an ask, and the ones an election adds.
 ASK_FIELDS = ("question", "question_id", "scope", "options[0].label",
@@ -287,9 +307,9 @@ def at(where: str, char: str, text: str) -> str:
 
 
 @pytest.mark.parametrize("where", ["start", "middle", "end"])
-@pytest.mark.parametrize("blank", [FULL_BLANK, HALF_BLANK], ids=["full-blank", "half-blank"])
+@pytest.mark.parametrize("blank", REVIEW_BLANKS, ids=REVIEW_BLANK_IDS)
 @pytest.mark.parametrize("field", ASK_FIELDS)
-def test_an_egyptian_blank_in_any_ask_field_is_refused_at_write_by_name(
+def test_a_late_blank_in_any_ask_field_is_refused_at_write_by_name(
         db, monkeypatch, field, blank, where) -> None:
     plain = {"question": "Stand grant:x?", "question_id": "grant:x",
              "scope": "the grant only", "options[0].label": "granted",
@@ -304,9 +324,9 @@ def test_an_egyptian_blank_in_any_ask_field_is_refused_at_write_by_name(
 
 
 @pytest.mark.parametrize("where", ["start", "middle", "end"])
-@pytest.mark.parametrize("blank", [FULL_BLANK, HALF_BLANK], ids=["full-blank", "half-blank"])
+@pytest.mark.parametrize("blank", REVIEW_BLANKS, ids=REVIEW_BLANK_IDS)
 @pytest.mark.parametrize("field", ELECTION_FIELDS)
-def test_an_egyptian_blank_in_an_election_field_is_refused_at_write_by_name(
+def test_a_late_blank_in_an_election_field_is_refused_at_write_by_name(
         db, monkeypatch, field, blank, where) -> None:
     asked = ask(monkeypatch, db)
     capture_id = answer(monkeypatch, db, asked, "apply")
@@ -322,8 +342,8 @@ def test_an_egyptian_blank_in_an_election_field_is_refused_at_write_by_name(
 
 
 @pytest.mark.parametrize("where", ["start", "middle", "end"])
-@pytest.mark.parametrize("blank", [FULL_BLANK, HALF_BLANK], ids=["full-blank", "half-blank"])
-def test_an_egyptian_blank_grant_id_binds_neither_its_own_id_nor_the_visible_one(
+@pytest.mark.parametrize("blank", REVIEW_BLANKS, ids=REVIEW_BLANK_IDS)
+def test_a_late_blank_grant_id_binds_neither_its_own_id_nor_the_visible_one(
         db, monkeypatch, blank, where) -> None:
     stored_id = {"start": f"{blank}grant:x", "middle": f"grant:{blank}x",
                  "end": f"grant:x{blank}"}[where]
@@ -488,11 +508,15 @@ PROPLIST_WHITE_SPACE = (
     set(range(0x0009, 0x000E)) | {0x0020, 0x0085, 0x00A0, 0x1680}
     | set(range(0x2000, 0x200B)) | {0x2028, 0x2029, 0x202F, 0x205F, 0x3000}
 )
-# The blank table's source: names in UnicodeData.txt (16.0.0) that hold the
-# word BLANK or FILLER. The pinned blanks, and the ones whose glyph is a
-# visible mark, which the table leaves out.
-PINNED_BLANKS = {0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0, 0x13441, 0x13442, 0x16FE4}
+# The blank table's first source: names in UnicodeData.txt (16.0.0) that
+# hold the word BLANK or FILLER. The pinned blanks, and the ones whose glyph
+# is a visible mark, which the table leaves out.
+NAMED_BLANKS = {0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0, 0x13441, 0x13442, 0x16FE4}
 VISIBLE_BLANK_OR_FILLER = {0x2422, 0xA8F9, 0x10AF6, 0x1144E, 0x11945, 0x11F48}
+# Its second source: code points the rule otherwise allows that a fallback
+# font draws with no ink (the no-ink drawing probe, ledger/schema.py).
+NO_INK_BLANKS = {0xFFFC, 0x1D159}
+PINNED_BLANKS = NAMED_BLANKS | NO_INK_BLANKS
 
 
 def test_unicode_table_white_space_is_the_proplist_set() -> None:
@@ -512,13 +536,23 @@ def test_unicode_table_blanks_are_the_names_holding_blank_or_filler() -> None:
     assert not BLANK_CODE_POINTS & WHITE_SPACE_CODE_POINTS
     named = {code for code in range(0x110000)
              if {"BLANK", "FILLER"} & set(unicodedata.name(chr(code), "").split())}
-    known = PINNED_BLANKS | VISIBLE_BLANK_OR_FILLER
+    assert not named & NO_INK_BLANKS
+    known = NAMED_BLANKS | VISIBLE_BLANK_OR_FILLER
     unknown = sorted(named - known)
     assert not unknown, "read these against the blank table: " + ", ".join(
         f"U+{code:04X} {unicodedata.name(chr(code))}" for code in unknown)
     # An older database lacks a name only for a code point it has not assigned.
     for code in known - named:
         assert unicodedata.category(chr(code)) == "Cn", f"U+{code:04X}"
+
+
+def test_unicode_table_no_ink_blanks_are_assigned_and_otherwise_allowed() -> None:
+    # Without the table each would pass: an assigned symbol, in no other rule.
+    for code in NO_INK_BLANKS:
+        char = chr(code)
+        assert unicodedata.category(char) == "So", f"U+{code:04X}"
+        assert code not in WHITE_SPACE_CODE_POINTS
+        assert not any(low <= code <= high for low, high in DEFAULT_IGNORABLE_RANGES)
 
 
 def test_every_blank_is_refused_and_named_on_every_interpreter() -> None:

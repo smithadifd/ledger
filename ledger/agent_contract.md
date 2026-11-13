@@ -102,8 +102,9 @@ adds the variation selectors such as U+FE0F and U+034F), a White_Space
 character other than U+0020 (so no other space, no line or paragraph
 separator and no tab), or a blank: U+2800 BRAILLE PATTERN BLANK, the Hangul
 fillers (U+115F, U+1160, U+3164, U+FFA0), U+13441 EGYPTIAN HIEROGLYPH FULL
-BLANK, U+13442 EGYPTIAN HIEROGLYPH HALF BLANK and U+16FE4 KHITAN SMALL SCRIPT
-FILLER. Each must be in Unicode NFC, must not start with a combining mark,
+BLANK, U+13442 EGYPTIAN HIEROGLYPH HALF BLANK, U+16FE4 KHITAN SMALL SCRIPT
+FILLER, U+FFFC OBJECT REPLACEMENT CHARACTER and U+1D159 MUSICAL SYMBOL NULL
+NOTEHEAD. Each must be in Unicode NFC, must not start with a combining mark,
 and must not start or end with whitespace. Such an ask is refused when you
 write it
 (`ask_control_character:<field>`, the one reason for every class, naming
@@ -128,17 +129,25 @@ The White_Space and blank lists are written out in `ledger/schema.py`
 Unicode database, so every supported Python decides those characters the
 same way. Their source is the Unicode Character Database, version 16.0.0:
 White_Space is the property in PropList.txt (the same 25 code points since
-Unicode 6.3.0), and the blanks are the characters whose name in
-UnicodeData.txt holds the word BLANK or FILLER, less those drawn as a
-visible mark (U+2422 BLANK SYMBOL and the scribal gap and line fillers
-U+A8F9, U+10AF6, U+1144E, U+11945 and U+11F48). To update them on a Unicode
-version bump: on the new Python, `python3 -m pytest -q -p no:cacheprovider
+Unicode 6.3.0). The blanks come from two sources: the characters whose
+name in UnicodeData.txt holds the word BLANK or FILLER, less those drawn as
+a visible mark (U+2422 BLANK SYMBOL and the scribal gap and line fillers
+U+A8F9, U+10AF6, U+1144E, U+11945 and U+11F48); and the code points the
+rule otherwise allows that a fallback font draws with no ink (U+FFFC, which
+Menlo draws as an empty full-width cell, and U+1D159, a notehead placeholder
+with no ink of its own). To update them on a Unicode version bump: on the
+new Python, `python3 -m pytest -q -p no:cacheprovider
 ledger/tests/test_ask_display_text_rule.py -k unicode_table` fails on the
 unlisted version and lists every BLANK or FILLER name the blank list does
 not know. Re-derive the lists from that version's PropList.txt,
-DerivedCoreProperties.txt (Default_Ignorable_Code_Point) and UnicodeData.txt,
-then change each list, its copy in that test and `UNICODE_TABLE_VERSIONS`
-together.
+DerivedCoreProperties.txt (Default_Ignorable_Code_Point) and UnicodeData.txt.
+Then re-run the no-ink probe: list every code point the rule allows, draw
+each one alone with the platform's text renderer and its font fallback (on
+macOS, CoreText starting from Helvetica and again from Menlo), count the
+inked pixels, draw each allowed combining mark on a base letter and compare
+with the letter alone, and add every code point that leaves no ink other
+than U+0020 and U+000A. Change each list, its copy in that test and
+`UNICODE_TABLE_VERSIONS` together.
 
 A typed answer in the chat can still be recorded as evidence with
 `ledger elect`, quoting the harness's capture of that prompt, but no gate

@@ -716,10 +716,11 @@ _DISPLAYED_TEXT: dict[str, tuple[tuple[str, bool], ...]] = {
 # on the new interpreter. Then re-derive each table from that version's
 # Unicode Character Database (https://www.unicode.org/Public/<version>/ucd/):
 # White_Space from PropList.txt, Default_Ignorable_Code_Point from
-# DerivedCoreProperties.txt, and the blank table from UnicodeData.txt as the
-# comment on BLANK_CODE_POINTS says (the test prints every BLANK or FILLER
-# name it does not know). Update a table, the literal copy the test pins it
-# to, and the version list together.
+# DerivedCoreProperties.txt, and the blank table from its two sources as the
+# comment on BLANK_CODE_POINTS says (UnicodeData.txt names, and the no-ink
+# drawing probe; the test prints every BLANK or FILLER name it does not know).
+# Update a table, the literal copy the test pins it to, and the version list
+# together.
 UNICODE_TABLE_VERSIONS = ("14.0.0", "15.0.0", "15.1.0", "16.0.0")
 
 # Unicode White_Space (PropList.txt): the 25 code points the property names,
@@ -734,17 +735,35 @@ WHITE_SPACE_CODE_POINTS = frozenset({
     0x2009, 0x200A, 0x2028, 0x2029, 0x202F, 0x205F, 0x3000,
 })
 
-# Code points that render as blank space but are not White_Space. Source: the
-# characters whose name in UnicodeData.txt holds the word BLANK or FILLER,
-# less the ones whose glyph is a visible mark: U+2422 BLANK SYMBOL and the
-# scribal gap and line fillers (U+A8F9, U+10AF6, U+1144E, U+11945, U+11F48).
-# That leaves the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0 (default
-# ignorable too), U+2800 BRAILLE PATTERN BLANK, U+13441 EGYPTIAN HIEROGLYPH
-# FULL BLANK and U+13442 EGYPTIAN HIEROGLYPH HALF BLANK (which Unicode says
-# are rendered as whitespace), and U+16FE4 KHITAN SMALL SCRIPT FILLER (it
-# marks an empty place in a Khitan cluster and draws nothing).
+# Code points that render as blank space but are not White_Space, from two
+# sources.
+#
+# 1. Names: the characters whose name in UnicodeData.txt holds the word BLANK
+#    or FILLER, less the ones whose glyph is a visible mark: U+2422 BLANK
+#    SYMBOL and the scribal gap and line fillers (U+A8F9, U+10AF6, U+1144E,
+#    U+11945, U+11F48). That leaves the Hangul fillers U+115F, U+1160, U+3164
+#    and U+FFA0 (default ignorable too), U+2800 BRAILLE PATTERN BLANK, U+13441
+#    EGYPTIAN HIEROGLYPH FULL BLANK and U+13442 EGYPTIAN HIEROGLYPH HALF BLANK
+#    (which Unicode says are rendered as whitespace), and U+16FE4 KHITAN SMALL
+#    SCRIPT FILLER (it marks an empty place in a Khitan cluster and draws
+#    nothing).
+# 2. No ink: code points the rule otherwise allows that a fallback font draws
+#    with no ink. U+FFFC OBJECT REPLACEMENT CHARACTER (Menlo, the macOS
+#    terminal font CoreText falls back to for it, draws it as a full-width
+#    empty cell) and U+1D159 MUSICAL SYMBOL NULL NOTEHEAD (a notehead
+#    placeholder that carries no ink of its own).
+#
+# Update rule for source 2, on a Unicode version bump and whenever a reviewer
+# reports a blank-looking character: list every code point the rule allows
+# (display_text_problem(f"a{c}b") or the question form is None), draw each one
+# alone with the platform's text renderer and its font fallback (on macOS,
+# CoreText starting from Helvetica and again from Menlo) into a bitmap, and
+# count the inked pixels; draw each allowed combining mark on a base letter
+# and compare with the letter alone. Every code point that leaves no ink,
+# other than U+0020 and U+000A, goes into this table and the test's copy.
 BLANK_CODE_POINTS = frozenset({
-    0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0, 0x13441, 0x13442, 0x16FE4,
+    0x115F, 0x1160, 0x2800, 0x3164, 0xFFA0, 0xFFFC, 0x13441, 0x13442, 0x16FE4,
+    0x1D159,
 })
 
 # Unicode Default_Ignorable_Code_Point (DerivedCoreProperties.txt) as
@@ -866,7 +885,8 @@ def display_text_problem(text: str, *, question: bool = False) -> tuple[str, str
     Displayed text holds no White_Space code point but U+0020
     (WHITE_SPACE_CODE_POINTS; a newline is allowed inside the question), no
     blank (BLANK_CODE_POINTS: U+2800, the Hangul fillers, the Egyptian
-    hieroglyph blanks and the Khitan filler), no code point of category Cc,
+    hieroglyph blanks, the Khitan filler, U+FFFC and U+1D159), no code point
+    of category Cc,
     Cf (the bidi embeddings, overrides and isolates, the zero-width space and
     joiners), Cs, Co or Cn, and no Default_Ignorable_Code_Point
     (DEFAULT_IGNORABLE_RANGES, which adds the variation selectors such as

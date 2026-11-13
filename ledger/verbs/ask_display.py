@@ -25,9 +25,10 @@ rule refuses a control character (a newline is allowed in the question
 only), a format character (Cf: bidi controls, zero-width characters), a line
 or paragraph separator, a surrogate, private-use or unassigned code point, a
 default-ignorable code point (U+FE0F, U+034F and the rest), any White_Space
-code point but U+0020, a blank (U+2800, the Egyptian hieroglyph blanks and
-the rest of ``BLANK_CODE_POINTS``), text that is not NFC, a leading combining
-mark, and leading or trailing whitespace. There is no emoji exception.
+code point but U+0020, a blank (U+2800, the Egyptian hieroglyph blanks,
+U+FFFC and the rest of ``BLANK_CODE_POINTS``), text that is not NFC, a
+leading combining mark, and leading or trailing whitespace. There is no emoji
+exception.
 
 Text output is the input object as indented JSON, then one line
 ``display_sha256 <hex>``. ``--json`` carries ``{asked_event_id, item_id,
