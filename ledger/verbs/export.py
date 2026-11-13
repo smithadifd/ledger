@@ -156,7 +156,8 @@ def run(args, ctx: Context) -> Result:
         text += f" commit={commit_sha or '-'}"
         if commit_sha is not None and not index_refreshed:
             text += (
-                " (warning: the git index was not refreshed; run git read-tree HEAD "
+                " (warning: the git index was not refreshed and still holds what it "
+                "held before the commit, staged changes included; review git status "
                 "in the export directory)"
             )
     return Result(data=data, text=text)
