@@ -653,6 +653,23 @@ def _check_expected_revision(
     )
 
 
+class UnsettledClaimError(SharedDatabaseError):
+    """A ``Ledger.claim_system`` refusal raised where its transaction may have committed.
+
+    ``claim_system`` raises it for an I/O error during the claim's
+    transaction and for a checkpoint that cannot finish after the commit.
+    ``event`` is the claim event this call wrote inside the transaction, or
+    ``None`` when it wrote none (the system was already on record, or the
+    error came before the write). The error alone does not say whether a
+    written event committed; ``Ledger.claim_outcome`` re-reads the committed
+    claim to decide.
+    """
+
+    def __init__(self, message: str, *, event: Event | None):
+        super().__init__(message)
+        self.event = event
+
+
 class Ledger:
     """Open database handle: append, query views, verify the hash chain."""
 
@@ -1147,14 +1164,19 @@ class Ledger:
         A database reached through a second path while a connection on the
         first path has unsaved WAL frames can fail with a raw SQLite I/O
         error; that, and a checkpoint that cannot finish, are reported as
-        ``SharedDatabaseError`` too. Any other SQLite failure, such as a
-        read-only file, is refused as a ``LedgerError`` that names it.
+        ``UnsettledClaimError``, a ``SharedDatabaseError`` that carries the
+        claim event this call wrote, if any. A checkpoint runs after the
+        commit, and an I/O error can come at the commit itself, so the claim
+        may be on record when either is raised: ``claim_outcome`` re-reads it
+        and reports what the transaction reached. Any other SQLite failure,
+        such as a read-only file, is refused as a ``LedgerError`` that names
+        it.
         """
-        wrote = False
+        written: Event | None = None
         try:
             with self.transaction():
                 if _claimed_system(self._conn) != system:
-                    self._append(
+                    written = self._append(
                         kind=SYSTEM_CLAIM_KIND,
                         payload={"system": system},
                         idempotency_key=f"{SYSTEM_CLAIM_KIND}:{system}",
@@ -1165,7 +1187,6 @@ class Ledger:
                         internal=True,
                         ignore_retry_attribution=False,
                     )
-                    wrote = True
         except sqlite3.OperationalError as exc:
             if _is_busy(exc):
                 raise
@@ -1173,9 +1194,10 @@ class Ledger:
                 raise LedgerError(
                     f"system {system!r}: could not claim {self.path}: {exc}"
                 ) from exc
-            raise SharedDatabaseError(
+            raise UnsettledClaimError(
                 f"system {system!r}: {self.path} could not be read ({exc}); "
-                "another path may share this database"
+                "another path may share this database",
+                event=written,
             ) from exc
         # Fold the claim into the main file, whose WAL another path's
         # connection would not read. A checkpoint that cannot finish means
@@ -1185,12 +1207,42 @@ class Ledger:
             "PRAGMA wal_checkpoint(TRUNCATE)"
         ).fetchone()
         if busy:
-            raise SharedDatabaseError(
+            raise UnsettledClaimError(
                 f"system {system!r}: checkpoint of {self.path} is busy "
                 f"({done} of {wal_frames} WAL frames written back): another "
-                "connection, perhaps through another path to this file, holds the database"
+                "connection, perhaps through another path to this file, holds the database",
+                event=written,
             )
-        return wrote
+        return written is not None
+
+    def claim_outcome(self, system: str, refusal: UnsettledClaimError) -> bool:
+        """Re-read the committed claim after ``claim_system`` raised ``refusal``.
+
+        When ``system``'s claim is on record, return what the claim's
+        transaction reached: ``True`` when the claim on record is the event
+        this call wrote (``refusal.event``, compared by hash), ``False`` when
+        another write put it there. Otherwise raise ``refusal`` again: no
+        claim on record, another system's claim on record, a read that fails,
+        or a connection still inside a transaction (its reads would see rows
+        that were never committed). It never reports a claim that is not on
+        record.
+        """
+        conn = self._conn
+        if conn.in_transaction:
+            raise refusal
+        try:
+            row = conn.execute(
+                "SELECT * FROM events WHERE kind = ? ORDER BY id LIMIT 1",
+                (SYSTEM_CLAIM_KIND,),
+            ).fetchone()
+        except sqlite3.Error:
+            raise refusal
+        if row is None:
+            raise refusal
+        on_record = _event_from_row(row)
+        if on_record.payload.get("system") != system:
+            raise refusal
+        return refusal.event is not None and on_record.hash == refusal.event.hash
 
     def verify(self, *, system: str | None = None) -> None:
         """Walk events by id and refuse a broken hash chain or a bad payload.

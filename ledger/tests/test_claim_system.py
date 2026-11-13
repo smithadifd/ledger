@@ -6,6 +6,7 @@ directly afterwards, so "writes nothing" is an event count, not a message.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import sqlite3
@@ -16,6 +17,8 @@ from pathlib import Path
 import pytest
 
 from ledger import claim_database, open_ledger
+from ledger.store import Ledger
+from ledger.tests._child import read_ready_line, running
 from ledger.verbs import EXIT_REFUSED, EXIT_USAGE, discover_verbs
 
 from test_cli import invoke, seed
@@ -339,6 +342,207 @@ def test_two_callers_claiming_the_same_name_at_once_report_one_claim(tmp_path: P
         reports.append(json.loads(out)["data"]["claimed"])
     assert sorted(reports) == [False, True], reports
     assert [e["system"] for e in claim_events(db)] == ["work"]
+
+
+# A reader in another process holding a read transaction keeps a checkpoint
+# from finishing, without sharing SQLite descriptors with the test.
+_READER = """
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1], isolation_level=None)
+conn.execute("BEGIN")
+conn.execute("SELECT count(*) FROM events").fetchone()
+print("held", flush=True)
+sys.stdin.readline()
+conn.close()
+"""
+
+
+@contextlib.contextmanager
+def a_reader_holding(db: str):
+    with running(
+        [sys.executable, "-c", _READER, db],
+        cwd=_LIB,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    ) as proc:
+        read_ready_line(proc, "held")
+        try:
+            yield
+        finally:
+            assert proc.stdin is not None
+            proc.stdin.write("\n")
+            proc.stdin.flush()
+            _out, err = proc.communicate(timeout=30)
+            assert proc.returncode == 0, err
+
+
+def outcome_reads(monkeypatch) -> list[str]:
+    """Record each refusal the verb re-read, so a test knows the error path ran."""
+    seen: list[str] = []
+    original = Ledger.claim_outcome
+
+    def spy(self, system, refusal):
+        seen.append(str(refusal))
+        return original(self, system, refusal)
+
+    monkeypatch.setattr(Ledger, "claim_outcome", spy)
+    return seen
+
+
+def test_a_claim_that_committed_before_its_checkpoint_failed_reports_claimed(
+    db, monkeypatch
+) -> None:
+    # The claim commits, then the checkpoint after it cannot finish while the
+    # reader holds the file. The library refuses; the transaction wrote the
+    # claim, so the verb reports claimed and exits 0.
+    with open_ledger(db):
+        pass
+    seen = outcome_reads(monkeypatch)
+    with a_reader_holding(db):
+        code, payload, err = claim(monkeypatch, db, "work")
+    assert code == 0, (payload, err)
+    assert payload["data"]["claimed"] is True
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+    assert len(seen) == 1 and "checkpoint of" in seen[0], seen
+
+
+def test_a_repeat_claim_whose_checkpoint_failed_reports_already_claimed(
+    db, monkeypatch
+) -> None:
+    # The same name is on record before the call; an append after the reader
+    # took its snapshot leaves WAL frames the checkpoint cannot write back.
+    claim_database(db, "work")
+    seen = outcome_reads(monkeypatch)
+    with a_reader_holding(db):
+        seed(monkeypatch, db, "it-1")
+        before = event_count(db)
+        code, payload, err = claim(monkeypatch, db, "work")
+    assert code == 0, (payload, err)
+    assert payload["data"]["claimed"] is False
+    assert event_count(db) == before
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+    assert len(seen) == 1 and "checkpoint of" in seen[0], seen
+
+
+def _io_error() -> sqlite3.OperationalError:
+    exc = sqlite3.OperationalError("disk I/O error")
+    exc.sqlite_errorcode = sqlite3.SQLITE_IOERR
+    return exc
+
+
+def _fail_before_the_write(monkeypatch) -> None:
+    def append(self, **kwargs):
+        raise _io_error()
+
+    monkeypatch.setattr(Ledger, "_append", append)
+
+
+def _fail_at_the_commit(monkeypatch) -> None:
+    # The claim is written inside the transaction, then the commit fails with
+    # an I/O error and the write rolls back.
+    @contextlib.contextmanager
+    def transaction(self):
+        self._conn.execute("BEGIN IMMEDIATE")
+        self._in_batch = True
+        try:
+            yield
+        finally:
+            self._in_batch = False
+            self._conn.execute("ROLLBACK")
+        raise _io_error()
+
+    monkeypatch.setattr(Ledger, "transaction", transaction)
+
+
+def _fail_and_leave_the_transaction_open(monkeypatch) -> None:
+    # The claim is written and the error leaves the transaction open: a read
+    # on that connection would see the uncommitted claim. Closing the
+    # connection rolls it back.
+    @contextlib.contextmanager
+    def transaction(self):
+        self._conn.execute("BEGIN IMMEDIATE")
+        self._in_batch = True
+        try:
+            yield
+        finally:
+            self._in_batch = False
+        raise _io_error()
+
+    monkeypatch.setattr(Ledger, "transaction", transaction)
+
+
+@pytest.mark.parametrize(
+    "inject",
+    [_fail_before_the_write, _fail_at_the_commit, _fail_and_leave_the_transaction_open],
+)
+def test_an_error_after_which_the_claim_is_not_on_record_is_refused(
+    db, monkeypatch, inject
+) -> None:
+    with open_ledger(db):
+        pass
+    seen = outcome_reads(monkeypatch)
+    inject(monkeypatch)
+    code, payload, err = claim(monkeypatch, db, "work")
+    assert code == EXIT_REFUSED, (payload, err)
+    assert payload["error"]["code"] == "shared_database"
+    assert "could not be read" in payload["error"]["message"]
+    assert event_count(db) == 0
+    assert claim_events(db) == []
+    assert len(seen) == 1, seen
+
+
+def test_a_failed_commit_while_another_callers_claim_landed_reports_already_claimed(
+    db, monkeypatch
+) -> None:
+    # This call's claim rolls back on an I/O error at its commit, and another
+    # caller's claim of the same name commits before the read-back. The name
+    # is on record, but not by this call's write.
+    with open_ledger(db):
+        pass
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(_LIB) + os.pathsep + env.get("PYTHONPATH", "")
+    env["LEDGER_HARNESS"] = "pytest"
+
+    @contextlib.contextmanager
+    def transaction(self):
+        self._conn.execute("BEGIN IMMEDIATE")
+        self._in_batch = True
+        try:
+            yield
+        finally:
+            self._in_batch = False
+            self._conn.execute("ROLLBACK")
+        other = subprocess.run(
+            [sys.executable, "-m", "ledger", "--json", "--db", db, "claim-system", "work"],
+            env=env, capture_output=True, text=True, timeout=60,
+        )
+        assert other.returncode == 0, other.stderr
+        assert json.loads(other.stdout)["data"]["claimed"] is True
+        raise _io_error()
+
+    seen = outcome_reads(monkeypatch)
+    monkeypatch.setattr(Ledger, "transaction", transaction)
+    code, payload, err = claim(monkeypatch, db, "work")
+    assert code == 0, (payload, err)
+    assert payload["data"]["claimed"] is False
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+    assert len(seen) == 1 and "could not be read" in seen[0], seen
+
+
+def test_an_error_on_a_database_claimed_for_another_system_is_refused(
+    db, monkeypatch
+) -> None:
+    claim_database(db, "work")
+    before = claim_events(db)
+    seen = outcome_reads(monkeypatch)
+    _fail_before_the_write(monkeypatch)
+    code, payload, err = claim(monkeypatch, db, "home")
+    assert code == EXIT_REFUSED, (payload, err)
+    assert payload["error"]["code"] == "shared_database"
+    assert claim_events(db) == before
+    assert len(seen) == 1, seen
 
 
 def test_verify_system_reads_the_claim_the_verb_wrote(db, monkeypatch) -> None:
