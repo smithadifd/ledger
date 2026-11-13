@@ -41,6 +41,7 @@ The second command prints `ledger` and the version you installed. If your shell
 says `ledger: command not found`, run `pipx ensurepath` and open a new
 terminal. To move to a newer tag later, see
 [Upgrade](../README.md#upgrade); it takes one command and nothing else.
+From 0.1.8 or older, read [Upgrading across many releases](upgrading.md) first.
 
 ## 4. Decide where the database lives
 

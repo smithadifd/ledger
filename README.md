@@ -172,6 +172,10 @@ database that `--db` or `LEDGER_DB` names and exits 0 when it opens. Your
 database is not touched by the upgrade itself; the next write applies any
 migration it lacks ([docs/migrations.md](docs/migrations.md)).
 
+Moving across many releases at once, from 0.1.8 or older? Read
+[docs/upgrading.md](docs/upgrading.md) first: it lists the four changes
+that can stop a machine and the check to run for each.
+
 ## Quick start
 
 ```sh
