@@ -216,9 +216,9 @@ passes the same validation, the same guards and the same attribution:
 - Output is bounded (`query` and `ready` cap rows at 50 unless `--limit` says
   otherwise; cards have a word limit), and `--json` prints a stable
   `{ok, data, error}` envelope.
-- `--expect-revision EVENT_ID` on `append`, `append-many`, `note` and `state`
-  is optimistic concurrency: the write lands only if the item's newest event
-  is still that one, and is otherwise refused with exit 5.
+- `--expect-revision EVENT_ID` on `append`, `append-many`, `note`, `state`
+  and `spec set` is optimistic concurrency: the write lands only if the
+  item's newest event is still that one, and is otherwise refused with exit 5.
 
 Writes use WAL mode, a busy timeout, one short transaction per append, and a
 bounded retry with jitter, so several processes can write one database on
