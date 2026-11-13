@@ -276,3 +276,51 @@ def test_an_unreadable_spec_refuses_by_name_and_prints_nothing(db, monkeypatch, 
     assert payload["ok"] is False and payload["error"]["code"] == "spec_unreadable", payload
     assert payload["error"]["message"].startswith("spec_unreadable: ")
     assert "ticket" not in json.dumps(payload.get("data") or {})
+
+
+def _forge_spec(db: str, **override) -> None:
+    """Insert a spec row the writer would never produce: one field is unreadable."""
+    payload = {
+        "version": 1, "content_hash": "0" * 64, "title": "Spec title",
+        "body_md": SPEC_BODY, "acceptance": "It prints.", "size": "S",
+        "merge_class": "MC-2", **override,
+    }
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute(
+            "INSERT INTO events(kind, payload_version, payload, item_id, idempotency_key,"
+            " recorded_at, prev_hash, hash) VALUES ('item.spec', 1, ?, ?, 'forged',"
+            " '2026-01-01T00:00:00Z', '0', 'forged-hash')",
+            (json.dumps(payload), ITEM),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"version": 0},
+        {"version": True},
+        {"size": "XL"},
+        {"merge_class": "MC-9"},
+    ],
+    ids=["version-below-one", "version-a-bool", "size-outside-set", "merge-class-outside-set"],
+)
+def test_a_spec_failing_only_one_readability_condition_refuses_by_name(
+    db, monkeypatch, repo, override
+) -> None:
+    _create(db, None)
+    _forge_spec(db, **override)
+    code, out, err = _view(monkeypatch, db, "--json")
+    payload = json.loads(out)
+    assert code == 3, (code, payload, err)
+    assert "Traceback" not in err, err
+    assert payload["ok"] is False and payload["error"]["code"] == "spec_unreadable", payload
+    assert payload["error"]["message"].startswith("spec_unreadable: ")
+    assert "ticket" not in json.dumps(payload.get("data") or {})
+    assert "Build the thing" not in out and "Spec title" not in out, out
+    code, out, err = _view(monkeypatch, db)
+    assert code == 3, (code, out, err)
+    assert "Build the thing" not in out and "Spec title" not in out, out
