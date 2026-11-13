@@ -592,12 +592,15 @@ heading of level three or less at or above that line, and refuses
 (`not_found`) when that heading is not a ticket heading; a `### Ticket:`
 heading whose tail is not that shape still counts there, with no id.
 An item whose source is a row key `row:<ID>`
-is read at the locator of its newest valid `also at <locator>` note (the text
-is exactly `also at ` and a locator, either `path:line@commit` or `path#ID`;
-a note of any other shape is skipped). A `path#ID` locator names no line or
-commit: the section is the one whose ticket heading, of either form, carries
-the id `ID` in `path` at the current `HEAD` of the repository. With no such
-note the command refuses with `row_source_no_also_at`; a `path#ID` whose
+is read at the locator of its newest valid `also at <locator>` note whose
+idempotency key starts with `row-item:also-at:` (the text is exactly
+`also at ` and a locator, either `path:line@commit` or `path#ID`; a note of
+any other shape, or one whose key is outside that namespace, is skipped).
+A hand-written `also at` note (for example from `ledger note`) is skipped.
+A `path#ID` locator names no line or commit: the section is the one whose
+ticket heading, of either form, carries the id `ID` in `path` at the current
+`HEAD` of the repository. With no such keyed note the command refuses with
+`row_source_no_also_at`; a `path#ID` whose
 heading is absent (a bare heading outside `## Tickets`, a fenced heading and a
 table row do not count) refuses with `row_source_anchor_not_found`, and one
 repeated (two ticket headings of either form with that id),
@@ -606,7 +609,7 @@ repeated (two ticket headings of either form with that id),
 An item whose source names no file prints its current spec instead of
 refusing, when it has one. The source names no file when it is empty, when it
 is neither a locator nor a row key (a follow-up's `PARENT:slug` source), or
-when it is a row key with no valid `also at` note. The text is `spec: vN`, then
+when it is a row key with no valid keyed `also at` note. The text is `spec: vN`, then
 `title:`, `size:` and `merge_class:` (each only when the spec records it), a
 `## Body` section and, when recorded, a `## Acceptance` section. With
 `--json`, `data` carries the usual `item_id` and `ticket` (that text) and a
