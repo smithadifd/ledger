@@ -1119,14 +1119,27 @@ class Ledger:
         """The system this database is claimed for, or ``None`` if unclaimed."""
         return _claimed_system(self._conn)
 
-    def claim_system(self, system: str) -> None:
+    def claim_system(
+        self,
+        system: str,
+        *,
+        actor: str | None = None,
+        harness: str | None = None,
+        model: str | None = None,
+        session: str | None = None,
+    ) -> bool:
         """Bind this database to ``system``, or refuse another system's.
 
         The claim is a ``ledger.system`` event, so it lives in the database
         file itself: every accepted spelling of the file sees it, and an
         export or restore carries it. Symbolic and hard links are refused. The
         check and the write share one ``BEGIN IMMEDIATE`` transaction, so an
-        interrupted claim leaves the database unclaimed. An unclaimed
+        interrupted claim leaves the database unclaimed. The keyword-only
+        ``actor``, ``harness``, ``model`` and ``session`` stamp the claim
+        event as ``append`` stamps its own (all default to ``None``).
+        Returns ``True`` when this call wrote the claim and ``False`` when
+        the same system was already on record, decided inside the
+        transaction. An unclaimed
         database, including one from before claims existed, is claimed by
         the first system to install it. Another system's claim is refused by
         the claim guard on the shared write path, as ``SharedDatabaseError``.
@@ -1137,6 +1150,7 @@ class Ledger:
         ``SharedDatabaseError`` too. Any other SQLite failure, such as a
         read-only file, is refused as a ``LedgerError`` that names it.
         """
+        wrote = False
         try:
             with self.transaction():
                 if _claimed_system(self._conn) != system:
@@ -1144,9 +1158,14 @@ class Ledger:
                         kind=SYSTEM_CLAIM_KIND,
                         payload={"system": system},
                         idempotency_key=f"{SYSTEM_CLAIM_KIND}:{system}",
+                        actor=actor,
+                        harness=harness,
+                        model=model,
+                        session=session,
                         internal=True,
                         ignore_retry_attribution=False,
                     )
+                    wrote = True
         except sqlite3.OperationalError as exc:
             if _is_busy(exc):
                 raise
@@ -1171,6 +1190,7 @@ class Ledger:
                 f"({done} of {wal_frames} WAL frames written back): another "
                 "connection, perhaps through another path to this file, holds the database"
             )
+        return wrote
 
     def verify(self, *, system: str | None = None) -> None:
         """Walk events by id and refuse a broken hash chain or a bad payload.

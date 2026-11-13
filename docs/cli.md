@@ -116,6 +116,25 @@ Set the item's status.
 Claim the item with a lease. The holder defaults to the actor. `--capacity`
 refuses the claim when N items are already claimed.
 
+**`claim-system NAME`** Claim this database for a system, for example `work` or
+`home`. A system name is 1 to 64 characters: a lowercase letter, then lowercase
+letters, digits, `_` or `-`; anything else is refused with exit 2 before the
+database is opened. An unclaimed database is claimed and the verb exits 0. The
+same name again exits 0, says the database is already claimed for that name and
+writes nothing (a read-only database file refuses even the repeat, as every
+write verb does). A different name is refused (exit 3, code `shared_database`,
+naming both systems) and writes nothing. A synced or linked database path is
+refused as every write verb refuses it (exit 3, codes `synced_path` and
+`db_symlink`), and no file is created. `--json` prints `system`, `path` and
+`claimed` (`false` for the repeat). Like every write verb it needs
+`LEDGER_HARNESS`. The claim is one event inside the database file, so any path
+that reaches the file reaches the claim, and an export or restore carries it;
+`verify --system NAME` and `restore --system NAME` check it.
+
+```sh
+ledger claim-system work
+```
+
 **`link ITEM TARGET [--rel REL]`** Link the item. The target is given once,
 after the item or as `--target TARGET`, and may be a local file path. `REL`
 defaults to `url` and is one of `pr`, `branch`, `session`, `item`, `url`,
@@ -152,6 +171,12 @@ content with the same source (or with no `--source`) again reports
 it over the same content writes a new version with the same content and the new
 source, and moving it back is another change. `--source-rev` is not compared. `show [--version N]`
 prints a version; `diff ITEM [FROM [TO]]` prints the change field by field.
+`set ... --expect-revision ID` writes only while the item's newest event is
+still `ID`, with the values and refusals `note` takes. The check runs in the
+same write transaction as the compare, after the not-found check (a missing
+item still exits 1) and before the unchanged compare: a stale value exits 5
+(`stale_revision`) and writes nothing, even when the content and source are
+unchanged. `none` never matches, since every item has its creation event.
 A claim stamps the spec version it was made against, and the card shows
 `spec moved: vN → vM` when the spec's content changed under a claim. A version
 written only to move the source leaves the content hash as it was and prints
@@ -613,16 +638,36 @@ heading of level three or less at or above that line, and refuses
 (`not_found`) when that heading is not a ticket heading; a `### Ticket:`
 heading whose tail is not that shape still counts there, with no id.
 An item whose source is a row key `row:<ID>`
-is read at the locator of its newest valid `also at <locator>` note (the text
-is exactly `also at ` and a locator, either `path:line@commit` or `path#ID`;
-a note of any other shape is skipped). A `path#ID` locator names no line or
-commit: the section is the one whose ticket heading, of either form, carries
-the id `ID` in `path` at the current `HEAD` of the repository. With no such
-note the command refuses with `row_source_no_also_at`; a `path#ID` whose
+is read at the locator of its newest valid `also at <locator>` note whose
+idempotency key starts with `row-item:also-at:` (the text is exactly
+`also at ` and a locator, either `path:line@commit` or `path#ID`; a note of
+any other shape, or one whose key is outside that namespace, is skipped).
+A hand-written `also at` note (for example from `ledger note`) is skipped.
+A `path#ID` locator names no line or commit: the section is the one whose
+ticket heading, of either form, carries the id `ID` in `path` at the current
+`HEAD` of the repository. With no such keyed note the command refuses with
+`row_source_no_also_at`; a `path#ID` whose
 heading is absent (a bare heading outside `## Tickets`, a fenced heading and a
 table row do not count) refuses with `row_source_anchor_not_found`, and one
 repeated (two ticket headings of either form with that id),
 `row_source_anchor_ambiguous` (exit 1), reading nothing.
+
+An item whose source names no file prints its current spec instead of
+refusing, when it has one. The source names no file when it is empty, when it
+is neither a locator nor a row key (a follow-up's `PARENT:slug` source), or
+when it is a row key with no valid keyed `also at` note. The text is `spec: vN`, then
+`title:`, `size:` and `merge_class:` (each only when the spec records it), a
+`## Body` section and, when recorded, a `## Acceptance` section. With
+`--json`, `data` carries the usual `item_id` and `ticket` (that text) and a
+`spec` object with `version`, `title`, `size`, `merge_class`, `body_md` and
+`acceptance`; a field the spec does not record is `null`. An item that read a
+ticket from a file has no `spec` key. A source that does name a file reads and
+refuses exactly as above: a broken locator, a missing file or a missing or
+repeated anchor refuses even when the item has a spec, and the spec never
+stands in for it. An item with no spec keeps the refusal it had
+(`row_source_no_also_at`, `no source locator on ITEM` or `invalid source
+locator: SOURCE`, all `not_found`, exit 1). A spec event that cannot be read is
+refused `spec_unreadable` (exit 3), printing no text.
 
 **`search WORD... [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
 Full-text search, ranked by BM25; the words may be quoted or separate.
@@ -690,7 +735,9 @@ command runs.
 
 `--commit` stages the export directory into a temporary index, never the
 repository's own, and scans the exact tree it will commit before it makes
-the commit. A file at an event name (sixteen digits and `.json`, at any
+the commit. The temporary index does not carry skip-worktree bits from the
+repository index, so a skip-worktree file is staged from the work tree as
+it is on disk, not omitted. A file at an event name (sixteen digits and `.json`, at any
 depth) must be the canonical bytes of a valid event record, and its
 `doc.attached` document gets the same scan as at export; every other file,
 every path name and the commit message are scanned for the credential

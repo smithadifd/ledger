@@ -322,6 +322,7 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `note` | append a note to an item | yes |
 | `state` | set an item's status (`open`, `claimed`, `blocked`, `closed`), owner, claim or blocker | yes |
 | `claim` | claim an item with a lease, optionally capped by `--capacity` | yes |
+| `claim-system` | claim this database for a system such as `work` or `home`; the same name again changes nothing, another name is refused | yes |
 | `link` | link an item to a PR, branch, session, URL or another item; `duplicate-of` also closes it | yes |
 | `append` | append a validated event of any non-reserved kind | yes |
 | `append-many` | append several events for one item in one transaction (JSON array on stdin) | yes |
@@ -579,6 +580,8 @@ change, and add or update a test that fails without it. Before you ask for
 review, `python3 -m pytest -q` and `python3 -m ledger.gen_verb_registry
 --check` must pass. A change to the schema is a new migration file, never an
 edit to an old one.
+
+The steps used to cut a tag are listed in [docs/releasing.md](docs/releasing.md).
 
 ## License
 

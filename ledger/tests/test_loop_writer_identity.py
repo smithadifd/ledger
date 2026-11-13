@@ -677,6 +677,7 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
         "append-many",
         "capture",
         "claim",
+        "claim-system",
         "doc",
         "elect",
         "entity",
@@ -800,6 +801,14 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
                     item_id,
                     "--owner",
                     f"claimant-{rng.randrange(4)}",
+                )
+                assert code in (0, 3), err
+            elif action == "claim-system":
+                # A system claim binds the database, not an item: it never
+                # closes an item or links a merge. The first name wins and
+                # another name is refused.
+                code, _out, err = invoke(
+                    monkeypatch, db, "claim-system", rng.choice(("home", "work"))
                 )
                 assert code in (0, 3), err
             elif action == "elect":

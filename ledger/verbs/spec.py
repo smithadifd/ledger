@@ -13,6 +13,14 @@ the write transaction. The latest ``item.spec`` event is the current spec;
 ``set_spec`` is the only writer of ``item.spec``: the store reserves the
 kind, so ``ledger append`` and ``append-many`` refuse it and no version can
 skip the N+1 and content-hash rules. A merge class is one of MC-0 to MC-4.
+
+``spec set --expect-revision ID`` is the compare-and-set ``append``,
+``state``, ``note`` and ``append-many`` take, parsed by the same code: inside
+the write transaction, after the not-found check and before the unchanged
+compare, the item's newest event id must still be ID. Otherwise
+``StaleRevision`` (exit 5, ``stale_revision``) is raised and nothing is
+written, even when the content and source are unchanged. ``none`` never
+matches, since every item has its creation event.
 """
 from __future__ import annotations
 
@@ -22,8 +30,14 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
-from ledger.schema import SPEC_CONTENT_FIELDS, SPEC_KIND, SPEC_MERGE_CLASSES, SPEC_SIZES
-from ledger.store import Event, Ledger, canonical_dumps
+from ledger.schema import (
+    SPEC_CONTENT_FIELDS,
+    SPEC_KIND,
+    SPEC_MERGE_CLASSES,
+    SPEC_SIZES,
+    ValidationError,
+)
+from ledger.store import Event, Ledger, _check_expected_revision, canonical_dumps
 from ledger.verbs import (
     EXIT_NOT_FOUND,
     CliError,
@@ -32,7 +46,9 @@ from ledger.verbs import (
     UsageError,
     Verb,
     actor_kwargs,
+    add_expect_revision_argument,
     event_dict,
+    expect_revision_value,
     open_db,
 )
 
@@ -47,6 +63,7 @@ _SET_ONLY = (
     "merge_class",
     "source",
     "source_rev",
+    "expect_revision",
 )
 _VERSION = re.compile(r"v?([1-9][0-9]{0,8})")
 # The store appends item.spec only for a caller holding this (set_spec).
@@ -82,6 +99,7 @@ def set_spec(
     harness: str | None = None,
     model: str | None = None,
     session: str | None = None,
+    expect_revision: int | str | None = None,
 ) -> tuple[Event, bool]:
     """Append the item's next spec version when its content or source changed.
 
@@ -92,13 +110,29 @@ def set_spec(
     content and the new source. A call with no ``source`` compares content
     only and writes no source, as before. The current spec, the compares and
     the version are all read inside the write transaction.
+
+    ``expect_revision`` is a compare-and-set on the item: an event id, or
+    ``"none"`` (which never matches, since every item has its creation
+    event). It is checked inside the write transaction, after the not-found
+    check and before the unchanged compare, so a stale value raises
+    ``StaleRevision`` and writes nothing even when the content and source are
+    unchanged. A value of another type is refused as ``append`` refuses it.
+    ``None`` skips the check.
     """
+    if expect_revision is not None and expect_revision != "none" and (
+        type(expect_revision) is not int or expect_revision < 1
+    ):
+        raise ValidationError("bad-type:expect_revision")
     digest = content_hash(content)
     with lg.transaction():
         if lg.item(item_id) is None:
             raise CliError(
                 f"item not found: {item_id}", code="not_found", exit_code=EXIT_NOT_FOUND
             )
+        if expect_revision is not None:
+            # Before the unchanged compare: a stale revision never reads as
+            # an unchanged no-op.
+            _check_expected_revision(lg._conn, item_id, expect_revision)
         current = current_spec(lg, item_id)
         if (
             current is not None
@@ -148,6 +182,7 @@ def add_arguments(parser) -> None:
     )
     parser.add_argument("--source", help="set: where the content came from (not hashed)")
     parser.add_argument("--source-rev", help="set: the commit it was read at (not hashed)")
+    add_expect_revision_argument(parser)
     parser.add_argument("--version", help="show: this version instead of the current one")
 
 
@@ -250,6 +285,7 @@ def _run_set(args, ctx: Context) -> Result:
             raise UsageError(f"--body-file: cannot read {args.body_file}: {exc}") from exc
     if not body:
         raise UsageError("spec set needs a non-empty body")
+    expect = expect_revision_value(args)
     content = {
         "title": args.title,
         "body_md": body,
@@ -265,6 +301,7 @@ def _run_set(args, ctx: Context) -> Result:
             content,
             source=args.source,
             source_rev=args.source_rev,
+            expect_revision=expect,
             **actor_kwargs(ctx),
         )
     finally:

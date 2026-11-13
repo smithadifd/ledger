@@ -14,7 +14,7 @@ event's bytes are scanned for credential shapes (``ledger.credscan``). A hit
 on an event without ``credential_override: true`` refuses the whole export
 (``ExportDocCredential``): no file is written and the watermark does not
 move. A by-path document's event file carries its stored path, sha256 and
-size and no bytes, so it is not scanned, and export never opens a document
+size and no bytes, so export scans the stored path and never opens a document
 file. ``commit_export`` stages the export directory into a private
 temporary index and scans the exact tree it will commit, and the new commit
 object, before any ref moves; ``push_export`` scans every commit, path and
@@ -333,7 +333,7 @@ def read_watermark(export_dir: Path) -> int:
         return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
         raise LedgerError(f"unreadable watermark: {exc}") from exc
     if type(data) is not dict or "id" not in data:
         raise LedgerError("watermark.json must be an object with id")
@@ -367,7 +367,7 @@ def verify_stream_digest(export_dir: Path, events: list[Event]) -> str:
         raise LedgerError(f"export stream digest is missing: {STREAM_DIGEST_NAME}")
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
         raise LedgerError(f"unreadable export stream digest: {exc}") from exc
     if type(record) is not dict:
         raise LedgerError("export stream digest must be an object")
@@ -910,14 +910,20 @@ def anchor_ticket_line(text: str, ticket_id: str) -> int | None:
 
 # An item minted from a roadmap row has the row key ``row:<ID>`` as its created
 # source, not a locator. Its locator is the one its newest ``also at <locator>``
-# note names. The note text is exactly ``also at `` and then a locator in
+# note names, provided that note's idempotency_key starts with
+# ``row-item:also-at:`` (``ALSO_AT_KEY_PREFIX``), the namespace the helper and
+# the importer write. The note text is exactly ``also at `` and then a locator in
 # either form: ``rel:line@commit`` (``valid_source_locator``) or the anchor
 # form ``rel#ID`` (``valid_anchor_locator``). No other case, no extra or
 # trailing whitespace, no line break or control character, no bullet or fence.
-# A note of any other shape, or of another kind, is not an also-at note and is
-# skipped, never repaired. The newest note of either form wins.
+# A note of any other shape, of another kind, or whose key is outside that
+# namespace (a hand-written also-at note) is not an also-at note and is
+# skipped, never repaired. Never fall back to an unkeyed note. The newest keyed
+# note of either form wins. With no keyed note the item is refused
+# ``row_source_no_also_at``.
 ROW_SOURCE_PREFIX = "row:"
 ALSO_AT_PREFIX = "also at "
+ALSO_AT_KEY_PREFIX = "row-item:also-at:"
 
 
 def is_row_source(source: str) -> bool:
@@ -947,15 +953,30 @@ def also_at_note_locator(text: object) -> str | None:
 
 
 def newest_also_at_locator(events: Sequence[Event]) -> str | None:
-    """The locator of the last valid ``also at`` note in event order (oldest
-    first), or None when the item has none."""
+    """The locator of the last valid keyed ``also at`` note in event order
+    (oldest first), or None when the item has none.
+
+    A note supplies the locator only when its ``idempotency_key`` starts with
+    ``ALSO_AT_KEY_PREFIX`` and its text is a valid also-at note. A note with no
+    key, another key, or a key in the namespace but invalid text is skipped.
+    The walk never falls back to an unkeyed note.
+    """
     for event in reversed(events):
         if event.kind != "item.note":
+            continue
+        if not event.idempotency_key.startswith(ALSO_AT_KEY_PREFIX):
             continue
         locator = also_at_note_locator(event.payload.get("text"))
         if locator is not None:
             return locator
     return None
+
+
+class TicketSourceNamesNoFile(ValueError):
+    """The item's source names no file ``--ticket`` could read: it is empty, it
+    is neither a valid locator nor a row key, or it is a row key with no valid
+    ``also at`` note. A source that names a file never raises this, whatever is
+    wrong with the file or its anchor; those stay plain ``ValueError``."""
 
 
 def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> str:
@@ -966,7 +987,9 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
     either ``rel:line@commit`` or the anchor form ``rel#ID`` (the committed
     ``HEAD`` copy of ``rel``, the section of the ticket heading for ``ID``); an item with
     none, or an anchor that is absent or repeated, is refused by name, and no
-    section is guessed.
+    section is guessed. A source that names no file at all raises
+    ``TicketSourceNamesNoFile`` (a ``ValueError`` with the same message as ever),
+    so the ``export-item`` verb can print the item's spec instead.
     """
     events = lg.events(item_id=item_id)
     created = next((event for event in events if event.kind == "item.created"), None)
@@ -974,14 +997,14 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
         raise ValueError(f"no item.created on {item_id}")
     source = created.payload.get("source") or ""
     if not source:
-        raise ValueError(f"no source locator on {item_id}")
+        raise TicketSourceNamesNoFile(f"no source locator on {item_id}")
     locator = source
     # A source that is a valid locator is always read as one, so a path that
     # happens to be named ``row`` keeps its meaning.
     if not valid_source_locator(source) and is_row_source(source):
         found = newest_also_at_locator(events)
         if found is None:
-            raise ValueError(
+            raise TicketSourceNamesNoFile(
                 f"row_source_no_also_at: {item_id} has the row source {source} "
                 "and no valid 'also at <locator>' note"
             )
@@ -997,6 +1020,10 @@ def item_ticket_text(lg: Ledger, item_id: str, *, cwd: Path | None = None) -> st
                     f"in {locator}"
                 )
             return ticket_section(blob, line)
+    elif not valid_source_locator(source):
+        # Neither a locator nor a row key (a follow-up's PARENT:slug source):
+        # it names no file. Same message read_source_blob would have raised.
+        raise TicketSourceNamesNoFile(f"invalid source locator: {source}")
     blob = read_source_blob(locator, cwd=cwd)
     _rel, line, _sha = split_source_locator(locator)
     return ticket_section(blob, line)
@@ -1048,7 +1075,7 @@ def load_export(export_dir: Path) -> list[Event]:
         file_id = int(match.group(1))
         try:
             record = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, ValueError, TypeError, RecursionError) as exc:
             raise ChainBroken(f"exported file {path.name}: {exc}") from exc
         if type(record) is not dict:
             raise ChainBroken(f"exported file {path.name}: not an object")
@@ -1964,6 +1991,7 @@ def commit_export(export_dir: Path, message: str = "ledger export") -> CommitRes
     git_dir = _git(export_dir, "rev-parse", "--absolute-git-dir")
     if git_dir.returncode != 0:
         raise _git_failed(step, "rev-parse --absolute-git-dir", git_dir)
+    # The temporary index does not carry the real index's skip-worktree bits.
     private = tempfile.mkdtemp(prefix="ledger-export-index-", dir=os.fsdecode(_line(git_dir.stdout)))
     try:
         new = _commit_tree(
