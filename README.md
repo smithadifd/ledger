@@ -527,6 +527,8 @@ review, `python3 -m pytest -q` and `python3 -m ledger.gen_verb_registry
 --check` must pass. A change to the schema is a new migration file, never an
 edit to an old one.
 
+The steps used to cut a tag are listed in [docs/releasing.md](docs/releasing.md).
+
 ## License
 
 MIT. See [LICENSE](LICENSE).
