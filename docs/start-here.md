@@ -132,6 +132,12 @@ If `doctor` says `database does not exist`, it is looking at a path where
 nothing has been written: check `echo $LEDGER_DB` and run step 6. If it says
 `pass --db or set LEDGER_DB`, step 4 was not done in this shell.
 
+## 9. Optional: a scheduled export
+
+Once the ledger works, [A scheduled export without the toolkit](scheduled-export.md)
+sets up a private git repository and jobs that export, push and check it on a
+schedule, and shows how to prove the pushed copy restores.
+
 ## Next
 
 - The [README](../README.md) has a longer quick start, the model, and the verb table.
