@@ -51,6 +51,14 @@ from .schema import (
 
 BUSY_TIMEOUT_MS = 5_000
 APPEND_RETRIES = 8
+# Settling a claim after ``UnsettledClaimError`` (``Ledger.claim_outcome``):
+# up to CLAIM_SETTLE_ATTEMPTS checkpoints, none started after
+# CLAIM_SETTLE_SECONDS. Each waits at most CLAIM_SETTLE_WAIT_MS on other
+# connections, with CLAIM_SETTLE_PAUSE_SECONDS between attempts.
+CLAIM_SETTLE_ATTEMPTS = 5
+CLAIM_SETTLE_SECONDS = 1.0
+CLAIM_SETTLE_WAIT_MS = 150
+CLAIM_SETTLE_PAUSE_SECONDS = 0.05
 GENESIS_HASH = "0" * 64
 _MIGRATION_NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _RECORDED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
@@ -655,6 +663,37 @@ def _check_expected_revision(
     )
 
 
+class UnsettledClaimError(SharedDatabaseError):
+    """A ``Ledger.claim_system`` refusal raised where its transaction may have committed.
+
+    ``claim_system`` raises it for an I/O error during the claim's
+    transaction and for a checkpoint that cannot finish after the commit.
+    ``event`` is the claim event this call wrote inside the transaction, or
+    ``None`` when it wrote none (the system was already on record, or the
+    error came before the write). ``committed`` is ``True`` when the
+    transaction is known to have committed (only the checkpoint after it
+    failed) and ``False`` when the error came inside the transaction, where
+    the commit may or may not have landed. ``data_version`` is the
+    connection's ``PRAGMA data_version`` read inside the transaction, under
+    its write lock, or ``None`` when the error came before that read.
+    ``Ledger.claim_outcome`` re-reads the claim, retries the checkpoint and
+    settles through the open proof to decide.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        event: Event | None,
+        committed: bool,
+        data_version: int | None,
+    ):
+        super().__init__(message)
+        self.event = event
+        self.committed = committed
+        self.data_version = data_version
+
+
 class Ledger:
     """Open database handle: append, query views, verify the hash chain."""
 
@@ -1163,14 +1202,25 @@ class Ledger:
         A database reached through a second path while a connection on the
         first path has unsaved WAL frames can fail with a raw SQLite I/O
         error; that, and a checkpoint that cannot finish, are reported as
-        ``SharedDatabaseError`` too. Any other SQLite failure, such as a
-        read-only file, is refused as a ``LedgerError`` that names it.
+        ``UnsettledClaimError``, a ``SharedDatabaseError`` that carries the
+        claim event this call wrote, if any. A checkpoint runs after the
+        commit, and an I/O error can come at the commit itself, so the claim
+        may be on record when either is raised: ``claim_outcome`` re-reads
+        it, retries the checkpoint, settles through the open proof, and only
+        then reports what the transaction reached. Any other SQLite failure,
+        such as a read-only file, is refused as a ``LedgerError`` that names
+        it.
         """
-        wrote = False
+        written: Event | None = None
+        version: int | None = None
         try:
             with self.transaction():
+                # Read under the write lock: no other connection can commit
+                # until this transaction ends, so a later read that differs
+                # means another connection committed after it.
+                version = self._conn.execute("PRAGMA data_version").fetchone()[0]
                 if _claimed_system(self._conn) != system:
-                    self._append(
+                    written = self._append(
                         kind=SYSTEM_CLAIM_KIND,
                         payload={"system": system},
                         idempotency_key=f"{SYSTEM_CLAIM_KIND}:{system}",
@@ -1181,7 +1231,6 @@ class Ledger:
                         internal=True,
                         ignore_retry_attribution=False,
                     )
-                    wrote = True
         except sqlite3.OperationalError as exc:
             if _is_busy(exc):
                 raise
@@ -1189,9 +1238,12 @@ class Ledger:
                 raise LedgerError(
                     f"system {system!r}: could not claim {self.path}: {exc}"
                 ) from exc
-            raise SharedDatabaseError(
+            raise UnsettledClaimError(
                 f"system {system!r}: {self.path} could not be read ({exc}); "
-                "another path may share this database"
+                "another path may share this database",
+                event=written,
+                committed=False,
+                data_version=version,
             ) from exc
         # Fold the claim into the main file, whose WAL another path's
         # connection would not read. A checkpoint that cannot finish means
@@ -1201,15 +1253,120 @@ class Ledger:
             "PRAGMA wal_checkpoint(TRUNCATE)"
         ).fetchone()
         if busy:
-            raise SharedDatabaseError(
+            raise UnsettledClaimError(
                 f"system {system!r}: checkpoint of {self.path} is busy "
                 f"({done} of {wal_frames} WAL frames written back): another "
-                "connection, perhaps through another path to this file, holds the database"
+                "connection, perhaps through another path to this file, holds the database",
+                event=written,
+                committed=True,
+                data_version=version,
             )
         # The claim is settled on disk only now: check the path still names
         # the files it was written to before reporting it.
         self._settle_bound()
-        return wrote
+        return written is not None
+
+    def claim_outcome(self, system: str, refusal: UnsettledClaimError) -> bool:
+        """Settle the claim after ``claim_system`` raised ``refusal``, or raise it again.
+
+        Returns only on the proof the normal return of ``claim_system``
+        rests on: ``system``'s claim is on record, ``PRAGMA
+        wal_checkpoint(TRUNCATE)`` returns busy 0 (the claim is in the main
+        database file), and then ``_settle_bound`` passes (the path still
+        names the files the open proved). The checkpoint is retried within a
+        bounded budget (``CLAIM_SETTLE_ATTEMPTS`` attempts, none started after
+        ``CLAIM_SETTLE_SECONDS``): two callers racing on a fresh database each
+        checkpoint after their commit, and one can find the other's
+        checkpoint running, which clears in milliseconds. It then returns
+        what the claim's transaction reached: ``True`` when this call's write
+        is the claim on record, ``False`` when another write put it there.
+
+        This call's write is the claim on record when the claim on record is
+        the event it wrote (same id and hash) and that write is known to have
+        committed: the commit finished and only the checkpoint after it
+        failed (``refusal.committed``), or no other connection has committed
+        since this call's transaction took its write lock (``PRAGMA
+        data_version`` is unchanged). Two callers with the same attribution
+        can write byte-identical claim events in the same millisecond, so the
+        event alone cannot say whose commit landed: when another connection
+        has committed since, and this call's commit is not known to have
+        finished, the answer is ``False``.
+
+        Every read and checkpoint runs on this handle's own connection, the
+        one the open proof covers. Otherwise raise ``refusal`` again: no
+        claim on record, another system's claim on record, a read or a
+        checkpoint that raises (the connection may be unusable after an I/O
+        error), a checkpoint still busy when the budget is spent (another
+        connection, perhaps through another path to the file, still holds
+        the database), or a connection still inside a transaction (its reads
+        would see rows that were never committed). A failed binding check
+        raises ``UnsafeDatabaseFile`` (``db_swapped`` or
+        ``db_sibling_unsafe``). It never reports a claim that is not on
+        record, nor one whose checkpoint has not finished, nor one the path
+        no longer names.
+        """
+        conn = self._conn
+        if conn.in_transaction:
+            raise refusal
+        try:
+            row = conn.execute(
+                "SELECT * FROM events WHERE kind = ? ORDER BY id LIMIT 1",
+                (SYSTEM_CLAIM_KIND,),
+            ).fetchone()
+            version = conn.execute("PRAGMA data_version").fetchone()[0]
+        except sqlite3.Error:
+            raise refusal
+        if row is None:
+            raise refusal
+        on_record = _event_from_row(row)
+        if on_record.payload.get("system") != system:
+            raise refusal
+        try:
+            settled = self._checkpoint_within_budget()
+        except sqlite3.Error:
+            raise refusal
+        if not settled:
+            raise refusal
+        written = refusal.event
+        mine = (
+            written is not None
+            and (on_record.id, on_record.hash) == (written.id, written.hash)
+            and (
+                refusal.committed
+                or (refusal.data_version is not None and version == refusal.data_version)
+            )
+        )
+        # The claim is settled on disk only now: the open proof's binding
+        # check is the last step before the outcome is reported.
+        self._settle_bound()
+        return mine
+
+    def _checkpoint_within_budget(self) -> bool:
+        """Retry ``PRAGMA wal_checkpoint(TRUNCATE)`` until it returns busy 0.
+
+        Up to ``CLAIM_SETTLE_ATTEMPTS`` attempts, none started after
+        ``CLAIM_SETTLE_SECONDS``, each waiting at most
+        ``CLAIM_SETTLE_WAIT_MS`` on other connections (the connection's busy
+        timeout, restored afterwards), with ``CLAIM_SETTLE_PAUSE_SECONDS``
+        between attempts. Returns ``True`` on the first busy 0 and ``False``
+        when the budget is spent. A ``sqlite3.Error`` propagates; the caller
+        refuses on it.
+        """
+        conn = self._conn
+        deadline = time.monotonic() + CLAIM_SETTLE_SECONDS
+        conn.execute(f"PRAGMA busy_timeout = {CLAIM_SETTLE_WAIT_MS}")
+        try:
+            for attempt in range(CLAIM_SETTLE_ATTEMPTS):
+                if attempt:
+                    time.sleep(CLAIM_SETTLE_PAUSE_SECONDS)
+                    if time.monotonic() >= deadline:
+                        return False
+                busy = conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0]
+                if not busy:
+                    return True
+            return False
+        finally:
+            conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
 
     def verify(self, *, system: str | None = None) -> None:
         """Walk events by id and refuse a broken hash chain or a bad payload.

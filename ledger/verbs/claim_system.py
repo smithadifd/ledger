@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from ledger.schema import SYSTEM_CLAIM_KIND, ValidationError, validate_payload
+from ledger.store import UnsettledClaimError
 from ledger.verbs import Context, Result, UsageError, Verb, actor_kwargs, open_db
 
 NAME_RULE = (
@@ -46,7 +47,24 @@ def run(args, ctx: Context) -> Result:
         # two callers claiming the same name at once are not both told
         # "claimed". The claim carries the caller's attribution, as every
         # other write verb's event does.
-        wrote = lg.claim_system(name, **actor_kwargs(ctx))
+        try:
+            wrote = lg.claim_system(name, **actor_kwargs(ctx))
+        except UnsettledClaimError as refusal:
+            # DESIGN: report the outcome the transaction reached. The library
+            # raises this for an I/O error or a checkpoint that cannot finish,
+            # either of which can come after the claim committed: two callers
+            # racing on a fresh database each checkpoint after their commit,
+            # and one checkpoint finds the other running. claim_outcome
+            # settles only on the normal return's proof, on the same opened
+            # connection: this name's claim is on record, a bounded retry of
+            # PRAGMA wal_checkpoint(TRUNCATE) returns busy 0, and then the
+            # open proof's binding check (Ledger._settle_bound) passes. Then
+            # it exits 0 (claimed when this call's write is known to have
+            # committed it, already claimed otherwise). A checkpoint still
+            # held when the retry budget is spent, or one that raises,
+            # re-raises the refusal (exit 3, shared_database); a failed
+            # binding check refuses as db_swapped or db_sibling_unsafe.
+            wrote = lg.claim_outcome(name, refusal)
         path = str(lg.path)
     finally:
         lg.close()
