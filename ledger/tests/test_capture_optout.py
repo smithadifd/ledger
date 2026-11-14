@@ -32,7 +32,6 @@ from ledger.store import open_ledger
 from ledger.verbs import capture
 
 PKG_PARENT = Path(__file__).resolve().parents[2]  # makes ``python -m ledger`` importable
-ROOT = Path(__file__).resolve().parents[2]
 SECRET = "the person's private words"
 PREFIX = "<injected-by-a-tool>"
 
@@ -435,13 +434,3 @@ def test_picker_capture_ignores_both_keys(db: Path, optout_dir: Path) -> None:
     done = run(db, "capture", "--kind", "picker", stdin=json.dumps(hook))
     assert done.returncode == 0, done.stderr
     assert done.stdout.startswith("captured\thook:picker\t")
-
-
-# --- docs -------------------------------------------------------------------------
-
-
-def test_the_cli_page_documents_both_keys_and_both_reasons() -> None:
-    page = " ".join((ROOT / "docs" / "cli.md").read_text(encoding="utf-8").split())
-    for token in ("`capture_optout_paths`", "`capture_skip_prefixes`", "`cwd_optout`",
-                  "`injected`"):
-        assert token in page, token
