@@ -156,9 +156,9 @@ def test_a_slash_in_either_part_is_refused_and_writes_nothing(
 
 def test_older_events_read_as_an_empty_operator_after_the_migration(tmp_path) -> None:
     path = tmp_path / "ledger.db"
-    conn = connect(path)
+    conn, proof = connect(path)
     migrate(conn, load_migrations()[:6])
-    legacy = Ledger(conn, path)
+    legacy = Ledger(conn, path, proof)
     created = legacy.append(
         kind="item.created",
         payload={"type": "ticket", "title": "older item"},

@@ -112,7 +112,7 @@ def test_a_newer_schema_is_refused_even_when_this_reader_also_has_pending_migrat
     tmp_path: Path,
 ) -> None:
     db = tmp_path / "ledger" / "home.db"
-    conn = connect(db)
+    conn, _proof = connect(db)
     migrate(conn, load_migrations()[:2])
     conn.close()
     _add_version(db, NEWER)
@@ -135,7 +135,7 @@ def test_a_concurrent_newer_writer_is_caught_inside_the_migration_transaction(
     tmp_path: Path, monkeypatch
 ) -> None:
     db = tmp_path / "ledger" / "home.db"
-    conn = connect(db)
+    conn, _proof = connect(db)
     migrate(conn, load_migrations()[:2])
     conn.close()
     real = store.applied_versions
@@ -423,7 +423,7 @@ def test_open_refuses_when_a_newer_writer_migrates_between_precheck_and_connect(
     statements: list[str] = []
     real_connect = store.connect
 
-    def racing(path: Path) -> sqlite3.Connection:
+    def racing(path: Path) -> tuple[sqlite3.Connection, object]:
         newer = sqlite3.connect(db, isolation_level=None)
         try:
             newer.execute(
@@ -432,9 +432,9 @@ def test_open_refuses_when_a_newer_writer_migrates_between_precheck_and_connect(
             )
         finally:
             newer.close()
-        conn = real_connect(path)
+        conn, proof = real_connect(path)
         conn.set_trace_callback(statements.append)
-        return conn
+        return conn, proof
 
     monkeypatch.setattr(store, "connect", racing)
 
@@ -498,7 +498,7 @@ def test_backup_refuses_a_newer_schema_and_leaves_no_target(newer: Path, tmp_pat
     _assert_names_both(str(exc.value), NEWER, HIGHEST)
 
     assert not dest.exists()
-    assert not dest.with_name(dest.name + ".partial").exists()
+    assert not list(dest.parent.glob(f".{dest.name}.*.partial"))
     assert not dest.parent.exists()
     assert _sha256(newer) == before_sha
     assert sorted(p.name for p in newer.parent.iterdir()) == [newer.name]
@@ -579,4 +579,4 @@ def test_backup_refuses_a_newer_migration_committed_after_its_version_check(
     assert calls == [1]
     assert [v for v, _ in _versions(current)][-1] == NEWER
     assert not dest.exists()
-    assert not dest.with_name(dest.name + ".partial").exists()
+    assert not list(dest.parent.glob(f".{dest.name}.*.partial"))

@@ -30,7 +30,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
-from .dbfile import checked_connect, precheck_files
+from .dbfile import OpenProof, checked_connect, precheck_files, verify_bound
 from .decisions import check_event as check_decision_event
 from .decisions import decision_records
 from .paths import SharedDatabaseError, SyncPathError, SyncPathWarning, resolve_db_path
@@ -264,7 +264,7 @@ def _refuse_newer_schema_before_connect(path: Path) -> None:
     """
     if not precheck_files(path):
         return
-    conn, _mode = checked_connect(
+    conn, _mode, _proof = checked_connect(
         path,
         lambda: sqlite3.connect(
             f"{path.as_uri()}?mode=rw",
@@ -365,17 +365,19 @@ def migrate(conn: sqlite3.Connection, migrations: list[Migration] | None = None)
     raise LedgerError("migration retries exhausted") from last_error
 
 
-def connect(path: Path) -> sqlite3.Connection:
+def connect(path: Path) -> tuple[sqlite3.Connection, OpenProof]:
     """Open the database with WAL journaling and a busy timeout.
 
     ``PRAGMA journal_mode = WAL`` runs only when the file is not already WAL.
+    Returns the connection and the ``OpenProof`` of the files it holds, which
+    every write checks again before it is reported (``Ledger._settle_bound``).
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     last_error: BaseException | None = None
     for attempt in range(APPEND_RETRIES):
         conn: sqlite3.Connection | None = None
         try:
-            conn, _mode = checked_connect(
+            conn, _mode, proof = checked_connect(
                 path,
                 lambda: sqlite3.connect(
                     str(path), isolation_level=None, timeout=BUSY_TIMEOUT_MS / 1000
@@ -385,7 +387,7 @@ def connect(path: Path) -> sqlite3.Connection:
             conn.row_factory = sqlite3.Row
             conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA foreign_keys = ON")
-            return conn
+            return conn, proof
         except sqlite3.OperationalError as exc:
             if conn is not None:
                 conn.close()
@@ -656,10 +658,21 @@ def _check_expected_revision(
 class Ledger:
     """Open database handle: append, query views, verify the hash chain."""
 
-    def __init__(self, conn: sqlite3.Connection, path: Path):
+    def __init__(self, conn: sqlite3.Connection, path: Path, proof: OpenProof):
         self._conn = conn
         self.path = path
+        self._proof = proof
         self._in_batch = False
+
+    def _settle_bound(self) -> None:
+        """Refuse to report a durable write unless the path still names the proved files.
+
+        Called after every ``COMMIT`` a write makes, and after a claim's
+        checkpoint. A failure raises ``UnsafeDatabaseFile`` (``db_swapped`` or
+        ``db_sibling_unsafe``): the write landed in a file the path no longer
+        names, so it is not in the database at that path.
+        """
+        verify_bound(self._proof)
 
     def close(self) -> None:
         self._conn.close()
@@ -839,6 +852,7 @@ class Ledger:
             self._in_batch = True
             yield
             conn.execute("COMMIT")
+            self._settle_bound()
         except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
@@ -1040,6 +1054,7 @@ class Ledger:
                     )
                 if owned:
                     conn.execute("COMMIT")
+                    self._settle_bound()
                 return event
             if precondition is not None:
                 precondition(conn)
@@ -1093,6 +1108,7 @@ class Ledger:
             )
             if owned:
                 conn.execute("COMMIT")
+                self._settle_bound()
             return Event(
                 id=next_id,
                 kind=kind,
@@ -1190,6 +1206,9 @@ class Ledger:
                 f"({done} of {wal_frames} WAL frames written back): another "
                 "connection, perhaps through another path to this file, holds the database"
             )
+        # The claim is settled on disk only now: check the path still names
+        # the files it was written to before reporting it.
+        self._settle_bound()
         return wrote
 
     def verify(self, *, system: str | None = None) -> None:
@@ -1317,14 +1336,16 @@ def open_ledger(path: Path | str, *, create: bool = True) -> Ledger:
     if not create and not resolved.exists():
         raise LedgerError(f"database does not exist: {resolved}")
     _refuse_newer_schema_before_connect(resolved)
-    conn = connect(resolved)
+    conn, proof = connect(resolved)
+    lg = Ledger(conn, resolved, proof)
     try:
         _refuse_unknown_versions(_recorded_versions(conn), load_migrations())
         migrate(conn)
+        lg._settle_bound()
     except Exception:
         conn.close()
         raise
-    return Ledger(conn, resolved)
+    return lg
 
 
 def claim_database(
@@ -1373,6 +1394,12 @@ def _readonly_conn(uri: str) -> sqlite3.Connection:
 
 
 def _connect_readonly(path: Path) -> sqlite3.Connection:
+    """``_connect_readonly_proved`` for a caller that needs no proof."""
+    conn, _proof = _connect_readonly_proved(path)
+    return conn
+
+
+def _connect_readonly_proved(path: Path) -> tuple[sqlite3.Connection, OpenProof]:
     """Connect ``mode=ro``; in a directory we cannot write, fall back to ``immutable=1``.
 
     Opening a WAL database ``mode=ro`` needs the ``-wal`` and ``-shm`` files.
@@ -1397,21 +1424,21 @@ def _connect_readonly(path: Path) -> sqlite3.Connection:
     """
     uri = path.as_uri()
     try:
-        conn, _mode = checked_connect(
+        conn, _mode, proof = checked_connect(
             path, lambda: _readonly_conn(f"{uri}?mode=ro")
         )
-        return conn
+        return conn, proof
     except BaseException as exc:
         refused = (isinstance(exc, sqlite3.OperationalError)
                    and _is_readonly_refusal(exc))
         if not refused or _side_files_present(path):
             raise
-    conn, _mode = checked_connect(
+    conn, _mode, proof = checked_connect(
         path,
         lambda: _readonly_conn(f"{uri}?immutable=1"),
         immutable=True,
     )
-    return conn
+    return conn, proof
 
 
 def open_ledger_readonly(path: Path | str) -> Ledger:
@@ -1425,7 +1452,7 @@ def open_ledger_readonly(path: Path | str) -> Ledger:
     resolved = resolve_db_path(path)
     if not resolved.exists():
         raise LedgerError(f"database does not exist: {resolved}")
-    conn = _connect_readonly(resolved)
+    conn, proof = _connect_readonly_proved(resolved)
     try:
         has_versions = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
@@ -1441,7 +1468,7 @@ def open_ledger_readonly(path: Path | str) -> Ledger:
     except BaseException:
         conn.close()
         raise
-    return Ledger(conn, resolved)
+    return Ledger(conn, resolved, proof)
 
 
 __all__ = [

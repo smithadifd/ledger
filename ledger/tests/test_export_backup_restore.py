@@ -889,7 +889,7 @@ def test_backup_refuses_live_database_target(tmp_path: Path, monkeypatch) -> Non
     assert code == EXIT_REFUSED
     assert len(err.strip().splitlines()) == 1
     assert db.read_bytes() == before
-    assert not Path(str(db) + ".partial").exists()
+    assert not list(db.parent.glob(f".{db.name}.*.partial"))
 
 
 def test_backup_refuses_failed_integrity_check(tmp_path: Path, monkeypatch) -> None:
@@ -900,7 +900,7 @@ def test_backup_refuses_failed_integrity_check(tmp_path: Path, monkeypatch) -> N
     with pytest.raises(LedgerError, match="integrity_check: bad page 1"):
         backup_db(db, dest)
     assert not dest.exists()
-    assert not Path(str(dest) + ".partial").exists()
+    assert not list(dest.parent.glob(f".{dest.name}.*.partial"))
 
 
 def test_backup_snapshots_wal_events_not_yet_checkpointed(tmp_path: Path) -> None:

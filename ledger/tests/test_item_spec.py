@@ -579,7 +579,7 @@ def test_spec_versions_are_computed_in_the_write_transaction(db) -> None:
 def test_a_ledger_at_0007_migrates_and_keeps_every_view_column(tmp_path) -> None:
     path = tmp_path / "old.db"
     migrations = store.load_migrations()
-    conn = store.connect(path)
+    conn, _proof = store.connect(path)
     try:
         store.migrate(conn, [m for m in migrations if m.version <= 7])
         before = {

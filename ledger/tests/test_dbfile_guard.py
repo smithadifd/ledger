@@ -102,7 +102,7 @@ def _opener(db: Path, kind: str) -> Callable[[], sqlite3.Connection]:
 
 
 def _checked(db: Path, kind: str, **kwargs) -> sqlite3.Connection:
-    conn, _mode = dbfile.checked_connect(
+    conn, _mode, _proof = dbfile.checked_connect(
         db, _opener(db, kind), immutable=kind == "I", **kwargs
     )
     return conn
@@ -127,7 +127,7 @@ def _refuse(
 
     try:
         with pytest.raises(UnsafeDatabaseFile) as info:
-            conn, _mode = dbfile.checked_connect(db, recording, **kwargs)
+            conn, _mode, _proof = dbfile.checked_connect(db, recording, **kwargs)
             returned.append(conn)
         assert returned == [], "a refused connect must never return its connection"
         for conn in opened:
@@ -249,7 +249,7 @@ def _store_worker(db: Path, kind: str) -> Callable[[], None]:
 
     def work() -> None:
         if kind == "E":
-            conn = store.connect(db)
+            conn, _proof = store.connect(db)
             try:
                 conn.execute("SELECT count(*) FROM hammer").fetchone()
                 conn.execute("INSERT INTO hammer (n) VALUES (1)")
@@ -267,7 +267,7 @@ def _store_worker(db: Path, kind: str) -> Callable[[], None]:
 
 def _create_hammer_db(db: Path) -> None:
     """Create a WAL database through the checked read-write open (kind C)."""
-    conn = store.connect(db)
+    conn, _proof = store.connect(db)
     try:
         conn.execute("CREATE TABLE hammer (n INTEGER)")
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
@@ -672,7 +672,7 @@ def test_rollback_first_read_accepts_unrelated_new_descriptor(
 
     monkeypatch.setattr(dbfile, "_TEST_SEAM", open_extra)
     try:
-        conn, mode = dbfile.checked_connect(db, lambda: sqlite3.connect(db))
+        conn, mode, _proof = dbfile.checked_connect(db, lambda: sqlite3.connect(db))
         try:
             assert mode == "delete"
             assert conn.execute("SELECT count(*) FROM events").fetchone()[0] == 1
@@ -728,7 +728,7 @@ def test_descriptor_replaced_at_same_number_is_accepted(
                 fired = True
 
         monkeypatch.setattr(dbfile, "_TEST_SEAM", replace_fd)
-        conn, _mode = dbfile.checked_connect(db, lambda: sqlite3.connect(db))
+        conn, _mode, _proof = dbfile.checked_connect(db, lambda: sqlite3.connect(db))
         conn.close()
         assert fired
 
@@ -765,22 +765,24 @@ def test_backup_partial_symlink_is_refused_before_victim_is_touched(
     _seed(victim).close()
     victim_before = victim.read_bytes()
     dest = tmp_path / "backup.db"
-    partial = Path(f"{dest}.partial")
-    fired = False
+    planted: list[Path] = []
 
     def plant(stage: str, path: Path) -> None:
-        nonlocal fired
-        if stage == "before_connect" and path == partial and not fired:
-            os.symlink(victim, partial)
-            fired = True
+        if (stage == "before_connect" and path.parent == dest.parent
+                and path.name.endswith(".partial") and not planted):
+            # The partial exists (created private and empty); swap it for a link.
+            path.unlink()
+            os.symlink(victim, path)
+            planted.append(path)
 
     monkeypatch.setattr(dbfile, "_TEST_SEAM", plant)
     with pytest.raises(UnsafeDatabaseFile, match=r"^db_symlink:"):
         backup_db(source, dest)
-    assert fired
+    assert len(planted) == 1
+    assert planted[0].name.startswith(".backup.db.")
     assert victim.read_bytes() == victim_before
     assert not dest.exists()
-    assert not partial.exists()
+    assert not os.path.lexists(planted[0])
 
 
 def test_non_exception_during_checked_open_closes_connection_and_propagates(
@@ -1183,7 +1185,7 @@ def test_two_threads_opening_the_same_path_together_are_both_accepted(
 
     def run(index: int) -> None:
         try:
-            conn, _mode = dbfile.checked_connect(db, opener)
+            conn, _mode, _proof = dbfile.checked_connect(db, opener)
             outcomes[index] = conn.execute("SELECT count(*) FROM events").fetchone()[0]
             conn.close()
         except BaseException as exc:
@@ -1232,7 +1234,7 @@ def test_cross_process_writers_never_refuse_in_process_connects(tmp_path: Path) 
 
         def reader(kind: str) -> Callable[[], None]:
             def work() -> None:
-                conn = store.connect(db) if kind == "E" else store._connect_readonly(db)
+                conn = store.connect(db)[0] if kind == "E" else store._connect_readonly(db)
                 try:
                     conn.execute("SELECT count(*) FROM hammer").fetchone()
                 finally:
@@ -1522,7 +1524,7 @@ def _journal_writer(db: Path) -> Callable[[], sqlite3.Connection]:
 def test_open_rollback_journal_bound_to_its_name_is_accepted(tmp_path: Path) -> None:
     db = tmp_path / "ledger.db"
     _make_database(db, "at-path")
-    conn, mode = dbfile.checked_connect(db, _journal_writer(db))
+    conn, mode, _proof = dbfile.checked_connect(db, _journal_writer(db))
     try:
         assert mode == "delete"
         assert Path(f"{db}-journal").exists(), "the journal must be open for this case"
