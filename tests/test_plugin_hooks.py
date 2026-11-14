@@ -596,7 +596,7 @@ def test_t20_cli_page_documents_the_frames_the_config_key_and_hook_env() -> None
                   "--hook-model", "hook_model_bad_input", "hook_model_wrong_event",
                   "hook_model_bad_model", "hook_model_no_folder",
                   "hook_model_unsafe_folder", "hook_model_write_failed",
-                  "hook_model_timeout", "PostModelSwitch",
+                  "hook_model_timeout", "hook_model_unsupported", "PostModelSwitch",
                   *(f"`{frame}`" for frame in FRAMES)):
         assert token in page, token
     assert "running it twice leaves one capture" in page

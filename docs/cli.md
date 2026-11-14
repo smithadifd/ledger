@@ -851,7 +851,7 @@ for whatever reads it: the ledger records it and enforces nothing.
 
 ## Resume
 
-**`resume [--item ID] [--brief] [--hook-env]`**
+**`resume [--item ID] [--brief] [--hook-env] [--hook-model]`**
 For each open item that has an `item.stopped` event, print the newest stop
 (its point, the skills to invoke next, the files to read) and the commands
 that continue it, using the command prefix the person ran. The printed command
@@ -933,10 +933,16 @@ UTF-8 JSON object, or no usable `session_id`), `hook_model_wrong_event` (an
 input for another event), `hook_model_bad_model` (above),
 `hook_model_no_folder` (the database's folder does not exist; it is not
 created), `hook_model_unsafe_folder` (the `.session-models` name is a
-symbolic link or not a folder), `hook_model_write_failed`, and
+symbolic link or not a folder), `hook_model_write_failed`,
 `hook_model_timeout`: the command must finish within two seconds of its
 start, because Claude Code waits at most five seconds for a PostModelSwitch
-hook before it sends the next request; past that budget it writes nothing.
+hook before it sends the next request; past that budget it writes nothing,
+and `hook_model_unsupported`: the platform has no `flock` or cannot open a
+file without following a symbolic link (Windows). On such a platform every
+other command still works and writes stamp `LEDGER_MODEL`. The record
+changes what the session's later writes stamp, so, like a write, the command
+needs `LEDGER_HARNESS` and is refused with `missing_harness` (exit 3)
+without it; the plugin's hooks supply `claude-code` when it is unset.
 The command never opens or creates the database, never reads
 `LEDGER_SESSION` (the input's `session_id` names the file), and creates the
 `.session-models` folder (mode 0700) only inside an existing database

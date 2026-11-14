@@ -4,11 +4,13 @@
 # this session stamp it. Stdout stays empty on success: Claude Code adds a
 # PostModelSwitch hook's stdout to the model's context. A failure is one stderr
 # line with no model text, and exit 2, so Claude Code shows the line to the
-# user (exit 0 would hide it; the switch itself is never blocked). Off (no
-# output, no write) unless a `ledger` is on PATH and LEDGER_DB is set.
+# user (exit 0 would hide it; the switch itself is never blocked). The record
+# needs LEDGER_HARNESS, as a write does; the hook supplies claude-code when it
+# is unset. Off (no output, no write) unless a `ledger` is on PATH and
+# LEDGER_DB is set.
 command -v ledger >/dev/null 2>&1 || exit 0
 [ -n "${LEDGER_DB:-}" ] || exit 0
-ledger resume --hook-model >/dev/null 2>&1
+LEDGER_HARNESS="${LEDGER_HARNESS:-claude-code}" ledger resume --hook-model >/dev/null 2>&1
 rc=$?
 if [ "$rc" -ne 0 ]; then
   printf 'ledger-hooks: model record failed (exit %s)\n' "$rc" >&2

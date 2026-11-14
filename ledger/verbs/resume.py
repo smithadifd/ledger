@@ -47,10 +47,13 @@ PostModelSwitch older than the stored record writes nothing and exits 0
 with ``stale`` true. Refusals (exit 3, nothing on stdout):
 ``hook_model_bad_input`` (stdin not one UTF-8 JSON object, or no usable
 ``session_id``), ``hook_model_wrong_event``, ``hook_model_no_folder``,
-``hook_model_unsafe_folder``, ``hook_model_write_failed`` and
-``hook_model_timeout`` (not done within two seconds of its start). It never
-opens or creates the database and never reads ``LEDGER_SESSION``; it cannot
-be combined with ``--hook-env``, ``--brief`` or ``--item``.
+``hook_model_unsafe_folder``, ``hook_model_write_failed``,
+``hook_model_timeout`` (not done within two seconds of its start) and
+``hook_model_unsupported`` (a platform without ``flock``, such as Windows).
+The record changes what later writes stamp, so like a write it needs
+``LEDGER_HARNESS`` and is refused with ``missing_harness`` without it. It
+never opens or creates the database and never reads ``LEDGER_SESSION``; it
+cannot be combined with ``--hook-env``, ``--brief`` or ``--item``.
 """
 from __future__ import annotations
 
@@ -250,6 +253,17 @@ def _hook_model_intent(event: str, hook: Mapping[str, Any]) -> tuple[str, str | 
 def _run_hook_model(args, ctx: Context) -> Result:
     # The ordering key and the start of the two-second budget.
     seq = session_model.stamp()
+    # The record changes what this session's later writes stamp, so it needs
+    # the writer identity every write needs. resume is not a write verb (the
+    # CLI's gate does not run for it), so this action checks for itself, as
+    # ``doc add`` does.
+    if not ctx.harness:
+        raise CliError(
+            "LEDGER_HARNESS is required for writes; set it, e.g. "
+            "LEDGER_HARNESS=claude-code",
+            code="missing_harness",
+            exit_code=EXIT_REFUSED,
+        )
     if args.hook_env or args.brief or args.item_id is not None:
         raise UsageError("--hook-model cannot be combined with --hook-env, --brief or --item")
     raw = _read_stdin("hook_model_bad_input")

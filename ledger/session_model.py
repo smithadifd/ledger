@@ -36,10 +36,14 @@ Writing (:func:`record_hook_model`) is a compare-and-swap under an exclusive
 new content goes to a temporary file that is then renamed over the record,
 so a reader sees the old record or the new one, never a mix. The whole write
 must finish within two seconds of the hook's start, or it writes nothing.
+
+Platforms: the record needs ``fcntl.flock`` and opens that never follow a
+symbolic link, relative to a folder descriptor. Where any of these is missing
+(Windows), the module still imports, so every other command works; writes
+stamp ``LEDGER_MODEL`` and the hook refuses with ``hook_model_unsupported``.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -53,6 +57,11 @@ from typing import Any
 
 from ledger.paths import resolve_db_path
 
+try:
+    import fcntl
+except ImportError:  # not POSIX (Windows): see SUPPORTED
+    fcntl = None  # type: ignore[assignment]
+
 FOLDER_SUFFIX = ".session-models"
 MAX_RECORD_BYTES = 4096
 MAX_MODEL_BYTES = 256
@@ -64,8 +73,21 @@ EVENTS = ("SessionStart", "PostModelSwitch")
 RECORD_KEYS = frozenset({"session", "state", "model", "event", "seq"})
 _LOCK_POLL_SECONDS = 0.01
 _CLOEXEC = getattr(os, "O_CLOEXEC", 0)
-_FOLDER_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | _CLOEXEC
-_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | _CLOEXEC
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+# Whether this platform can keep the record safely: flock, opens that never
+# follow a symbolic link, and opens relative to a folder descriptor. Without
+# them the reader reads nothing and the hook refuses.
+SUPPORTED = bool(
+    fcntl is not None
+    and _NOFOLLOW
+    and _DIRECTORY
+    and _NONBLOCK
+    and {os.open, os.unlink, os.rename} <= os.supports_dir_fd
+)
+_FOLDER_FLAGS = os.O_RDONLY | _DIRECTORY | _NOFOLLOW | _CLOEXEC
+_READ_FLAGS = os.O_RDONLY | _NOFOLLOW | _NONBLOCK | _CLOEXEC
 
 
 class HookModelRefusal(Exception):
@@ -78,7 +100,10 @@ class HookModelRefusal(Exception):
 
 def stamp() -> int:
     """The ordering key and budget clock: monotonic nanoseconds."""
-    return time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+    clock = getattr(time, "clock_gettime_ns", None)
+    if clock is None:  # not POSIX: the hook refuses there, after this stamp
+        return time.monotonic_ns()
+    return clock(time.CLOCK_MONOTONIC)
 
 
 def session_models_dir(resolved_db: Path) -> Path:
@@ -196,8 +221,9 @@ def resolve_model(db: str | Path, session: str | None, env_model: str | None) ->
 
     The session's own record beside the database wins; with none (or none
     usable) it is ``env_model``; an ``"unknown"`` record stamps no model.
+    On a platform that cannot keep the record it is always ``env_model``.
     """
-    if session is None:
+    if session is None or not SUPPORTED:
         return env_model
     try:
         with warnings.catch_warnings():
@@ -251,7 +277,7 @@ def _open_folder(resolved_db: Path) -> int:
 def _lock(dir_fd: int, session: str, deadline: int) -> int:
     fd = os.open(
         lock_name(session),
-        os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK | _CLOEXEC,
+        os.O_RDWR | os.O_CREAT | _NOFOLLOW | _NONBLOCK | _CLOEXEC,
         0o600,
         dir_fd=dir_fd,
     )
@@ -276,7 +302,7 @@ def _lock(dir_fd: int, session: str, deadline: int) -> int:
 def _publish(dir_fd: int, session: str, content: bytes, deadline: int) -> None:
     tmp = f".{session_key(session)}.{secrets.token_hex(8)}.tmp"
     fd = os.open(
-        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | _CLOEXEC, 0o600,
+        tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | _NOFOLLOW | _CLOEXEC, 0o600,
         dir_fd=dir_fd,
     )
     published = False
@@ -315,9 +341,16 @@ def record_hook_model(
     A SessionStart record always lands; a PostModelSwitch record lands only
     when no valid record for the session holds a ``seq`` at least as new.
     Raises :class:`HookModelRefusal` (nothing new written) when the folder is
-    missing or unsafe, the write fails, or the two-second budget from ``seq``
-    runs out. Never opens the database.
+    missing or unsafe, the write fails, the two-second budget from ``seq``
+    runs out, or the platform cannot keep the record. Never opens the
+    database.
     """
+    if not SUPPORTED:
+        raise HookModelRefusal(
+            "hook_model_unsupported",
+            "this platform cannot lock the model record or open it without"
+            " following symbolic links",
+        )
     deadline = seq + HOOK_BUDGET_NS
     content = record_bytes(session, state, model, event, seq)
     if len(content) > MAX_RECORD_BYTES:

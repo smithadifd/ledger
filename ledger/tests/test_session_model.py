@@ -139,7 +139,8 @@ def hookmodel(db: Path, hook: dict | bytes, *extra: str,
     data = hook if isinstance(hook, bytes) else json.dumps(hook).encode("utf-8")
     done = subprocess.run(
         [sys.executable, "-m", "ledger", "resume", "--hook-model", *extra],
-        input=data, env=base_env(LEDGER_DB=str(db), **(env or {})),
+        input=data,
+        env=base_env(LEDGER_DB=str(db), **{"LEDGER_HARNESS": "claude-code", **(env or {})}),
         capture_output=True, timeout=60, cwd=PKG_PARENT,
     )
     return subprocess.CompletedProcess(done.args, done.returncode,
@@ -178,7 +179,7 @@ def hookmodel_inproc(monkeypatch, db: Path, hook: dict, *, stamp: int | None = N
     if stamp is not None:
         monkeypatch.setattr(session_model, "stamp", lambda: stamp)
     argv = ["--db", str(db), "resume", "--hook-model"] + (["--json"] if json_mode else [])
-    return cli(monkeypatch, argv, stdin=json.dumps(hook))
+    return cli(monkeypatch, argv, stdin=json.dumps(hook), env={"LEDGER_HARNESS": "claude-code"})
 
 
 def tmp_files(db: Path) -> list[str]:
@@ -347,6 +348,47 @@ def test_reader_refuses_non_regular_file(db: Path) -> None:
     done = subprocess.run([sys.executable, "-c", code, str(db), S1, M0], env=base_env(),
                           capture_output=True, text=True, timeout=5, cwd=PKG_PARENT)
     assert (done.returncode, done.stdout, done.stderr) == (0, M0 + "\n", "")
+
+
+def _fifo_holding(path: Path, data: bytes) -> int:
+    """A FIFO at ``path`` whose pipe holds ``data`` with no writer left open,
+    so a reader gets ``data`` and then end of file. The returned read end
+    keeps the data in the pipe until it is closed."""
+    os.mkfifo(path)
+    hold = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    writer = os.open(path, os.O_WRONLY | os.O_NONBLOCK)
+    try:
+        assert os.write(writer, data) == len(data)
+    finally:
+        os.close(writer)
+    return hold
+
+
+def test_reader_refuses_fifo_holding_a_valid_record(db: Path) -> None:
+    # The FIFO holds a record that parses as valid for this session, so only
+    # the regular-file check keeps the reader from stamping it.
+    data = json.dumps(rec(S1, M2)).encode("utf-8")
+    assert session_model.parse_record(data, S1) is not None
+    SM(db).mkdir()
+    hold = _fifo_holding(F(db, S1), data)
+    try:
+        assert resolve_model(str(db), S1, M0) == M0
+    finally:
+        os.close(hold)
+
+
+def test_hook_replaces_a_fifo_holding_a_newer_record(db: Path, monkeypatch) -> None:
+    # The compare-and-swap reads the stored record through the same reader: a
+    # FIFO holding a newer seq is not a record, so the switch is not stale.
+    SM(db).mkdir()
+    hold = _fifo_holding(F(db, S1), json.dumps(rec(S1, M1, seq=10**18)).encode("utf-8"))
+    try:
+        code, out, err = hookmodel_inproc(monkeypatch, db, switch(S1, to_model=M2), stamp=100)
+    finally:
+        os.close(hold)
+    assert (code, err) == (0, "")
+    assert json.loads(out)["data"] == {"recorded": M2, "state": "model", "stale": False}
+    assert stored(db, S1) == rec(S1, M2, seq=100)
 
 
 def test_reader_refuses_oversize_file(db: Path) -> None:
@@ -613,12 +655,72 @@ def test_hook_flag_exclusive(db: Path, extra) -> None:
     assert not SM(db).exists()
 
 
+@pytest.mark.parametrize("harness", [None, ""], ids=["unset", "empty"])
+def test_hook_without_harness_is_refused_and_records_nothing(db: Path, db2: Path,
+                                                             harness) -> None:
+    # The record decides what later writes stamp, so it is gated like a write:
+    # without LEDGER_HARNESS nothing is recorded and no folder is created.
+    put(db, S1, rec(S1, M1, seq=1))
+    before = snapshot(SM(db))
+    done = hookmodel(db, switch(S1, to_model="forged-model"), "--json",
+                     env={"LEDGER_HARNESS": harness})
+    assert done.returncode == 3, done.stderr
+    assert json.loads(done.stdout)["error"]["code"] == "missing_harness"
+    assert snapshot(SM(db)) == before
+    assert write(db, LEDGER_SESSION=S1, LEDGER_MODEL=M0)["model"] == M1
+    done = hookmodel(db2, start(S1, model=M2), env={"LEDGER_HARNESS": harness})
+    assert (done.returncode, done.stdout) == (3, "")
+    assert not SM(db2).exists()
+
+
 @pytest.mark.parametrize("json_mode", [False, True], ids=["text", "json"])
 def test_hook_bad_model_value_never_echoed(db: Path, json_mode: bool) -> None:
     done = hookmodel(db, switch(S1, to_model="secret\u0007value"),
                      *(["--json"] if json_mode else []))
     assert done.returncode == 3
     assert "secret" not in done.stdout and "secret" not in done.stderr
+
+
+# --- platforms without the record (Windows) -----------------------------------
+
+# Each prelude takes away, before the package is imported, what a platform
+# without the record lacks; "windows" takes away all of it at once.
+PLATFORM_PRELUDES = {
+    "no-fcntl": "import sys; sys.modules['fcntl'] = None",
+    "no-nofollow": "import os; del os.O_NOFOLLOW",
+    "no-directory": "import os; del os.O_DIRECTORY",
+    "no-nonblock": "import os; del os.O_NONBLOCK",
+    "no-dir-fd": "import os; os.supports_dir_fd.discard(os.open)",
+    "windows": ("import os, sys, time; sys.modules['fcntl'] = None; del os.O_NOFOLLOW; "
+                "del os.O_DIRECTORY; del os.O_NONBLOCK; os.supports_dir_fd.clear(); "
+                "del time.clock_gettime_ns"),
+}
+
+
+def cli_on(prelude: str, argv: list[str], env: dict, stdin: bytes = b"") -> tuple[int, str, str]:
+    code = prelude + "\nimport sys\nfrom ledger.cli import main\nsys.exit(main(sys.argv[1:]))\n"
+    done = subprocess.run([sys.executable, "-c", code, *argv], input=stdin, env=base_env(**env),
+                          capture_output=True, timeout=60, cwd=PKG_PARENT)
+    return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
+
+
+@pytest.mark.parametrize("platform", sorted(PLATFORM_PRELUDES))
+def test_platform_without_the_record_keeps_the_cli(db: Path, platform: str) -> None:
+    # The CLI still imports and writes; the record is never read, so writes
+    # stamp LEDGER_MODEL; the hook refuses by name and changes nothing.
+    put(db, S1, rec(S1, M1, seq=1))
+    before = snapshot(SM(db))
+    prelude = PLATFORM_PRELUDES[platform]
+    env = {"LEDGER_DB": str(db), "LEDGER_HARNESS": "pytest", "LEDGER_SESSION": S1,
+           "LEDGER_MODEL": M0}
+    code, out, err = cli_on(prelude, ["--json", "new", "--type", "gate", "--title", "t"], env)
+    assert code == 0, err
+    assert json.loads(out)["data"]["event"]["model"] == M0
+    hook = json.dumps(switch(S1, to_model=M2)).encode("utf-8")
+    code, out, err = cli_on(prelude, ["--json", "resume", "--hook-model"], env, stdin=hook)
+    assert code == 3, err
+    assert json.loads(out)["error"]["code"] == "hook_model_unsupported"
+    assert snapshot(SM(db)) == before
 
 
 # --- D: atomicity and ordering ------------------------------------------------
@@ -753,7 +855,7 @@ def test_compare_and_swap_holds_the_lock(db: Path) -> None:
         b = subprocess.Popen(
             [sys.executable, "-m", "ledger", "resume", "--hook-model"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            env=base_env(LEDGER_DB=str(db)), cwd=PKG_PARENT)
+            env=base_env(LEDGER_DB=str(db), LEDGER_HARNESS="claude-code"), cwd=PKG_PARENT)
         b.stdin.write(json.dumps(switch(S1, to_model=M2)).encode("utf-8"))
         b.stdin.close()
         # Before Python 3.13, communicate() flushes a closed stdin and raises.

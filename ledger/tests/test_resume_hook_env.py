@@ -65,6 +65,7 @@ def hook_env(db: Path, stdin: str | bytes, *extra: str,
 def hook_model(db: Path, stdin: str) -> subprocess.CompletedProcess[str]:
     run_env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
     run_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    run_env["LEDGER_HARNESS"] = "claude-code"
     return subprocess.run(
         [sys.executable, "-m", "ledger", "--db", str(db), "resume", "--hook-model"],
         input=stdin, env=run_env, capture_output=True, text=True, timeout=60,
