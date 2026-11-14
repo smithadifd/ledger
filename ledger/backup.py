@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,32 +64,127 @@ def _refuse_newer_schema_in_copy(path: Path) -> None:
 _SIDE_FILE_SUFFIXES = ("-wal", "-shm", "-journal")
 
 
+def file_identity(path: Path) -> tuple[int, int] | None:
+    """The ``(device, inode)`` of the file at ``path``, or ``None`` when no file has that name.
+
+    Read with ``lstat``, so a symbolic link is a file of its own and never
+    redirects the check. Any error other than a missing name propagates: a
+    caller refuses a destination it cannot prove distinct.
+    """
+    try:
+        found = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    return found.st_dev, found.st_ino
+
+
+def _swap_ascii_case(name: str) -> str:
+    return "".join(
+        char.swapcase() if char.isascii() and char.isalpha() else char
+        for char in name
+    )
+
+
+def _tells_case_apart(dest_path: Path) -> bool:
+    """True only when the folder that would hold ``dest_path`` is shown to tell case apart.
+
+    The folder is the nearest existing ancestor of ``dest_path`` (a backup
+    creates the missing ones inside it). One of its entries is looked up
+    again with the case of its ASCII letters swapped: when no file has the
+    swapped name, or another file has it, the folder tells case apart. A
+    folder with no entry to try, or any error, shows nothing, and the answer
+    is False.
+    """
+    folder = dest_path.parent
+    try:
+        while True:
+            try:
+                found = os.lstat(folder)
+                break
+            except FileNotFoundError:
+                if folder.parent == folder:
+                    return False
+                folder = folder.parent
+        if not stat.S_ISDIR(found.st_mode):
+            return False
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                swapped = _swap_ascii_case(entry.name)
+                if swapped == entry.name:
+                    continue
+                original = file_identity(folder / entry.name)
+                if original is None or file_identity(folder / swapped) == original:
+                    return False
+                # The swapped name is missing or another file. Read the entry
+                # again: had it been removed meanwhile, the swapped name would
+                # be missing on a folder that folds case too.
+                return file_identity(folder / entry.name) == original
+    except OSError:
+        return False
+    return False
+
+
 def refuse_side_file_name(dest_path: Path, verb: str) -> None:
-    """Refuse a destination whose name ends like a database side file."""
-    # Case-insensitive: APFS and other default filesystems fold case, so
-    # ``-WAL`` names the live ``-wal`` file.
-    if dest_path.name.casefold().endswith(_SIDE_FILE_SUFFIXES):
+    """Refuse a destination named like a database side file, as its volume reads the name.
+
+    SQLite removes a file on a side-file name when the last connection to
+    that database closes, so the name is refused whether or not a file has
+    it yet. The suffix compare ignores case unless the destination's folder
+    is shown to tell case apart: where the volume folds case, ``-WAL`` names
+    the ``-wal`` file, and where it does not, ``copy.db-WAL`` is an ordinary
+    name. A folder that cannot be shown either way is treated as folding.
+    """
+    name = dest_path.name
+    if name.endswith(_SIDE_FILE_SUFFIXES) or (
+        name.casefold().endswith(_SIDE_FILE_SUFFIXES)
+        and not _tells_case_apart(dest_path)
+    ):
         raise LedgerError(
             f"{verb} target is named like a database side file "
             f"(-wal, -shm or -journal): {dest_path}"
         )
 
 
+def _refuse_live_destination(source_path: Path, dest_path: Path) -> None:
+    """Refuse a backup destination that is the live database or one of its side files.
+
+    Decided by file identity, never by comparing spellings: a volume can
+    read two spellings as one name (case, Unicode normalization), and a hard
+    link is another name for the same file. A destination no file has yet
+    cannot be the live file; the exact spelling of a live name still refuses
+    here, and any other side-file name is left to ``refuse_side_file_name``.
+    """
+    live_files = (source_path,) + tuple(
+        source_path.with_name(source_path.name + suffix)
+        for suffix in _SIDE_FILE_SUFFIXES
+    )
+    if dest_path in live_files:
+        raise LedgerError(f"backup target is the live database: {dest_path}")
+    try:
+        dest_identity = file_identity(dest_path)
+        if dest_identity is None:
+            return
+        for live in live_files:
+            if file_identity(live) == dest_identity:
+                raise LedgerError(f"backup target is the live database: {dest_path}")
+    except OSError as exc:
+        raise LedgerError(
+            f"backup target cannot be told apart from the live database: "
+            f"{dest_path} ({exc})"
+        ) from exc
+
+
 def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
     """Snapshot ``db_path`` into ``dest`` via the online backup API."""
     source_path = resolve_db_path(db_path)
+    dest_path = resolve_db_path(dest)
+    # Before the source precheck, which refuses a hard-linked live file for
+    # its own reasons: the destination guard stands on its own.
+    _refuse_live_destination(source_path, dest_path)
     if not precheck_files(source_path):
         raise LedgerError(f"database does not exist: {source_path}")
-    dest_path = resolve_db_path(dest)
-    live_files = (
-        source_path,
-        source_path.with_name(source_path.name + "-wal"),
-        source_path.with_name(source_path.name + "-shm"),
-    )
-    if str(dest_path).casefold() in {str(p).casefold() for p in live_files}:
-        raise LedgerError(f"backup target is the live database: {dest_path}")
-    # By name alone, so no stat opens a window: a file published on a name
-    # SQLite treats as a side file is removed by a later last closer.
+    # A file published on a name SQLite treats as a side file is removed by
+    # a later last closer.
     refuse_side_file_name(dest_path, "backup")
     # A backup of a newer schema would later be read by this same older code.
     _refuse_newer_schema_before_connect(source_path)

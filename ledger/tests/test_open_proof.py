@@ -704,9 +704,17 @@ def test_restore_refuses_a_mixed_case_side_file_name(
 def test_backup_to_a_case_variant_of_the_live_database_refuses(
     tmp_path: Path,
 ) -> None:
+    # Where the volume folds case, LEDGER.db is the live file and refuses by
+    # its identity; where it tells case apart, LEDGER.db is another name and
+    # test_backup_dest_identity covers it.
     source = _ledger_with(tmp_path / "ledger.db", ITEM)
-    with pytest.raises(LedgerError, match="backup target is the live database"):
-        backup_db(source, tmp_path / "LEDGER.db")
+    variant = tmp_path / "LEDGER.db"
+    if os.path.exists(variant) and os.path.samefile(variant, source):
+        with pytest.raises(LedgerError, match="backup target is the live database"):
+            backup_db(source, variant)
+    else:
+        backup_db(source, variant)
+        assert _identity(variant) != _identity(source)
 
 
 def test_a_backup_onto_the_wal_name_with_two_connections_open_refuses(
