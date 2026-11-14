@@ -756,6 +756,8 @@ def test_compare_and_swap_holds_the_lock(db: Path) -> None:
             env=base_env(LEDGER_DB=str(db)), cwd=PKG_PARENT)
         b.stdin.write(json.dumps(switch(S1, to_model=M2)).encode("utf-8"))
         b.stdin.close()
+        # Before Python 3.13, communicate() flushes a closed stdin and raises.
+        b.stdin = None
         time.sleep(1.2)
         assert stored(db, S1) == rec(S1, M1, seq=50), "B wrote while A held the lock"
         tmp = SM(db) / "a-writer.tmp"
