@@ -608,6 +608,10 @@ def _same_semantic(
     provenance_class: str | None,
     ignore_attribution: bool = False,
 ) -> bool:
+    # ``model`` is taken so every caller passes the same attribution set, but
+    # it is never compared: the model is attribution, not content, so a retry
+    # under the same key after a model switch returns the stored event, which
+    # keeps the first model.
     return (
         existing.kind == kind
         and existing.payload_version == payload_version
@@ -618,7 +622,6 @@ def _same_semantic(
             or (
                 existing.actor == actor
                 and existing.harness == harness
-                and existing.model == model
                 and existing.session == session
                 and existing.channel == channel
                 and existing.provenance_class == provenance_class
