@@ -377,8 +377,11 @@ payload is refused on any channel but `hook:picker`.
 no earlier event under `K` means the call writes; an earlier event with the
 same content is returned (exit 0, the first event's id) and nothing is
 written; an earlier event with different content is refused as a `conflict`
-(exit 3). `note`, `elect`, `pick` and a plain `link` write one event under `K`
-itself.
+(exit 3). The same content means the same kind, payload version, payload and
+item, written with the same actor, harness, session, channel and provenance
+class; the model is not compared, so a retry after a model switch returns the
+first event, which keeps the first model. `note`, `elect`, `pick` and a plain
+`link` write one event under `K` itself.
 `link --rel duplicate-of` writes two events in one transaction, under
 `K` (the link, the same slot a plain `link` uses) and `K:close` (the close), so
 a retry returns both and writes none, and a plain `link` and a `duplicate-of`
