@@ -125,7 +125,20 @@ database is opened. An unclaimed database is claimed and the verb exits 0. The
 same name again exits 0, says the database is already claimed for that name and
 writes nothing (a read-only database file refuses even the repeat, as every
 write verb does). A different name is refused (exit 3, code `shared_database`,
-naming both systems) and writes nothing. A synced or linked database path is
+naming both systems) and writes nothing. The verb reports the outcome its
+transaction reached: two callers claiming the same name at once both exit 0 and
+exactly one says `claimed`. After an I/O error in the claim's transaction
+(before the write or after it) or a checkpoint that cannot finish because
+another connection still holds the file, the verb reads the claim back on the
+connection it opened and retries the checkpoint, up to 5 attempts started
+within 1 second. It exits 0 only when the name's claim is on record, a
+checkpoint finishes, and the database path still names the files the verb
+opened, the same proof as a claim with no error (`claimed` only when this
+call's write is known to have committed it). Anything else is refused: a claim
+not on record, a claim on record whose checkpoint is still held when that
+budget is spent, or a read-back or checkpoint that fails (exit 3, code
+`shared_database`), and a path that no longer names the opened files (exit 3,
+`db_swapped` or `db_sibling_unsafe`). A synced or linked database path is
 refused as every write verb refuses it (exit 3, codes `synced_path` and
 `db_symlink`), and no file is created. `--json` prints `system`, `path` and
 `claimed` (`false` for the repeat). Like every write verb it needs
