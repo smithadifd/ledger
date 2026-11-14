@@ -673,6 +673,42 @@ def test_restore_refuses_a_destination_named_like_a_side_file(
     assert _listing(dest_dir) == []
 
 
+MIXED_SUFFIXES = ("-WAL", "-Shm", "-JOURNAL")
+
+
+@pytest.mark.parametrize("suffix", MIXED_SUFFIXES)
+def test_backup_refuses_a_mixed_case_side_file_name(
+    tmp_path: Path, suffix: str
+) -> None:
+    source = _ledger_with(tmp_path / "source.db", ITEM)
+    dest_dir = tmp_path / "out"
+    dest_dir.mkdir()
+    before = _listing(dest_dir)
+    with pytest.raises(LedgerError, match="named like a database side file"):
+        backup_db(source, dest_dir / f"copy.db{suffix}")
+    assert _listing(dest_dir) == before, "the refused backup wrote something"
+
+
+@pytest.mark.parametrize("suffix", MIXED_SUFFIXES)
+def test_restore_refuses_a_mixed_case_side_file_name(
+    tmp_path: Path, suffix: str
+) -> None:
+    export_dir = _export(tmp_path)
+    dest_dir = tmp_path / "out"
+    dest_dir.mkdir()
+    with pytest.raises(LedgerError, match="named like a database side file"):
+        restore_export(export_dir, dest_dir / f"restored.db{suffix}", system="home")
+    assert _listing(dest_dir) == []
+
+
+def test_backup_to_a_case_variant_of_the_live_database_refuses(
+    tmp_path: Path,
+) -> None:
+    source = _ledger_with(tmp_path / "ledger.db", ITEM)
+    with pytest.raises(LedgerError, match="backup target is the live database"):
+        backup_db(source, tmp_path / "LEDGER.db")
+
+
 def test_a_backup_onto_the_wal_name_with_two_connections_open_refuses(
     tmp_path: Path,
 ) -> None:

@@ -65,7 +65,9 @@ _SIDE_FILE_SUFFIXES = ("-wal", "-shm", "-journal")
 
 def refuse_side_file_name(dest_path: Path, verb: str) -> None:
     """Refuse a destination whose name ends like a database side file."""
-    if dest_path.name.endswith(_SIDE_FILE_SUFFIXES):
+    # Case-insensitive: APFS and other default filesystems fold case, so
+    # ``-WAL`` names the live ``-wal`` file.
+    if dest_path.name.casefold().endswith(_SIDE_FILE_SUFFIXES):
         raise LedgerError(
             f"{verb} target is named like a database side file "
             f"(-wal, -shm or -journal): {dest_path}"
@@ -83,7 +85,7 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
         source_path.with_name(source_path.name + "-wal"),
         source_path.with_name(source_path.name + "-shm"),
     )
-    if dest_path in live_files:
+    if str(dest_path).casefold() in {str(p).casefold() for p in live_files}:
         raise LedgerError(f"backup target is the live database: {dest_path}")
     # By name alone, so no stat opens a window: a file published on a name
     # SQLite treats as a side file is removed by a later last closer.
