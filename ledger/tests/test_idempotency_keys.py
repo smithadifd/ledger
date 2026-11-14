@@ -18,12 +18,13 @@ from ledger.store import open_ledger
 from ledger.verbs import EXIT_REFUSED
 
 
-def invoke(monkeypatch, argv):
+def invoke(monkeypatch, argv, env=None):
     for key, value in {
         "LEDGER_HARNESS": "pytest",
         "LEDGER_AGENT": "tester",
         "LEDGER_MODEL": "test-model",
         "LEDGER_SESSION": "sess-1",
+        **(env or {}),
     }.items():
         monkeypatch.setenv(key, value)
     out, err = io.StringIO(), io.StringIO()
@@ -63,8 +64,8 @@ def _events(db: str, kind: str):
         return list(lg.events(kind=kind))
 
 
-def _run(monkeypatch, db: str, *argv: str):
-    code, out, err = invoke(monkeypatch, ["--json", "--db", db, *argv])
+def _run(monkeypatch, db: str, *argv: str, env=None):
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, *argv], env)
     return code, (json.loads(out) if out.strip() else None), err
 
 
@@ -100,6 +101,54 @@ def test_note_same_key_different_text_conflicts(monkeypatch, db: str) -> None:
     assert code == 0, err
     before = _count(db)
     code, out, _err = _run(monkeypatch, db, "note", "it-a", "other", "--idempotency-key", "n-1")
+    assert code == EXIT_REFUSED
+    assert out["error"]["code"] == "conflict"
+    assert _count(db) == before
+
+
+def test_note_retry_after_model_switch_returns_first_event(monkeypatch, db: str) -> None:
+    # The model is attribution, not content: a retry under the same key and
+    # content after a model switch returns the first event and writes nothing.
+    argv = ["note", "it-a", "safe to retry", "--idempotency-key", "n-model"]
+    code, first, err = _run(monkeypatch, db, *argv, env={"LEDGER_MODEL": "model-a"})
+    assert code == 0, err
+    assert first["data"]["event"]["model"] == "model-a"
+    before = _count(db)
+    code, second, err = _run(monkeypatch, db, *argv, env={"LEDGER_MODEL": "model-b"})
+    assert code == 0, (second, err)
+    assert second["data"]["event"]["id"] == first["data"]["event"]["id"]
+    assert second["data"]["event"]["model"] == "model-a"
+    assert _count(db) == before
+    stored = [e for e in _events(db, "item.note") if e.idempotency_key == "n-model"]
+    assert [e.model for e in stored] == ["model-a"]
+
+
+def test_note_retry_after_model_switch_with_other_text_conflicts(
+    monkeypatch, db: str
+) -> None:
+    code, _first, err = _run(
+        monkeypatch, db, "note", "it-a", "hello", "--idempotency-key", "n-model",
+        env={"LEDGER_MODEL": "model-a"},
+    )
+    assert code == 0, err
+    before = _count(db)
+    code, out, _err = _run(
+        monkeypatch, db, "note", "it-a", "other", "--idempotency-key", "n-model",
+        env={"LEDGER_MODEL": "model-b"},
+    )
+    assert code == EXIT_REFUSED
+    assert out["error"]["code"] == "conflict"
+    assert _count(db) == before
+
+
+def test_note_retry_from_other_harness_still_conflicts(monkeypatch, db: str) -> None:
+    # Only the model was dropped from the comparison: a retry with the same
+    # content and model from a different harness is still a conflict.
+    argv = ["note", "it-a", "hello", "--idempotency-key", "n-harness"]
+    code, _first, err = _run(monkeypatch, db, *argv)
+    assert code == 0, err
+    before = _count(db)
+    code, out, _err = _run(monkeypatch, db, *argv, env={"LEDGER_HARNESS": "other-harness"})
     assert code == EXIT_REFUSED
     assert out["error"]["code"] == "conflict"
     assert _count(db) == before
