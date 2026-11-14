@@ -60,6 +60,18 @@ def _refuse_newer_schema_in_copy(path: Path) -> None:
     _refuse_unknown_versions(versions, load_migrations())
 
 
+_SIDE_FILE_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def refuse_side_file_name(dest_path: Path, verb: str) -> None:
+    """Refuse a destination whose name ends like a database side file."""
+    if dest_path.name.endswith(_SIDE_FILE_SUFFIXES):
+        raise LedgerError(
+            f"{verb} target is named like a database side file "
+            f"(-wal, -shm or -journal): {dest_path}"
+        )
+
+
 def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
     """Snapshot ``db_path`` into ``dest`` via the online backup API."""
     source_path = resolve_db_path(db_path)
@@ -73,6 +85,9 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
     )
     if dest_path in live_files:
         raise LedgerError(f"backup target is the live database: {dest_path}")
+    # By name alone, so no stat opens a window: a file published on a name
+    # SQLite treats as a side file is removed by a later last closer.
+    refuse_side_file_name(dest_path, "backup")
     # A backup of a newer schema would later be read by this same older code.
     _refuse_newer_schema_before_connect(source_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)

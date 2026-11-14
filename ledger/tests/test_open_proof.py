@@ -420,19 +420,20 @@ def _held(path: Path | str) -> tuple[tuple[int, int], bytes]:
 
 
 @pytest.mark.parametrize("suffix", ("-wal", "-shm"))
-def test_a_backup_published_onto_a_side_name_survives_the_refusal_and_the_close(
+def test_a_file_moved_onto_a_side_name_survives_the_refusal_and_the_close(
     tmp_path: Path, monkeypatch, suffix: str
 ) -> None:
-    # A supported backup lands on the -wal (or -shm) name after the write's
+    # Another file is moved onto the -wal (or -shm) name after the write's
     # COMMIT. The write is refused, and closing the refused connection must
-    # not unlink the name: it holds the backup now, not the ledger's file.
+    # not unlink the name: it holds that file now, not the ledger's file.
     db = _ledger_with(tmp_path / "ledger.db", ITEM)
-    source = _ledger_with(tmp_path / "other.db", "OTHER-1")
+    planted = tmp_path / "planted"
+    planted.write_bytes(b"not the ledger's side file")
     side = Path(f"{db}{suffix}")
     published: dict = {}
 
     def act() -> None:
-        published["result"] = backup_db(source, side)
+        os.replace(planted, side)
         published["held"] = _held(side)
 
     with open_ledger(db) as lg:
@@ -442,7 +443,6 @@ def test_a_backup_published_onto_a_side_name_survives_the_refusal_and_the_close(
         assert info.value.code == "db_sibling_unsafe"
         assert _same(info.value.path, side)
         assert fired == ["before_settle"]
-    assert published["result"].integrity == "ok"
     assert os.path.lexists(side), f"closing the refused connection removed {side.name}"
     assert _held(side) == published["held"]
 
@@ -582,12 +582,36 @@ def test_a_destination_swap_during_restore_leaves_the_renamed_in_file(
     assert "restore unlinked none of" in str(info.value)
 
 
+def test_a_restore_of_a_claimed_export_is_checked_after_its_replay(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # An export that already carries the system claim makes no write after
+    # the replay, so the replay's own COMMIT is the only place to check.
+    source = _ledger_with(tmp_path / "export-source.db", ITEM)
+    export_dir = tmp_path / "export"
+    with open_ledger(source) as lg:
+        assert lg.claim_system("home") is True
+        export_events(lg, export_dir)
+    dest = tmp_path / "restored.db"
+    other = _ledger_with(tmp_path / "other.db", "OTHER-1")
+    other_bytes = other.read_bytes()
+    other_id = _identity(other)
+    fired = _swap_after_write(monkeypatch, dest, lambda: os.replace(other, dest), baseline=0)
+    with pytest.raises(UnsafeDatabaseFile) as info:
+        restore_export(export_dir, dest, system="home")
+    assert fired == ["before_settle"]
+    assert info.value.code == "db_swapped"
+    assert _identity(dest) == other_id
+    assert dest.read_bytes() == other_bytes
+
+
 def test_a_refusal_about_another_path_still_removes_the_restores_files(
     tmp_path: Path,
 ) -> None:
     # The loop-events callback raises an UnsafeDatabaseFile about a database
-    # the restore never opened. That is an ordinary failure: the restore
-    # removes its destination, and the same restore can run again.
+    # the restore never opened. The callback runs before the destination is
+    # created, so no file of this restore exists to be left behind, and the
+    # same restore can run again.
     source = _ledger_with(tmp_path / "export-source.db", ITEM)
     export_dir = tmp_path / "export"
     with open_ledger(source) as lg:
@@ -599,6 +623,7 @@ def test_a_refusal_about_another_path_still_removes_the_restores_files(
 
     def callback(count: int, kinds: tuple[str, ...]) -> None:
         calls.append(count)
+        assert not os.path.lexists(dest), "the destination existed before the callback"
         raise UnsafeDatabaseFile("db_swapped", "an unrelated database", unrelated)
 
     with pytest.raises(UnsafeDatabaseFile) as info:
@@ -611,6 +636,59 @@ def test_a_refusal_about_another_path_still_removes_the_restores_files(
         assert not os.path.lexists(name), f"the failed restore left {name}"
     result = restore_export(export_dir, dest, system="home", accept_loop_events=True)
     assert result.events > 0
+
+
+# --- destination names --------------------------------------------------------
+
+
+SIDE_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _listing(folder: Path) -> list[str]:
+    return sorted(entry.name for entry in folder.iterdir())
+
+
+@pytest.mark.parametrize("suffix", SIDE_SUFFIXES)
+def test_backup_refuses_a_destination_named_like_a_side_file(
+    tmp_path: Path, suffix: str
+) -> None:
+    source = _ledger_with(tmp_path / "source.db", ITEM)
+    dest_dir = tmp_path / "out"
+    dest_dir.mkdir()
+    before = _listing(dest_dir)
+    with pytest.raises(LedgerError, match="named like a database side file"):
+        backup_db(source, dest_dir / f"copy.db{suffix}")
+    assert _listing(dest_dir) == before, "the refused backup wrote something"
+
+
+@pytest.mark.parametrize("suffix", SIDE_SUFFIXES)
+def test_restore_refuses_a_destination_named_like_a_side_file(
+    tmp_path: Path, suffix: str
+) -> None:
+    export_dir = _export(tmp_path)
+    dest_dir = tmp_path / "out"
+    dest_dir.mkdir()
+    with pytest.raises(LedgerError, match="named like a database side file"):
+        restore_export(export_dir, dest_dir / f"restored.db{suffix}", system="home")
+    assert _listing(dest_dir) == []
+
+
+def test_a_backup_onto_the_wal_name_with_two_connections_open_refuses(
+    tmp_path: Path,
+) -> None:
+    # The name is refused whoever holds the database open, so the last
+    # closer never finds a published backup on the -wal name.
+    db = _ledger_with(tmp_path / "ledger.db", ITEM)
+    source = _ledger_with(tmp_path / "other.db", "OTHER-1")
+    wal = Path(f"{db}-wal")
+    with open_ledger(db) as first, open_ledger(db) as second:
+        first.append(**_note("first", "k-first"))
+        second.append(**_note("second", "k-second"))
+        held = _held(wal)
+        with pytest.raises(LedgerError, match="named like a database side file"):
+            backup_db(source, wal)
+        assert _held(wal) == held
+    assert _max_id(db) >= 3
 
 
 # --- backup -------------------------------------------------------------------

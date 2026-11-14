@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .backup import refuse_side_file_name
 from .credscan import scan as scan_credentials
 from .credscan import shape_names
 from .dbfile import UnsafeDatabaseFile
@@ -322,20 +323,26 @@ def restore_export(
             )
         export_digest = verify_stream_digest(export_path, events)
     dest_path = resolve_db_path(dest)
+    refuse_side_file_name(dest_path, "restore")
     if dest_path.exists():
         raise LedgerError(f"restore target already exists: {dest_path}")
+    if reserved_events and on_accept_loop_events is not None:
+        # Before the destination exists, so a refusal the callback raises
+        # about any database never reaches the cleanup below.
+        on_accept_loop_events(
+            len(reserved_events),
+            tuple(sorted({event.kind for event in reserved_events})),
+        )
     stale = {p for p in _dest_files(dest_path) if p.exists()}
     lg = open_ledger(dest_path, create=True)
     try:
         if reserved_events:
-            if on_accept_loop_events is not None:
-                on_accept_loop_events(
-                    len(reserved_events),
-                    tuple(sorted({event.kind for event in reserved_events})),
-                )
             _replay_events(lg, events)
         else:
             replay_events(lg, events)
+        # The replay's own COMMIT: an export that already carries a claim
+        # makes no later write, so nothing else checks the destination.
+        lg._settle_bound()
         if export_digest is not None:
             lg.append(
                 kind="session.opened",

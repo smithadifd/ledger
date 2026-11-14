@@ -248,21 +248,27 @@ mode, then the main file again: the connection must still hold the descriptor
 it proved, and the name must be a regular file with one link that is that same
 file. A failed check refuses the write with `db_swapped` (the main file) or
 `db_sibling_unsafe` (a side file), exit 3, and nothing reports success. The
-write did happen, but in a file the path no longer names, so it is not in the
-database at that path; the ledger neither retries nor rolls it back. After a
+write did happen. When the main file was swapped it is in a file the path no longer
+names, so it is not in the database at that path. When only the `-wal` or `-shm`
+name was swapped, the refused connection's close checkpoint writes it into the
+main file, which still names the proved database, so it is in the database at
+that path. The ledger neither retries nor rolls it back. After a
 refusal the connection keeps the `-wal` and `-shm` names when it closes
 (SQLite's `SQLITE_FCNTL_PERSIST_WAL`): SQLite's close would otherwise unlink
 both names, whatever files they hold by then, including a file another writer
-put there. A restore refused this way for its destination or its `-wal` or
+put there. That file survives the refused close only until the ledger next
+opens that database. A restore refused this way for its destination or its `-wal` or
 `-shm` name unlinks nothing, because the files at those names are no longer the
 ones it wrote; any other restore failure removes its files. `backup` checks its
-source the same way before it publishes the copy.
+source the same way before it publishes the copy. `backup` and `restore` also
+refuse a destination whose name ends in `-wal`, `-shm` or `-journal`, by name
+alone and before anything is written, because SQLite removes a file on those
+names when the last connection closes.
 
 Each database-writing verb checks after its own commit. `restore` checks after
-it opens the destination and after its later writes (the claim of an unclaimed
-export, the receipt of a loop-managed export), but not after the commit of its
-replay itself, so a restore of an export that already carries a system claim and
-no loop-owned events is not checked after its replayed events land.
+the commit of its replay, so a restore of an export that already carries a
+system claim is checked, and again after its later writes (the claim of an
+unclaimed export, the receipt of a loop-managed export).
 
 One pass of those checks is enough because the ledger only ever replaces or
 unlinks a name; it never moves a live name aside and back. The proved file has
