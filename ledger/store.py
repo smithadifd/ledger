@@ -1519,11 +1519,25 @@ def claim_database(
     The keyword-only ``actor``, ``harness``, ``model`` and ``session`` stamp
     the claim event as ``Ledger.claim_system`` stamps its own (all default
     to ``None``).
+
+    An ``UnsettledClaimError`` from ``claim_system`` (an I/O error in the
+    claim's transaction, or a checkpoint after it that cannot finish) can
+    come after the claim committed. It is settled the way the claim-system
+    verb settles it: ``Ledger.claim_outcome`` for the same ``system``, on
+    the handle this call opened, which returns only when that system's
+    claim is on record, a checkpoint finishes within its budget and the
+    path still names the opened files, and raises the refusal again
+    otherwise. Returns the database path only when ``claim_system``
+    returned or ``claim_outcome`` settled; every other exception is raised
+    as it was.
     """
     with open_ledger(db) as lg:
-        lg.claim_system(
-            system, actor=actor, harness=harness, model=model, session=session
-        )
+        try:
+            lg.claim_system(
+                system, actor=actor, harness=harness, model=model, session=session
+            )
+        except UnsettledClaimError as refusal:
+            lg.claim_outcome(system, refusal)
         return lg.path
 
 

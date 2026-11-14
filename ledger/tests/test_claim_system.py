@@ -1113,3 +1113,199 @@ def test_verify_system_reads_the_claim_the_verb_wrote(db, monkeypatch) -> None:
     code, out, err = invoke(monkeypatch, ["--db", db, "verify", "--system", "home"])
     assert code == EXIT_REFUSED
 
+
+# --- claim_database settles the same way --------------------------------------
+#
+# The library call claim_database opens, claims and closes. After an
+# UnsettledClaimError it settles through Ledger.claim_outcome, on the handle it
+# opened and for the system it was asked to claim, as the verb does, and
+# returns only on that proof. Every other refusal is raised as it was.
+
+
+def claims_raised(monkeypatch) -> list[tuple]:
+    """Record the handle and the exception of each Ledger.claim_system that raises."""
+    raised: list[tuple] = []
+    original = Ledger.claim_system
+
+    def spy(self, system, **kwargs):
+        try:
+            return original(self, system, **kwargs)
+        except BaseException as exc:
+            raised.append((self, exc))
+            raise
+
+    monkeypatch.setattr(Ledger, "claim_system", spy)
+    return raised
+
+
+def settlements(monkeypatch) -> list[tuple]:
+    """Record the handle, system and refusal of each Ledger.claim_outcome call."""
+    calls: list[tuple] = []
+    original = Ledger.claim_outcome
+
+    def spy(self, system, refusal):
+        calls.append((self, system, refusal))
+        return original(self, system, refusal)
+
+    monkeypatch.setattr(Ledger, "claim_outcome", spy)
+    return calls
+
+
+def settlements_that_would_succeed(monkeypatch) -> list[tuple]:
+    """Replace Ledger.claim_outcome with one that always settles, and record it.
+
+    A refusal claim_database must not settle then shows up as a return instead
+    of the refusal.
+    """
+    calls: list[tuple] = []
+
+    def settle(self, system, refusal):
+        calls.append((system, refusal))
+        return True
+
+    monkeypatch.setattr(Ledger, "claim_outcome", settle)
+    return calls
+
+
+def _deny_event_reads(lg) -> None:
+    def authorizer(action, arg1, *_rest):
+        if action == sqlite3.SQLITE_READ and arg1 == "events":
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    lg._conn.set_authorizer(authorizer)
+
+
+def test_claim_database_settles_a_claim_whose_checkpoint_clears_on_a_retry(
+    db, monkeypatch, short_busy
+) -> None:
+    # The claim commits and its checkpoint finds the reader (busy). The
+    # settlement's first checkpoint still finds it; the reader lets go before
+    # the second, which clears. claim_database returns the path, with exactly
+    # one claim on record.
+    with open_ledger(db):
+        pass
+    raised = claims_raised(monkeypatch)
+    settled = settlements(monkeypatch)
+    with a_reader_holding(db) as release:
+        started = settling_checkpoints(monkeypatch, release)
+        path = claim_database(db, "work")
+    assert path == Path(db).resolve()
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+    [(handle, refusal)] = raised
+    assert isinstance(refusal, store.UnsettledClaimError)
+    assert "checkpoint of" in str(refusal) and refusal.committed is True
+    [(settled_handle, settled_system, settled_refusal)] = settled
+    assert settled_handle is handle
+    assert settled_system == "work"
+    assert settled_refusal is refusal
+    assert len(started) == 2, started
+
+
+def test_claim_database_settles_a_claim_committed_before_an_io_error(
+    db, monkeypatch
+) -> None:
+    # The claim commits, then an I/O error is raised as one at the commit
+    # would be; the settlement's checkpoint clears and the claim is on record.
+    with open_ledger(db):
+        pass
+    settled = settlements(monkeypatch)
+    _commit_then_fail(monkeypatch)
+    assert claim_database(db, "work") == Path(db).resolve()
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+    [(_handle, system, refusal)] = settled
+    assert system == "work" and "could not be read" in str(refusal)
+
+
+def test_claim_database_refuses_an_unsettled_claim_when_another_system_is_on_record(
+    db, monkeypatch
+) -> None:
+    # The database is claimed for work; a claim for home fails with an I/O
+    # error before it writes. The settlement finds work's claim, not home's,
+    # and raises the refusal again; nothing is written.
+    claim_database(db, "work")
+    before = claim_events(db)
+    settled = settlements(monkeypatch)
+    _fail_before_the_write(monkeypatch)
+    with pytest.raises(store.UnsettledClaimError, match="could not be read") as caught:
+        claim_database(db, "home")
+    assert [(system, refusal) for _h, system, refusal in settled] == [("home", caught.value)]
+    assert claim_events(db) == before
+
+
+@pytest.mark.parametrize(
+    "inject",
+    [_fail_before_the_write, _fail_at_the_commit, _fail_and_leave_the_transaction_open],
+)
+def test_claim_database_refuses_an_unsettled_claim_that_is_not_on_record(
+    db, monkeypatch, inject
+) -> None:
+    # No claim on record after the error (before the write, a rolled-back
+    # commit, or a transaction left open): the settlement raises the refusal
+    # again and the database stays unclaimed.
+    with open_ledger(db):
+        pass
+    settled = settlements(monkeypatch)
+    inject(monkeypatch)
+    with pytest.raises(store.UnsettledClaimError, match="could not be read") as caught:
+        claim_database(db, "work")
+    assert [(system, refusal) for _h, system, refusal in settled] == [("work", caught.value)]
+    assert event_count(db) == 0
+    assert claim_events(db) == []
+
+
+@pytest.mark.parametrize("after_commit", [_deny_event_reads, _deny_checkpoints])
+def test_claim_database_refuses_a_committed_claim_it_cannot_settle(
+    db, monkeypatch, after_commit
+) -> None:
+    # The claim commits and an I/O error follows; then the read-back, or the
+    # settlement's checkpoint, raises. The claim is on record but unproven,
+    # so the refusal is raised again.
+    with open_ledger(db):
+        pass
+    settled = settlements(monkeypatch)
+    _commit_then_fail(monkeypatch, after_commit)
+    with pytest.raises(store.UnsettledClaimError, match="could not be read") as caught:
+        claim_database(db, "work")
+    assert [(system, refusal) for _h, system, refusal in settled] == [("work", caught.value)]
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+
+
+def test_claim_database_does_not_settle_another_systems_claim(db, monkeypatch) -> None:
+    # Another system's claim is refused inside the transaction as a plain
+    # SharedDatabaseError. Even a settlement that would succeed is never asked.
+    claim_database(db, "work")
+    before = event_count(db)
+    settled = settlements_that_would_succeed(monkeypatch)
+    with pytest.raises(
+        store.SharedDatabaseError, match="'work' and 'home' share one database"
+    ) as caught:
+        claim_database(db, "home")
+    assert not isinstance(caught.value, store.UnsettledClaimError)
+    assert settled == []
+    assert event_count(db) == before
+    assert [e["system"] for e in claim_events(db)] == ["work"]
+
+
+def test_claim_database_does_not_settle_a_failure_that_is_not_a_shared_database(
+    db, monkeypatch
+) -> None:
+    # A SQLite failure that is not an I/O error (here a read-only refusal) is
+    # a LedgerError, not an UnsettledClaimError: it is raised as it was, and
+    # even a settlement that would succeed is never asked.
+    with open_ledger(db):
+        pass
+
+    def append(self, **kwargs):
+        exc = sqlite3.OperationalError("attempt to write a readonly database")
+        exc.sqlite_errorcode = sqlite3.SQLITE_READONLY
+        raise exc
+
+    monkeypatch.setattr(Ledger, "_append", append)
+    settled = settlements_that_would_succeed(monkeypatch)
+    with pytest.raises(store.LedgerError, match="could not claim .*readonly database") as caught:
+        claim_database(db, "work")
+    assert not isinstance(caught.value, store.SharedDatabaseError)
+    assert settled == []
+    assert claim_events(db) == []
+

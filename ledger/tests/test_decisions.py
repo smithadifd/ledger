@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sqlite3
 import stat
 import subprocess
@@ -39,7 +40,7 @@ from ledger.export import (
 )
 from ledger.loop import _LOOP_WRITER_CAPABILITY
 from ledger.restore import replay_events, restore_export
-from ledger.store import GENESIS_HASH, Event, event_digest
+from ledger.store import GENESIS_HASH, Event, UnsettledClaimError, event_digest
 from ledger.schema import (
     DURABILITY,
     EPHEMERAL,
@@ -1137,11 +1138,23 @@ def test_cli_restore_and_verify_take_the_target_system(tmp_path: Path, monkeypat
     assert out == "ok events=2\n"
 
 
-def test_busy_claim_checkpoint_is_reported(tmp_path: Path) -> None:
+def test_busy_claim_checkpoint_is_reported(tmp_path: Path, monkeypatch) -> None:
     db = tmp_path / "ledger.db"
     with open_ledger(db) as lg:
         lg.append(kind="item.created", payload={"type": "ticket", "title": "t"},
                   item_id="W-1", idempotency_key="w1")
+    # The reader holds its transaction for the whole call, so the checkpoint
+    # after the claim's commit, and every checkpoint claim_database's
+    # settlement retries within its budget, stays busy: the claim is on
+    # record but never reaches the main file, so it is refused.
+    budgets: list[bool] = []
+    original_budget = Ledger._checkpoint_within_budget
+
+    def budget(self) -> bool:
+        budgets.append(original_budget(self))
+        return budgets[-1]
+
+    monkeypatch.setattr(Ledger, "_checkpoint_within_budget", budget)
     # A reader in another process holding a transaction keeps the
     # checkpoint from truncating the WAL without sharing SQLite descriptors.
     reader = """
@@ -1164,7 +1177,7 @@ conn.close()
         assert proc.stdout is not None
         read_ready_line(proc, "held")
         try:
-            with pytest.raises(SharedDatabaseError, match=r"checkpoint of .* is busy"):
+            with pytest.raises(UnsettledClaimError) as caught:
                 claim_database(db, "work")
         finally:
             assert proc.stdin is not None
@@ -1172,6 +1185,21 @@ conn.close()
             proc.stdin.flush()
             _out, err = proc.communicate(timeout=30)
             assert proc.returncode == 0, err
+    # The refusal is the claim's own busy checkpoint, raised again once the
+    # settlement spent its budget with the checkpoint still busy.
+    expected = (
+        re.escape(f"system 'work': checkpoint of {db.resolve()} is busy (")
+        + r"\d+ of \d+"
+        + re.escape(
+            " WAL frames written back): another connection, perhaps through "
+            "another path to this file, holds the database"
+        )
+    )
+    assert re.fullmatch(expected, str(caught.value)), str(caught.value)
+    assert caught.value.committed is True
+    assert caught.value.event is not None
+    assert caught.value.event.payload == {"system": "work"}
+    assert budgets == [False]
     assert _claims(db) == [{"system": "work"}]
 
 
