@@ -37,6 +37,7 @@ SQLITE_OK = 0
 FCNTL_FILE_POINTER = 7
 FCNTL_VFS_POINTER = 27
 FCNTL_JOURNAL_POINTER = 28
+FCNTL_PERSIST_WAL = 10
 LIMIT_VARIABLE_NUMBER = 9
 
 
@@ -326,6 +327,27 @@ def wal_fd(handle: int) -> int | None:
 def journal_fd(handle: int) -> int | None:
     """The descriptor of the connection's rollback journal, or ``None`` when it is not open."""
     return _journal_object_fd(handle, _journal_filename, "-journal")
+
+
+def persist_wal(handle: int) -> None:
+    """Set ``SQLITE_FCNTL_PERSIST_WAL`` on the connection's main file, and read it back.
+
+    A connection's last close otherwise unlinks the ``-wal`` and ``-shm``
+    names, whatever files they hold by then; with the flag set it unlinks
+    neither. Raises ``Unattributable`` unless SQLite reports the flag set.
+    """
+    lib = ensure_hook()
+    flag = ctypes.c_int(1)
+    rc = lib.sqlite3_file_control(handle, b"main", FCNTL_PERSIST_WAL, ctypes.byref(flag))
+    check = ctypes.c_int(-1)
+    if rc == SQLITE_OK:
+        rc = lib.sqlite3_file_control(
+            handle, b"main", FCNTL_PERSIST_WAL, ctypes.byref(check)
+        )
+    if rc != SQLITE_OK or check.value != 1:
+        raise Unattributable(
+            f"sqlite3_file_control(PERSIST_WAL) returned {rc}, flag {check.value}"
+        )
 
 
 def shm_fd(handle: int) -> int | None:

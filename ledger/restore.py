@@ -358,9 +358,11 @@ def restore_export(
         restored = lg.events()
     except BaseException as exc:
         lg.close()
-        if isinstance(exc, UnsafeDatabaseFile):
-            # The destination no longer names the files this restore wrote,
-            # so what is there now is not ours: unlink nothing, stat nothing.
+        if isinstance(exc, UnsafeDatabaseFile) and exc.path in _dest_files(dest_path):
+            # The destination's own binding check refused: its names no
+            # longer name the files this restore wrote, so what is there now
+            # is not ours: unlink nothing, stat nothing. A refusal about any
+            # other path is an ordinary failure and cleans up below.
             raise UnsafeDatabaseFile(
                 exc.code,
                 f"{exc.detail}; restore unlinked none of "

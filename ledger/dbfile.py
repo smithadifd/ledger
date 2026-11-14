@@ -326,6 +326,23 @@ def _bound_siblings(proof: OpenProof) -> None:
         _bound_side(proof, "-shm", proof.shm)
 
 
+def _keep_side_names(proof: OpenProof, refusal: UnsafeDatabaseFile) -> None:
+    """After a failed binding check, stop the connection's close removing a side name.
+
+    The last close of a WAL connection unlinks the ``-wal`` and ``-shm`` names,
+    whatever files they hold by then. After a refusal those may be files
+    another writer put there, such as a backup published onto the name, so the
+    connection is told to leave both names alone (``SQLITE_FCNTL_PERSIST_WAL``).
+    The close's checkpoint still writes only through the proved descriptors.
+    """
+    try:
+        _sqlite_handle.persist_wal(proof.handle)
+    except (_sqlite_handle.Unattributable, OSError) as exc:
+        refusal.add_note(
+            f"the -wal and -shm names may be removed when the connection closes: {exc}"
+        )
+
+
 def verify_bound(proof: OpenProof) -> None:
     """Refuse unless the path and its side names still name the proved files.
 
@@ -335,14 +352,19 @@ def verify_bound(proof: OpenProof) -> None:
     a name back, so a pass of the last check proves every name was bound when
     the ``-wal`` check ran. Raises ``UnsafeDatabaseFile`` with ``db_swapped``
     (the main file) or ``db_sibling_unsafe`` (a side file), never anything
-    else, and never reads file contents.
+    else, and never reads file contents. After a refusal the connection's
+    close leaves the ``-wal`` and ``-shm`` names in place.
     """
-    _seam("before_settle", proof.path)
-    _bound_main(proof)
-    _seam("bound_after_main", proof.path)
-    _bound_siblings(proof)
-    _seam("bound_after_siblings", proof.path)
-    _bound_main(proof)
+    try:
+        _seam("before_settle", proof.path)
+        _bound_main(proof)
+        _seam("bound_after_main", proof.path)
+        _bound_siblings(proof)
+        _seam("bound_after_siblings", proof.path)
+        _bound_main(proof)
+    except UnsafeDatabaseFile as refusal:
+        _keep_side_names(proof, refusal)
+        raise
 
 
 def checked_connect(

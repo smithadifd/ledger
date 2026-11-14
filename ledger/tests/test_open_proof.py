@@ -26,6 +26,7 @@ from ledger.backup import backup_db, integrity_check
 from ledger.cli import main
 from ledger.dbfile import UnsafeDatabaseFile, verify_bound
 from ledger.export import export_events
+from ledger.loop import manage_item
 from ledger.restore import restore_export
 from ledger.store import LedgerError, open_ledger
 from ledger.verbs import EXIT_OK, EXIT_REFUSED, discover_verbs
@@ -411,6 +412,98 @@ def test_claim_system_with_no_swap_settles_after_commit_and_checkpoint(
         assert len(settles) == 2
 
 
+# --- the close after a refusal ------------------------------------------------
+
+
+def _held(path: Path | str) -> tuple[tuple[int, int], bytes]:
+    return _identity(path), Path(path).read_bytes()
+
+
+@pytest.mark.parametrize("suffix", ("-wal", "-shm"))
+def test_a_backup_published_onto_a_side_name_survives_the_refusal_and_the_close(
+    tmp_path: Path, monkeypatch, suffix: str
+) -> None:
+    # A supported backup lands on the -wal (or -shm) name after the write's
+    # COMMIT. The write is refused, and closing the refused connection must
+    # not unlink the name: it holds the backup now, not the ledger's file.
+    db = _ledger_with(tmp_path / "ledger.db", ITEM)
+    source = _ledger_with(tmp_path / "other.db", "OTHER-1")
+    side = Path(f"{db}{suffix}")
+    published: dict = {}
+
+    def act() -> None:
+        published["result"] = backup_db(source, side)
+        published["held"] = _held(side)
+
+    with open_ledger(db) as lg:
+        fired = _swap_after_write(monkeypatch, db, act)
+        with pytest.raises(UnsafeDatabaseFile) as info:
+            lg.append(**_note("after open", "k-1"))
+        assert info.value.code == "db_sibling_unsafe"
+        assert _same(info.value.path, side)
+        assert fired == ["before_settle"]
+    assert published["result"].integrity == "ok"
+    assert os.path.lexists(side), f"closing the refused connection removed {side.name}"
+    assert _held(side) == published["held"]
+
+
+def test_a_main_swap_refusal_leaves_the_swapped_in_files_side_names_alone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Another database is moved in whole: main, -wal and -shm. The write is
+    # refused db_swapped, and the close leaves all three names as they were.
+    db = _ledger_with(tmp_path / "ledger.db", ITEM)
+    moved = {
+        "": _ledger_with(tmp_path / "other.db", "OTHER-1"),
+        "-wal": tmp_path / "other-wal",
+        "-shm": tmp_path / "other-shm",
+    }
+    moved["-wal"].write_bytes(b"the moved-in database's -wal")
+    moved["-shm"].write_bytes(b"the moved-in database's -shm")
+    expected = {suffix: _held(path) for suffix, path in moved.items()}
+
+    def act() -> None:
+        for suffix, path in moved.items():
+            os.replace(path, f"{db}{suffix}")
+
+    with open_ledger(db) as lg:
+        fired = _swap_after_write(monkeypatch, db, act)
+        with pytest.raises(UnsafeDatabaseFile) as info:
+            lg.append(**_note("after open", "k-1"))
+        assert info.value.code == "db_swapped"
+        assert fired == ["before_settle"]
+    for suffix, held in expected.items():
+        name = f"{db}{suffix}"
+        assert os.path.lexists(name), f"closing the refused connection removed {name}"
+        assert _held(name) == held
+
+
+def test_a_refused_backup_source_leaves_the_planted_side_name_alone(
+    tmp_path: Path, monkeypatch
+) -> None:
+    source = _ledger_with(tmp_path / "source.db", "SOURCE-1")
+    dest = tmp_path / "out" / "copy.db"
+    side = Path(f"{source}-wal")
+    planted = tmp_path / "planted"
+    planted.write_bytes(b"not the source's -wal")
+    expected = _held(planted)
+    fired: list[str] = []
+
+    def seam(stage: str, path: Path) -> None:
+        if stage == "before_settle" and _same(path, source) and not fired:
+            fired.append(stage)
+            os.replace(planted, side)
+
+    _arm(monkeypatch, seam)
+    with pytest.raises(UnsafeDatabaseFile) as info:
+        backup_db(source, dest)
+    assert fired == ["before_settle"]
+    assert info.value.code == "db_sibling_unsafe"
+    assert os.path.lexists(side), "closing the refused source connection removed -wal"
+    assert _held(side) == expected
+    assert list(dest.parent.iterdir()) == []
+
+
 # --- restore ------------------------------------------------------------------
 
 
@@ -452,6 +545,63 @@ def test_a_restore_that_fails_with_no_swap_still_removes_its_files(
         restore_export(export_dir, dest, system="home")
     for name in (dest, Path(f"{dest}-wal"), Path(f"{dest}-shm")):
         assert not os.path.lexists(name)
+
+
+@pytest.mark.parametrize("target", ("main", "-wal"))
+def test_a_destination_swap_during_restore_leaves_the_renamed_in_file(
+    tmp_path: Path, monkeypatch, target: str
+) -> None:
+    export_dir = _export(tmp_path)
+    dest = tmp_path / "restored.db"
+    if target == "main":
+        replacement = _ledger_with(tmp_path / "other.db", "OTHER-1")
+        name, expected_code = dest, "db_swapped"
+    else:
+        replacement = tmp_path / "planted-wal"
+        replacement.write_bytes(b"not the restore's -wal")
+        name, expected_code = Path(f"{dest}-wal"), "db_sibling_unsafe"
+    expected = _held(replacement)
+    fired = _swap_after_write(
+        monkeypatch, dest, lambda: os.replace(replacement, name), baseline=0
+    )
+    with pytest.raises(UnsafeDatabaseFile) as info:
+        restore_export(export_dir, dest, system="home")
+    assert fired == ["before_settle"]
+    assert info.value.code == expected_code
+    assert os.path.lexists(name), f"the failed restore removed {name}"
+    assert _held(name) == expected
+    assert "restore unlinked none of" in str(info.value)
+
+
+def test_a_refusal_about_another_path_still_removes_the_restores_files(
+    tmp_path: Path,
+) -> None:
+    # The loop-events callback raises an UnsafeDatabaseFile about a database
+    # the restore never opened. That is an ordinary failure: the restore
+    # removes its destination, and the same restore can run again.
+    source = _ledger_with(tmp_path / "export-source.db", ITEM)
+    export_dir = tmp_path / "export"
+    with open_ledger(source) as lg:
+        manage_item(lg, ITEM, idempotency_key=f"manage:{ITEM}")
+        export_events(lg, export_dir)
+    dest = tmp_path / "restored.db"
+    unrelated = tmp_path / "unrelated.db"
+    calls: list[int] = []
+
+    def callback(count: int, kinds: tuple[str, ...]) -> None:
+        calls.append(count)
+        raise UnsafeDatabaseFile("db_swapped", "an unrelated database", unrelated)
+
+    with pytest.raises(UnsafeDatabaseFile) as info:
+        restore_export(export_dir, dest, system="home", accept_loop_events=True,
+                       on_accept_loop_events=callback)
+    assert calls, "the restore never reached the loop-events callback"
+    assert info.value.path == unrelated
+    assert "restore unlinked none of" not in str(info.value)
+    for name in (dest, Path(f"{dest}-wal"), Path(f"{dest}-shm")):
+        assert not os.path.lexists(name), f"the failed restore left {name}"
+    result = restore_export(export_dir, dest, system="home", accept_loop_events=True)
+    assert result.events > 0
 
 
 # --- backup -------------------------------------------------------------------

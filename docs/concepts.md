@@ -240,7 +240,7 @@ the first statement. After the first read, and again after a switch to WAL, the
 connection's own `-wal`, `-shm` and open journal descriptors must be the
 regular, singly linked files at those names (`db_sibling_unsafe` otherwise).
 
-The open check keeps what it proved, and every write is checked against it
+The open check keeps what it proved, and a write is checked against it
 again before it is reported. Once the write is durable (after its `COMMIT`;
 for `claim-system`, once the checkpoint that folds the claim into the main file
 has finished), the ledger checks the main file, then `-wal` and `-shm` in WAL
@@ -249,10 +249,20 @@ it proved, and the name must be a regular file with one link that is that same
 file. A failed check refuses the write with `db_swapped` (the main file) or
 `db_sibling_unsafe` (a side file), exit 3, and nothing reports success. The
 write did happen, but in a file the path no longer names, so it is not in the
-database at that path; the ledger neither retries nor rolls it back. A restore
-refused this way unlinks nothing, because the files at the destination's names
-are no longer the ones it wrote. `backup` checks its source the same way before
-it publishes the copy.
+database at that path; the ledger neither retries nor rolls it back. After a
+refusal the connection keeps the `-wal` and `-shm` names when it closes
+(SQLite's `SQLITE_FCNTL_PERSIST_WAL`): SQLite's close would otherwise unlink
+both names, whatever files they hold by then, including a file another writer
+put there. A restore refused this way for its destination or its `-wal` or
+`-shm` name unlinks nothing, because the files at those names are no longer the
+ones it wrote; any other restore failure removes its files. `backup` checks its
+source the same way before it publishes the copy.
+
+Each database-writing verb checks after its own commit. `restore` checks after
+it opens the destination and after its later writes (the claim of an unclaimed
+export, the receipt of a loop-managed export), but not after the commit of its
+replay itself, so a restore of an export that already carries a system claim and
+no loop-owned events is not checked after its replayed events land.
 
 One pass of those checks is enough because the ledger only ever replaces or
 unlinks a name; it never moves a live name aside and back. The proved file has
@@ -418,7 +428,10 @@ online backup API (never a file copy of a live database), writes the copy at a
 unique `.FILE.<random>.partial` name beside FILE (readable by its owner only),
 runs `PRAGMA integrity_check`, and renames it to FILE only when the check passes
 and the source path still names the file the copy was read from. Two backups to
-the same FILE each write their own copy, and the one that renames last wins.
+the same FILE each write their own copy, and the one that renames last wins. A
+backup killed mid-run (by a signal or a power loss) leaves its hidden partial
+file behind, and no later backup removes it; delete it by hand when no backup
+is running.
 
 Neither the export nor the backup holds a by-path document's bytes, only its
 stored path, sha256 and size: the bytes live only under the database's
