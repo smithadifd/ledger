@@ -4,7 +4,8 @@ The flag reads one SessionStart hook input on stdin and prints up to three
 ``export NAME=<value>`` lines: ``LEDGER_SESSION`` always (when the input has a
 usable ``session_id``), then ``LEDGER_AGENT`` and ``LEDGER_HARNESS`` only when
 each is absent from the environment. It never prints ``LEDGER_MODEL``: a model
-switch during the session could not re-stamp it. It never resolves, opens or
+switch during the session could not re-stamp it; ``--hook-model`` records
+the model beside the database instead. It never resolves, opens or
 creates the database. Each case runs the CLI as a hook does: a subprocess with
 the input on stdin.
 """
@@ -59,6 +60,17 @@ def hook_env(db: Path, stdin: str | bytes, *extra: str,
     )
     return subprocess.CompletedProcess(done.args, done.returncode,
                                        done.stdout.decode("utf-8"), done.stderr.decode("utf-8"))
+
+
+def hook_model(db: Path, stdin: str) -> subprocess.CompletedProcess[str]:
+    run_env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
+    run_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    run_env["LEDGER_HARNESS"] = "claude-code"
+    return subprocess.run(
+        [sys.executable, "-m", "ledger", "--db", str(db), "resume", "--hook-model"],
+        input=stdin, env=run_env, capture_output=True, text=True, timeout=60,
+        cwd=PKG_PARENT,
+    )
 
 
 def sourced(text: str, tmp_path: Path, name: str) -> str:
@@ -145,10 +157,17 @@ def test_t23_no_model_line_whatever_the_input_carries(db: Path, model) -> None:
     assert "LEDGER_MODEL" not in json.loads(done.stdout)["data"]["env"]
 
 
-def test_t23_a_write_under_the_printed_environment_records_no_model(db: Path,
-                                                                     tmp_path: Path) -> None:
+def test_t23_a_write_after_session_start_records_the_start_model(db: Path,
+                                                                  tmp_path: Path) -> None:
+    # The session-start hook runs both flags on one input: --hook-env prints no
+    # LEDGER_MODEL line and --hook-model records the start model beside the
+    # database, which the session's writes read.
+    db.parent.mkdir()
     done = hook_env(db, json.dumps(hook()))
     assert done.returncode == 0, done.stderr
+    assert "LEDGER_MODEL" not in done.stdout
+    recorded = hook_model(db, json.dumps(hook()))
+    assert (recorded.returncode, recorded.stdout, recorded.stderr) == (0, "", "")
     env_file = tmp_path / "env-file"
     env_file.write_text(done.stdout, encoding="utf-8")
     env = {k: v for k, v in os.environ.items() if not k.startswith("LEDGER_")}
@@ -163,9 +182,8 @@ def test_t23_a_write_under_the_printed_environment_records_no_model(db: Path,
         events = lg.events()
     assert events
     for event in events:
-        assert (event.session, event.actor, event.harness) == (
-            SESSION, "claude-code", "claude-code")
-        assert event.model is None
+        assert (event.session, event.actor, event.harness, event.model) == (
+            SESSION, "claude-code", "claude-code", MODEL)
 
 
 @pytest.mark.parametrize("session", [..., None, 7, "", "a\nb", "a b", "\ud800"],

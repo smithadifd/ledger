@@ -1,4 +1,4 @@
-"""The ledger-hooks Claude Code plugin: its manifests, its docs and its three hooks.
+"""The ledger-hooks Claude Code plugin: its manifests, its docs and its four hooks.
 
 Every hook test runs the command ``hooks.json`` names for the event (and, for
 PostToolUse, the matcher), through ``/bin/sh -c`` with ``CLAUDE_PLUGIN_ROOT``
@@ -12,6 +12,8 @@ plugin folder beside it.
 """
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -228,6 +230,7 @@ def test_t1_session_start_prints_the_brief(rig: Rig) -> None:
 
 
 def test_t2_session_start_appends_what_hook_env_prints(rig: Rig) -> None:
+    rig.db.parent.mkdir()
     env_file = rig.tmp / "claude-env"
     env_file.write_text("export ALREADY_THERE=1\n")
     hook = recorded("session_start.json")
@@ -252,6 +255,7 @@ def test_t2_session_start_appends_what_hook_env_prints(rig: Rig) -> None:
 
 
 def test_t2_without_claude_env_file_no_file_is_written_and_the_brief_prints(rig: Rig) -> None:
+    rig.db.parent.mkdir()
     before = sorted(p.name for p in rig.tmp.iterdir())
     ran = session_hook(rig)
     assert (ran.returncode, ran.stderr) == (0, "")
@@ -324,7 +328,8 @@ def test_t7_the_base_path_has_no_ledger() -> None:
 
 
 @pytest.mark.parametrize("case", sorted(OFF_CASES))
-@pytest.mark.parametrize("event", ["SessionStart", "UserPromptSubmit", "PostToolUse"])
+@pytest.mark.parametrize("event", ["SessionStart", "UserPromptSubmit", "PostToolUse",
+                                   "PostModelSwitch"])
 def test_t7_with_no_ledger_configured_every_hook_is_silent(rig: Rig, event: str,
                                                           case: str) -> None:
     env_file = rig.tmp / "claude-env"
@@ -335,6 +340,7 @@ def test_t7_with_no_ledger_configured_every_hook_is_silent(rig: Rig, event: str,
         "UserPromptSubmit": prompt_input(),
         "PostToolUse": answered([{"question": QUESTION, "header": "q", "multiSelect": False,
                                   "options": OPTIONS}], "ship"),
+        "PostModelSwitch": switch_input(),
     }[event]
     tool = "AskUserQuestion" if event == "PostToolUse" else None
     assert hook_commands(event, tool), event
@@ -465,7 +471,12 @@ def test_t16_cli_stdout_never_reaches_the_session(rig: Rig, kind: str) -> None:
 
 
 def test_t17_a_failing_brief_is_one_line_on_stdout(rig: Rig) -> None:
-    stub_ledger(rig, 'echo "partial brief"\necho "ledger: broken" >&2\nexit 1\n')
+    stub_ledger(rig, (
+        'case "$*" in\n'
+        '  "resume --hook-model") cat >/dev/null; exit 0 ;;\n'
+        'esac\n'
+        'echo "partial brief"\necho "ledger: broken" >&2\nexit 1\n'
+    ))
     ran = session_hook(rig)
     assert (ran.returncode, ran.stderr) == (0, "")
     assert ran.stdout == "ledger-hooks: ledger resume --brief exited 1\n"
@@ -482,6 +493,7 @@ def test_t26_a_failing_hook_env_leaves_the_env_file_and_the_brief_prints(rig: Ri
     stub_ledger(rig, (
         'case "$*" in\n'
         '  "resume --hook-env") cat >/dev/null; echo "refused" >&2; exit 3 ;;\n'
+        '  "resume --hook-model") cat >/dev/null; exit 0 ;;\n'
         '  "resume --brief") echo "BRIEF"; exit 0 ;;\n'
         'esac\nexit 9\n'
     ))
@@ -501,7 +513,9 @@ def test_t26_the_real_cli_refusal_leaves_the_env_file_byte_identical(rig: Rig) -
     ran = session_hook(rig, hook, env={"CLAUDE_ENV_FILE": str(env_file)})
     assert ran.returncode == 0
     assert ran.stderr == "ledger-hooks: session env failed (exit 3)\n"
-    assert ran.stdout.startswith("LEDGER AGENT CONTRACT")
+    # --hook-model refuses the same input; its line comes first, then the brief.
+    assert ran.stdout.startswith(
+        "ledger-hooks: model record failed (exit 3)\nLEDGER AGENT CONTRACT")
     assert env_file.read_bytes() == b"export KEEP=1\n"
 
 
@@ -531,12 +545,14 @@ def test_t19_the_plugin_is_not_named_ledger_and_nothing_sets_a_version() -> None
     assert "version" not in market.get("metadata", {})
 
 
-def test_t19_hooks_json_runs_three_bounded_shims() -> None:
+def test_t19_hooks_json_runs_four_bounded_shims() -> None:
     config = load(HOOKS_JSON)["hooks"]
-    assert set(config) == {"SessionStart", "UserPromptSubmit", "PostToolUse"}
+    assert set(config) == {"SessionStart", "UserPromptSubmit", "PostToolUse",
+                           "PostModelSwitch"}
     [post] = config["PostToolUse"]
     assert post["matcher"] == "AskUserQuestion"
-    assert all("matcher" not in entry for entry in config["SessionStart"] + config["UserPromptSubmit"])
+    assert all("matcher" not in entry for entry in config["SessionStart"]
+               + config["UserPromptSubmit"] + config["PostModelSwitch"])
     for event, entries in config.items():
         for entry in entries:
             for hook in entry["hooks"]:
@@ -577,6 +593,10 @@ def test_t20_cli_page_documents_the_frames_the_config_key_and_hook_env() -> None
     page = _flat(ROOT / "docs" / "cli.md")
     for token in ("capture_prompts", "capture_config", "`skipped`", "prompts_off",
                   "--hook-env", "hook_env_bad_input", "hook_env_not_session_start",
+                  "--hook-model", "hook_model_bad_input", "hook_model_wrong_event",
+                  "hook_model_bad_model", "hook_model_no_folder",
+                  "hook_model_unsafe_folder", "hook_model_write_failed",
+                  "hook_model_timeout", "hook_model_unsupported", "PostModelSwitch",
                   *(f"`{frame}`" for frame in FRAMES)):
         assert token in page, token
     assert "running it twice leaves one capture" in page
@@ -590,3 +610,120 @@ def test_t20_readme_and_known_limits_carry_the_guard_rail_sentence() -> None:
     assert "claude plugin install ledger-hooks@ledger-plugins" in readme
     start = _flat(ROOT / "docs" / "start-here.md")
     assert "claude plugin install ledger-hooks@ledger-plugins" in start
+
+
+# --- P1-P6, T11: the model record ---------------------------------------------
+
+
+MODEL_FAILED = "ledger-hooks: model record failed (exit {})\n"
+
+
+def switch_input(to_model="model-switched", session: str | None = None) -> dict:
+    """A PostModelSwitch input with the fields Claude Code sends."""
+    return {
+        "session_id": session or recorded("session_start.json")["session_id"],
+        "transcript_path": "/tmp/fixture/transcript.jsonl",
+        "cwd": "/tmp/fixture",
+        "hook_event_name": "PostModelSwitch",
+        "from_model": "model-before",
+        "to_model": to_model,
+        "requested_model": "model-requested",
+        "source": "user",
+    }
+
+
+def model_file(rig: Rig, session: str) -> Path:
+    key = hashlib.sha256(session.encode("utf-8")).hexdigest()
+    return rig.db.parent / (rig.db.name + ".session-models") / (key + ".json")
+
+
+def model_record(rig: Rig, session: str) -> dict:
+    return json.loads(model_file(rig, session).read_text(encoding="utf-8"))
+
+
+def switch_hook(rig: Rig, hook: dict, **kwargs) -> Ran:
+    return run_hook(rig, "PostModelSwitch", json.dumps(hook), **kwargs)
+
+
+def test_hooks_json_declares_post_model_switch() -> None:
+    [entry] = load(HOOKS_JSON)["hooks"]["PostModelSwitch"]
+    assert set(entry) == {"hooks"}
+    [hook] = entry["hooks"]
+    assert hook == {
+        "type": "command",
+        "command": 'sh "${CLAUDE_PLUGIN_ROOT}/hooks/model-switch.sh"',
+        "timeout": 10,
+    }
+
+
+def test_model_switch_shim_records(rig: Rig) -> None:
+    rig.db.parent.mkdir()
+    hook = switch_input("model-switched")
+    assert_quiet(switch_hook(rig, hook))
+    assert model_record(rig, hook["session_id"])["model"] == "model-switched"
+    assert not rig.db.exists()
+
+
+def test_model_switch_shim_failure_is_one_line(rig: Rig) -> None:
+    rig.db.parent.mkdir()
+    ran = switch_hook(rig, switch_input(7))
+    assert (ran.returncode, ran.stdout, ran.stderr) == (2, "", MODEL_FAILED.format(3))
+
+
+def test_model_switch_shim_timeout_is_the_same_line(rig: Rig) -> None:
+    hook = switch_input("model-switched")
+    lock = model_file(rig, hook["session_id"]).with_suffix(".lock")
+    lock.parent.mkdir(parents=True, mode=0o700)
+    fd = os.open(lock, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        ran = switch_hook(rig, hook)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    assert (ran.returncode, ran.stdout, ran.stderr) == (2, "", MODEL_FAILED.format(3))
+    assert not model_file(rig, hook["session_id"]).exists()
+
+
+@pytest.mark.parametrize("case", ["no-ledger", "no-db"])
+def test_model_switch_shim_off(rig: Rig, case: str) -> None:
+    env = {"no-ledger": {"PATH": BASE_PATH}, "no-db": {"LEDGER_DB": None}}[case]
+    assert_quiet(switch_hook(rig, switch_input(7), env=env))
+    assert not rig.db.parent.exists()
+
+
+def test_session_start_shim_records_start_model(rig: Rig) -> None:
+    new_item(rig)
+    brief = ledger(rig, "resume", "--brief")
+    assert brief.returncode == 0
+    env_file = rig.tmp / "claude-env"
+    hook = recorded("session_start.json")
+    ran = session_hook(rig, hook, env={"CLAUDE_ENV_FILE": str(env_file)})
+    assert (ran.returncode, ran.stderr, ran.stdout) == (0, "", brief.stdout)
+    lines = env_file.read_text().splitlines()
+    assert [line.split("=", 1)[0] for line in lines] == [
+        "export LEDGER_SESSION", "export LEDGER_AGENT", "export LEDGER_HARNESS"]
+    assert model_record(rig, hook["session_id"])["model"] == hook["model"]
+
+
+def test_session_start_brief_survives_model_failure(rig: Rig) -> None:
+    new_item(rig)
+    brief = ledger(rig, "resume", "--brief")
+    hook = dict(recorded("session_start.json"), model={"id": "x"})
+    ran = session_hook(rig, hook)
+    assert (ran.returncode, ran.stderr) == (0, "")
+    assert ran.stdout == MODEL_FAILED.format(3) + brief.stdout
+
+
+def test_write_after_switch_sees_new_model(rig: Rig) -> None:
+    # A shim-completion check: the record is published before the shim exits.
+    rig.db.parent.mkdir()
+    session = recorded("session_start.json")["session_id"]
+    started = ledger(rig, "resume", "--hook-model",
+                     stdin=json.dumps(dict(recorded("session_start.json"), model="model-start")))
+    assert started.returncode == 0, started.stderr
+    assert_quiet(switch_hook(rig, switch_input("model-switched")))
+    code, env = ledger_json(rig, "new", "--type", "gate", "--title", "after",
+                            env={"LEDGER_SESSION": session})
+    assert code == 0, env
+    assert env["data"]["event"]["model"] == "model-switched"

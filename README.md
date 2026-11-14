@@ -399,15 +399,22 @@ An agent that has only the installed package should learn from the ledger itself
 
 This repository is also a Claude Code plugin marketplace, `ledger-plugins`.
 Its one plugin, `ledger-hooks`, connects a Claude Code session to the ledger
-with three hooks. (It is not called `ledger` because another plugin already
+with four hooks. (It is not called `ledger` because another plugin already
 has that name.)
 
 - **SessionStart** prints `ledger resume --brief` into the session, and with
   `ledger resume --hook-env` stamps the session's environment:
   `LEDGER_SESSION` from the session id, and `LEDGER_AGENT` and
   `LEDGER_HARNESS` when they are not already set. It stamps no
-  `LEDGER_MODEL`: the model can change during a session and the hook could
-  not follow it ([KNOWN-LIMITS.md](KNOWN-LIMITS.md)).
+  `LEDGER_MODEL`, because the model can change during a session; instead
+  `ledger resume --hook-model` records the session's start model beside the
+  database.
+- **PostModelSwitch** runs `ledger resume --hook-model` on every model
+  switch, so the session's later writes stamp the new model. A write stamps
+  its own session's recorded model, else `LEDGER_MODEL`, else none. This
+  hook needs Claude Code v2.1.251 or later; its limits (a prompt captured
+  right after a switch, two switches with no prompt between them, a hook
+  that runs late) are in [KNOWN-LIMITS.md](KNOWN-LIMITS.md).
 - **UserPromptSubmit** passes the hook's input to `ledger capture --kind prompt`.
 - **PostToolUse** on AskUserQuestion passes it to
   `ledger capture --kind picker`: the capture `ledger pick ITEM --ask K` binds.
