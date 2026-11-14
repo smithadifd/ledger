@@ -13,9 +13,10 @@ lets no other writer use a channel that starts with ``hook:``.
 as a pointer: a fixed text line plus ``omitted_bytes`` and
 ``omitted_sha256``.
 
-Two cases of ``--kind prompt`` write nothing and exit 0, both decided before
-the database is opened, so neither creates it. The result is the text line
-``skipped``, a tab and the reason (JSON ``data``:
+Four cases of ``--kind prompt`` write nothing and exit 0, all decided before
+the database is opened, so none creates it. They are checked in the order
+below, and the first that applies names the reason. The result is the text
+line ``skipped``, a tab and the reason (JSON ``data``:
 ``{"event": null, "skipped": "<reason>"}``):
 
 - ``frame``: after its leading ASCII whitespace, the prompt starts with one of
@@ -24,6 +25,25 @@ the database is opened, so neither creates it. The result is the text line
   subagent hand-back. The match is exact and case-sensitive. It is a label,
   never proof of authorship: a prompt with no frame is stored as the
   person's, whoever wrote it.
+- ``injected``: after the same leading ASCII whitespace, the prompt starts
+  with one of the injected-prompt prefixes in force. A
+  ``capture_skip_prefixes`` in the ``config.json`` beside the database that is
+  an array of non-empty strings replaces ``DEFAULT_SKIP_PREFIXES`` (an empty
+  array means no prefixes); with no key, or a value of any other shape, the
+  default stays in force and capture goes on. The default is empty: a
+  deployment lists the prefixes it injects in that key. The match is exact
+  and case-sensitive, and the list never replaces ``HARNESS_FRAMES``.
+- ``cwd_optout``: the hook input's ``cwd`` is one of the paths in
+  ``capture_optout_paths`` or lies under one. Both sides are compared after
+  ``os.path.realpath`` (a part that does not exist is taken as written), so a
+  symbolic link or ``..`` into an opted-out folder opts out, and a match ends
+  at a path separator, so a sibling whose name only starts with the folder's
+  is still captured. ``~`` is never expanded. No key leaves nothing opted out;
+  a missing or empty ``cwd`` opts nothing out. Unlike the prefix list, a value
+  that is not an array of absolute path strings is refused (``capture_config``,
+  exit 3, nothing written): falling back would store the prompts of a folder
+  the person opted out. With a path configured, a ``cwd`` that is not an
+  absolute path string is refused ``capture_bad_input``.
 - ``prompts_off``: ``capture_prompts`` is ``false`` in the ``config.json``
   beside the database. No file, no key, or ``true`` leaves prompt capture on.
   A config that cannot be read or parsed, or a value that is not a JSON
@@ -35,7 +55,9 @@ the database is opened, so neither creates it. The result is the text line
   missing, loops or vanishes before the open included.
 
 A valid input is checked first, so every refusal above still applies to a
-frame. ``--kind picker`` never reads the config.
+frame. The config is read once, after the frame check and before the other
+three, so an unreadable config refuses any prompt that is not a frame.
+``--kind picker`` never reads the config.
 
 ``--kind picker`` takes the PostToolUse hook input for AskUserQuestion
 (``hook_event_name`` ``PostToolUse``, ``tool_name`` ``AskUserQuestion``,
@@ -112,6 +134,13 @@ HARNESS_FRAMES = (
 _ASCII_WHITESPACE = " \t\n\r\v\f"
 # The config.json key that turns prompt capture off; picker capture never reads it.
 PROMPTS_CONFIG_KEY = "capture_prompts"
+# The config.json key whose array of injected-prompt prefixes replaces the default.
+PREFIXES_CONFIG_KEY = "capture_skip_prefixes"
+# The config.json key naming the folders whose sessions' prompts are not captured.
+OPTOUT_CONFIG_KEY = "capture_optout_paths"
+# The injected-prompt prefixes in force when capture_skip_prefixes is absent or
+# invalid. Empty by default: a deployment lists its own in that key.
+DEFAULT_SKIP_PREFIXES: tuple[str, ...] = ()
 
 
 def _bad_input(message: str) -> CliError:
@@ -224,16 +253,24 @@ def _read_prompt_config(path: os.PathLike[str]) -> dict[str, Any] | None:
     return config
 
 
+def _capture_config(db: str) -> tuple[os.PathLike[str], dict[str, Any] | None]:
+    """The path of the ``config.json`` beside ``db`` and its one read."""
+    from ledger import search  # where config.json lives is decided in one place
+
+    path = search.config_file(db)
+    return path, _read_prompt_config(path)
+
+
 def prompts_enabled(db: str) -> bool:
     """Whether ``capture_prompts`` in the ``config.json`` beside ``db`` leaves
     prompt capture on: yes with no file, no key or ``true``; no with ``false``.
 
     Anything else is refused rather than read as on or off.
     """
-    from ledger import search  # where config.json lives is decided in one place
+    return _prompts_value(*_capture_config(db))
 
-    path = search.config_file(db)
-    config = _read_prompt_config(path)
+
+def _prompts_value(path: os.PathLike[str], config: dict[str, Any] | None) -> bool:
     if config is None or PROMPTS_CONFIG_KEY not in config:
         return True
     value = config[PROMPTS_CONFIG_KEY]
@@ -243,6 +280,70 @@ def prompts_enabled(db: str) -> bool:
             " true or false; prompt capture refused"
         )
     return value
+
+
+def skip_prefixes(config: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """The injected-prompt prefixes in force under ``config``.
+
+    A ``capture_skip_prefixes`` that is an array of non-empty strings replaces
+    the default; no config, no key or any other value leaves the default.
+    """
+    if config is None or PREFIXES_CONFIG_KEY not in config:
+        return DEFAULT_SKIP_PREFIXES
+    value = config[PREFIXES_CONFIG_KEY]
+    if type(value) is not list or any(type(item) is not str or item == "" for item in value):
+        return DEFAULT_SKIP_PREFIXES
+    return tuple(value)
+
+
+def is_injected(prompt: str, prefixes: tuple[str, ...]) -> bool:
+    """True when ``prompt`` starts with one of ``prefixes`` after ASCII whitespace."""
+    return prompt.lstrip(_ASCII_WHITESPACE).startswith(prefixes)
+
+
+def _canonical(path: str) -> str:
+    # Non-strict realpath: links and ``..`` resolve; a part that does not
+    # exist is kept as written. Never expands ``~``.
+    return os.path.realpath(path)
+
+
+def optout_paths(path: os.PathLike[str], config: Mapping[str, Any] | None) -> tuple[str, ...]:
+    """The canonical ``capture_optout_paths`` under ``config``; none with no key.
+
+    Any value other than an array of absolute path strings refuses
+    ``capture_config``: a fallback would store an opted-out folder's prompts.
+    """
+    if config is None or OPTOUT_CONFIG_KEY not in config:
+        return ()
+    value = config[OPTOUT_CONFIG_KEY]
+    if type(value) is not list or any(
+        type(item) is not str or "\0" in item or not os.path.isabs(item) for item in value
+    ):
+        raise _config_refusal(
+            f"{OPTOUT_CONFIG_KEY} in ledger config {path} must be an array of"
+            " absolute paths; prompt capture refused"
+        )
+    return tuple(_canonical(item) for item in value)
+
+
+def _hook_cwd(hook: Mapping[str, Any]) -> str | None:
+    """The hook input's ``cwd``; ``None`` when it is missing or empty."""
+    value = hook.get("cwd")
+    if value is None or value == "":
+        return None
+    if type(value) is not str or "\0" in value or not os.path.isabs(value):
+        raise _bad_input("cwd must be an absolute path")
+    return value
+
+
+def in_optout(cwd: str, paths: tuple[str, ...]) -> bool:
+    """True when canonical ``cwd`` is one of ``paths`` or lies under one."""
+    here = _canonical(cwd)
+    for root in paths:
+        boundary = root if root.endswith(os.sep) else root + os.sep
+        if here == root or here.startswith(boundary):
+            return True
+    return False
 
 
 def _questions(tool_input: Any) -> list[dict[str, Any]]:
@@ -392,12 +493,20 @@ def run(args, ctx: Context) -> Result:
         raise _bad_input(f"stdin is not UTF-8 text: {exc}") from exc
     hook = read_hook_input(raw)
     if args.kind == "prompt":
-        # Validate first, so every refusal stands; then the two skips, both
+        # Validate first, so every refusal stands; then the four skips, all
         # before open_db, which would create the database.
         prompt_capture(hook)
         if is_harness_frame(hook["prompt"]):
             return _skipped("frame")
-        if not prompts_enabled(ctx.db):
+        path, config = _capture_config(ctx.db)
+        if is_injected(hook["prompt"], skip_prefixes(config)):
+            return _skipped("injected")
+        paths = optout_paths(path, config)
+        if paths:
+            cwd = _hook_cwd(hook)
+            if cwd is not None and in_optout(cwd, paths):
+                return _skipped("cwd_optout")
+        if not _prompts_value(path, config):
             return _skipped("prompts_off")
     lg = open_db(ctx, write=True)
     try:

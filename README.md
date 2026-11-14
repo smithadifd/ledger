@@ -447,7 +447,11 @@ with a newer ledger. `capture --kind prompt` skips harness frames (task
 notifications, cross-session and agent messages, system reminders, subagent
 hand-backs) and stores a prompt over 64 KiB as a pointer, and
 `"capture_prompts": false` in `config.json` turns prompt capture off while
-picker capture stays on ([docs/cli.md](docs/cli.md) has the details).
+picker capture stays on. In the same file, `capture_optout_paths` lists
+folders whose sessions' prompts are never stored (an invalid value refuses
+prompt capture), and `capture_skip_prefixes` lists the prefixes of prompts a
+tool injects, which are skipped (an invalid list keeps the built-in one,
+which is empty) ([docs/cli.md](docs/cli.md) has the details).
 
 A setup with no guard rail cannot stop an agent from running `ledger capture`
 itself. The hooks record what the harness showed and what was chosen; they do
