@@ -240,6 +240,33 @@ the first statement. After the first read, and again after a switch to WAL, the
 connection's own `-wal`, `-shm` and open journal descriptors must be the
 regular, singly linked files at those names (`db_sibling_unsafe` otherwise).
 
+The open check keeps what it proved, and every write is checked against it
+again before it is reported. Once the write is durable (after its `COMMIT`;
+for `claim-system`, once the checkpoint that folds the claim into the main file
+has finished), the ledger checks the main file, then `-wal` and `-shm` in WAL
+mode, then the main file again: the connection must still hold the descriptor
+it proved, and the name must be a regular file with one link that is that same
+file. A failed check refuses the write with `db_swapped` (the main file) or
+`db_sibling_unsafe` (a side file), exit 3, and nothing reports success. The
+write did happen, but in a file the path no longer names, so it is not in the
+database at that path; the ledger neither retries nor rolls it back. A restore
+refused this way unlinks nothing, because the files at the destination's names
+are no longer the ones it wrote. `backup` checks its source the same way before
+it publishes the copy.
+
+One pass of those checks is enough because the ledger only ever replaces or
+unlinks a name; it never moves a live name aside and back. The proved file has
+one link, so once a rename displaces it no name points to it, and nothing the
+ledger does gives it a name again. A pass of the final main check therefore
+proves that all three names still named the proved files when the `-wal` check
+ran, however many renames happened before. A rename after that is a later
+operation, not a false report, which is why the check runs after the write is
+durable and never before. What remains: a process that moves a live name aside
+and back, by renaming it out and in again or by keeping a second hard link, can
+pass the checks. No ledger verb does this. Holding SQLite's write lock would not
+stop it, since a rename takes no SQLite lock, and a descriptor cannot say which
+name holds its file.
+
 The check reads only this connection's descriptors; it never reads or counts the
 other files the process has open. A process may hold several ledger connections
 on any threads, open a database it already has open (SQLite may reuse the
@@ -387,9 +414,11 @@ reveals. `--check` exits 3 (`lag`) when more than `--max-events` events (100)
 or `--max-hours` hours (24) are waiting, for a scheduled alert.
 
 **Backup** (`ledger/backup.py`). `ledger backup --to FILE` uses SQLite's
-online backup API (never a file copy of a live database), writes
-`FILE.partial`, runs `PRAGMA integrity_check`, and renames it only when the
-check passes.
+online backup API (never a file copy of a live database), writes the copy at a
+unique `.FILE.<random>.partial` name beside FILE (readable by its owner only),
+runs `PRAGMA integrity_check`, and renames it to FILE only when the check passes
+and the source path still names the file the copy was read from. Two backups to
+the same FILE each write their own copy, and the one that renames last wins.
 
 Neither the export nor the backup holds a by-path document's bytes, only its
 stored path, sha256 and size: the bytes live only under the database's

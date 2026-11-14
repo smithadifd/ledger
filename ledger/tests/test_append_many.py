@@ -75,9 +75,9 @@ def test_two_event_batch_lands_in_one_transaction(monkeypatch, db: str) -> None:
     real_connect = store.connect
 
     def traced(path):
-        conn = real_connect(path)
+        conn, proof = real_connect(path)
         conn.set_trace_callback(statements.append)
-        return conn
+        return conn, proof
 
     monkeypatch.setattr(store, "connect", traced)
     batch = [

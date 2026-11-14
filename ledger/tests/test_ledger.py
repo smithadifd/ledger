@@ -595,9 +595,9 @@ def test_schema_version_recorded_and_migrate_is_idempotent(tmp_path: Path) -> No
 
 def test_loop_identity_migration_preserves_existing_events(tmp_path: Path) -> None:
     path = _db(tmp_path)
-    conn = connect(path)
+    conn, proof = connect(path)
     migrate(conn, load_migrations()[:2])
-    legacy = Ledger(conn, path)
+    legacy = Ledger(conn, path, proof)
     created = legacy.append(
         kind="item.created",
         payload={"type": "ticket", "title": "existing item"},
@@ -625,9 +625,9 @@ def test_v1_migration_preserves_other_ask_with_shared_question_id(
     tmp_path: Path,
 ) -> None:
     path = _db(tmp_path)
-    conn = connect(path)
+    conn, proof = connect(path)
     migrate(conn, load_migrations()[:1])
-    lg = Ledger(conn, path)
+    lg = Ledger(conn, path, proof)
     lg.append(
         kind="item.created",
         payload={"type": "decision", "title": "two questions"},

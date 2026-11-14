@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Every write verb now reports a write only once the database path still names the file it was written to.
+
+- **A write is checked against its open before it is reported.** The open check already proved that the connection's descriptors are the files at the database's names; it now keeps that proof. After each write is durable (after its `COMMIT`, and for `claim-system` after the checkpoint that settles the claim), and after `open_ledger` migrates, the ledger checks the main file, `-wal`, `-shm` and the main file again: each name must still be a regular, singly linked file that is the proved one, and the connection must still hold the proved descriptor. If another file was put at one of those names, for example by a `backup --to` aimed at the live database's path, the write is refused with `db_swapped` or `db_sibling_unsafe` (exit 3) instead of reporting success. The write did land, but in a file the path no longer names, so it is not in the database at that path; the ledger does not retry or roll it back. This covers every database-writing verb, `doc add` and `restore` included. The guard accepts nothing it refused before.
+- **A refused restore unlinks nothing.** When a restore is refused with one of those codes, the files at the destination are no longer the ones it wrote, so it leaves them in place and names them in the refusal. Any other restore failure removes the restore's own files as before.
+- **`backup` writes its copy at a unique name and checks its source before publishing.** The copy is written at `.FILE.<random>.partial` beside FILE, created readable by its owner only, instead of the fixed `FILE.partial`, so two backups to the same FILE no longer delete each other's copy; the published file keeps those owner-only permissions. Before the copy is renamed into place, the source path must still name the file it was read from (`db_swapped` otherwise), and nothing is published. A `FILE.partial` left by an older version is no longer removed by the next backup.
+- **Library: `checked_connect` and `connect` return the proof.** `ledger.dbfile.checked_connect` returns `(conn, mode, proof)`, `ledger.store.connect` returns `(conn, proof)`, and `Ledger(conn, path, proof)` takes the proof; `ledger.dbfile.verify_bound(proof)` runs the check. A caller that unpacked two values from `checked_connect`, or used `connect`'s return as a connection, must unpack the new shape. `open_ledger` and `open_ledger_readonly` are unchanged for callers.
+
+**Upgrading from 0.2.1.** There is no schema change and no migration. A backup destination may hold a `FILE.partial` from an older version; it is safe to delete.
+
 ## 0.2.1 — 2026-11-13
 
 Two fixes to `ledger export --commit` and `--push`: committing no longer throws away what you staged in the export repository, and the credential scan now covers the text of every event, not only attached documents.

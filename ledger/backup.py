@@ -1,17 +1,20 @@
 """Online backup of a ledger SQLite database.
 
 Uses sqlite3's backup API (or, as a documented alternative, VACUUM INTO).
-Never copies the live database file. The copy is written as ``*.partial``,
-checked with ``PRAGMA integrity_check``, and renamed only when the check
-returns ``ok``.
+Never copies the live database file. The copy is written at a unique
+``.<name>.*.partial`` name beside the destination, checked with ``PRAGMA
+integrity_check``, and renamed only when the check returns ``ok`` and the
+source path still names the file the copy was read from.
 """
 from __future__ import annotations
 
+import os
 import sqlite3
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from .dbfile import checked_connect, precheck_files
+from .dbfile import checked_connect, precheck_files, verify_bound
 from .paths import resolve_db_path
 from .store import BUSY_TIMEOUT_MS, LedgerError, _connect_readonly
 from .store import (
@@ -73,10 +76,15 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
     # A backup of a newer schema would later be read by this same older code.
     _refuse_newer_schema_before_connect(source_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
-    partial = dest_path.with_name(dest_path.name + ".partial")
-    partial.unlink(missing_ok=True)
+    # A unique partial name, so two backups to one destination never unlink
+    # or write each other's copy.
+    handle, partial_name = tempfile.mkstemp(
+        prefix=f".{dest_path.name}.", suffix=".partial", dir=dest_path.parent
+    )
+    partial = Path(partial_name)
     try:
-        source, _source_mode = checked_connect(
+        os.close(handle)
+        source, _source_mode, source_proof = checked_connect(
             source_path,
             lambda: sqlite3.connect(
                 str(source_path),
@@ -85,7 +93,7 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
         )
         try:
             source.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
-            target, _target_mode = checked_connect(
+            target, _target_mode, _target_proof = checked_connect(
                 partial,
                 lambda: sqlite3.connect(
                     str(partial), timeout=BUSY_TIMEOUT_MS / 1000
@@ -97,6 +105,9 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
                 target.execute("PRAGMA journal_mode = DELETE")
             finally:
                 target.close()
+            # The copy was read from the proved source file: publish it only
+            # while the source path still names that file.
+            verify_bound(source_proof)
         finally:
             source.close()
         verdict = integrity_check(partial)

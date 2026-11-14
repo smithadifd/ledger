@@ -19,6 +19,7 @@ from typing import Any
 
 from .credscan import scan as scan_credentials
 from .credscan import shape_names
+from .dbfile import UnsafeDatabaseFile
 from .decisions import check_event as check_decision_event
 from .export import canonical_stream, verify_export, verify_stream_digest
 from .paths import resolve_db_path
@@ -355,8 +356,17 @@ def restore_export(
             )
         lg.verify(system=system)
         restored = lg.events()
-    except BaseException:
+    except BaseException as exc:
         lg.close()
+        if isinstance(exc, UnsafeDatabaseFile):
+            # The destination no longer names the files this restore wrote,
+            # so what is there now is not ours: unlink nothing, stat nothing.
+            raise UnsafeDatabaseFile(
+                exc.code,
+                f"{exc.detail}; restore unlinked none of "
+                + ", ".join(str(path) for path in _dest_files(dest_path)),
+                exc.path,
+            ) from exc
         for path in _dest_files(dest_path):
             if path not in stale:
                 path.unlink(missing_ok=True)

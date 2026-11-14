@@ -374,7 +374,7 @@ def test_a_ledger_at_0008_migrates_and_keeps_every_older_view(tmp_path) -> None:
     path = tmp_path / "old.db"
     migrations = store.load_migrations()
     assert "0009_entities.sql" in [m.name for m in migrations]
-    conn = store.connect(path)
+    conn, _proof = store.connect(path)
     try:
         store.migrate(conn, [m for m in migrations if m.version <= 8])
         before = dict(conn.execute(
