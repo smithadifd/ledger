@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .backup import refuse_side_file_name
+from .backup import file_identity, refuse_side_file_name
 from .credscan import scan as scan_credentials
 from .credscan import shape_names
 from .dbfile import UnsafeDatabaseFile
@@ -324,7 +324,14 @@ def restore_export(
         export_digest = verify_stream_digest(export_path, events)
     dest_path = resolve_db_path(dest)
     refuse_side_file_name(dest_path, "restore")
-    if dest_path.exists():
+    # By file identity, so any spelling the volume reads as an existing
+    # file's name, a hard link included, refuses; a name that cannot be read
+    # refuses too.
+    try:
+        occupied = file_identity(dest_path) is not None
+    except OSError as exc:
+        raise LedgerError(f"restore target cannot be checked: {dest_path} ({exc})") from exc
+    if occupied:
         raise LedgerError(f"restore target already exists: {dest_path}")
     if reserved_events and on_accept_loop_events is not None:
         # Before the destination exists, so a refusal the callback raises
