@@ -28,11 +28,29 @@ that is missing, not a string, empty, or holds a control character leaves
 its line out. It prints no ``LEDGER_MODEL`` line, whatever the input's
 ``model``: only a few hook events may write the session's environment file
 and a model switch is not one of them, so a stamped model would go stale
-while later writes kept recording it. Stdin that is not one UTF-8 JSON object
+while later writes kept recording it (``--hook-model`` records the model
+instead). Stdin that is not one UTF-8 JSON object
 is refused with ``hook_env_bad_input``, and an input for another event with
 ``hook_env_not_session_start`` (exit 3, nothing on stdout). The flag never
 resolves, opens or creates the database, and it cannot be combined with
 ``--brief`` or ``--item``.
+
+``--hook-model`` is for the SessionStart and PostModelSwitch hooks. It reads
+the hook's JSON input on stdin and records the session's model in the
+session's file beside the database (``ledger/session_model.py``), which
+every later write of that session reads. The model is ``to_model`` for
+PostModelSwitch and ``model`` for SessionStart, a usable name of at most 256
+UTF-8 bytes. A SessionStart with no model records that writes stamp
+``LEDGER_MODEL``. Any other model value records that the model is unknown
+(writes stamp none) and is then refused with ``hook_model_bad_model``. A
+PostModelSwitch older than the stored record writes nothing and exits 0
+with ``stale`` true. Refusals (exit 3, nothing on stdout):
+``hook_model_bad_input`` (stdin not one UTF-8 JSON object, or no usable
+``session_id``), ``hook_model_wrong_event``, ``hook_model_no_folder``,
+``hook_model_unsafe_folder``, ``hook_model_write_failed`` and
+``hook_model_timeout`` (not done within two seconds of its start). It never
+opens or creates the database and never reads ``LEDGER_SESSION``; it cannot
+be combined with ``--hook-env``, ``--brief`` or ``--item``.
 """
 from __future__ import annotations
 
@@ -42,6 +60,7 @@ import sys
 import unicodedata
 from typing import Any, Mapping
 
+from ledger import session_model
 from ledger.paths import resolve_db_path
 from ledger.store import open_ledger_readonly
 from ledger.verbs import (
@@ -114,6 +133,12 @@ def add_arguments(parser) -> None:
         " for LEDGER_SESSION, LEDGER_AGENT and LEDGER_HARNESS (never LEDGER_MODEL);"
         " opens no database",
     )
+    parser.add_argument(
+        "--hook-model",
+        action="store_true",
+        help="read a SessionStart or PostModelSwitch hook input on stdin and record"
+        " the session's model beside the database; opens no database",
+    )
 
 
 _NAMED = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
@@ -176,16 +201,14 @@ def hook_env(hook: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, s
     return env
 
 
-def _read_stdin() -> str:
+def _read_stdin(code: str = "hook_env_bad_input") -> str:
     buffer = getattr(sys.stdin, "buffer", None)
     try:
         if buffer is None:
             return sys.stdin.read()
         return buffer.read().decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise _hook_env_refusal(
-            "hook_env_bad_input", f"stdin is not UTF-8 text: {exc}"
-        ) from exc
+        raise _hook_env_refusal(code, f"stdin is not UTF-8 text: {exc}") from exc
 
 
 def _run_hook_env(args) -> Result:
@@ -204,6 +227,60 @@ def _run_hook_env(args) -> Result:
     env = hook_env(hook, os.environ)
     lines = [f"export {name}={shlex.quote(value)}" for name, value in env.items()]
     return Result(data={"env": env}, text="\n".join(lines))
+
+
+HOOK_MODEL_EVENTS = {"PostModelSwitch": "to_model", "SessionStart": "model"}
+
+
+def _hook_model_intent(event: str, hook: Mapping[str, Any]) -> tuple[str, str | None, bool]:
+    """The record the input asks for: (state, model, bad model)."""
+    field = HOOK_MODEL_EVENTS[event]
+    value = hook.get(field)
+    if event == "SessionStart" and value is None:
+        # A start that names no model: writes stamp LEDGER_MODEL again.
+        return "env", None, False
+    model = session_model.usable_model(value)
+    if model is None:
+        # A model the hook cannot name: neither an older record nor
+        # LEDGER_MODEL may be stamped until a later valid event.
+        return "unknown", None, True
+    return "model", model, False
+
+
+def _run_hook_model(args, ctx: Context) -> Result:
+    # The ordering key and the start of the two-second budget.
+    seq = session_model.stamp()
+    if args.hook_env or args.brief or args.item_id is not None:
+        raise UsageError("--hook-model cannot be combined with --hook-env, --brief or --item")
+    raw = _read_stdin("hook_model_bad_input")
+    try:
+        hook = read_hook_input(raw)
+    except CliError as exc:
+        raise _hook_env_refusal("hook_model_bad_input", str(exc)) from exc
+    event = hook.get("hook_event_name")
+    if type(event) is not str or event not in HOOK_MODEL_EVENTS:
+        raise _hook_env_refusal(
+            "hook_model_wrong_event",
+            "resume --hook-model takes a SessionStart or PostModelSwitch hook input",
+        )
+    session = _usable(hook.get("session_id"))
+    if session is None:
+        raise _hook_env_refusal("hook_model_bad_input", "the input has no usable session_id")
+    state, model, bad = _hook_model_intent(event, hook)
+    try:
+        written = session_model.record_hook_model(ctx.db, session, state, model, event, seq)
+    except session_model.HookModelRefusal as exc:
+        raise _hook_env_refusal(exc.code, str(exc)) from exc
+    if not written:
+        # Superseded by a newer record: not an error, whatever its model.
+        return Result(data={"recorded": None, "state": None, "stale": True}, text="")
+    if bad:
+        raise _hook_env_refusal(
+            "hook_model_bad_model",
+            f"the input's {HOOK_MODEL_EVENTS[event]} is not a usable model name;"
+            " the session's model is recorded as unknown",
+        )
+    return Result(data={"recorded": model, "state": state, "stale": False}, text="")
 
 
 def _commands(item_id: str, prefix: str = "ledger") -> tuple[str, str]:
@@ -279,6 +356,10 @@ def _entry_text(entry: dict[str, Any]) -> str:
 
 
 def run(args, ctx: Context) -> Result:
+    if args.hook_model:
+        # Never resolves the database for opening: it only names the folder
+        # the session's model record sits in.
+        return _run_hook_model(args, ctx)
     if args.hook_env:
         # Before resolve_db_path: the flag never resolves, opens or creates
         # the database.

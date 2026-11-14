@@ -1,5 +1,5 @@
 {
-  "description": "Session brief and capture hooks for the ledger. Each is a shim that runs the ledger CLI; with no ledger on PATH or no LEDGER_DB, each prints and writes nothing.",
+  "description": "Session brief, model record and capture hooks for the ledger. Each is a shim that runs the ledger CLI; with no ledger on PATH or no LEDGER_DB, each prints and writes nothing.",
   "hooks": {
     "SessionStart": [
       {
@@ -18,6 +18,17 @@
           {
             "type": "command",
             "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt.sh\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/model-switch.sh\"",
             "timeout": 10
           }
         ]

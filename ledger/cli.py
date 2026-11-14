@@ -22,6 +22,7 @@ from ledger import __version__
 from ledger.dbfile import UnsafeDatabaseFile
 from ledger.paths import SharedDatabaseError
 from ledger.schema import ValidationError
+from ledger.session_model import resolve_model
 from ledger.store import (
     ChainBroken,
     ForestRefusal,
@@ -211,6 +212,7 @@ def _run(
     verb: Verb = args._verb
     operator = _env("LEDGER_OPERATOR")
     agent = _env("LEDGER_AGENT")
+    session = _env("LEDGER_SESSION")
     ctx = Context(
         db=db,
         json_mode=json_mode,
@@ -218,8 +220,11 @@ def _run(
         operator=operator,
         agent=agent,
         harness=_env("LEDGER_HARNESS"),
-        model=_env("LEDGER_MODEL"),
-        session=_env("LEDGER_SESSION"),
+        # The session's own model record beside the database wins over
+        # LEDGER_MODEL (ledger/session_model.py). Resolved once, so one
+        # invocation stamps one model on every event it writes.
+        model=resolve_model(db, session, _env("LEDGER_MODEL")),
+        session=session,
         roadmap_parser=roadmap_parser,
         search_fallback_root=search_fallback_root,
         program=_program_name(),

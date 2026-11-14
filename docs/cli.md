@@ -886,8 +886,7 @@ It prints no `LEDGER_MODEL` line, whatever the input's `model`. Only
 SessionStart, Setup, CwdChanged and FileChanged hooks can write
 `CLAUDE_ENV_FILE`, and a model switch during the session is none of them, so
 a model stamped at session start would go stale and every later write would
-record it. Writes in a session the plugin started record no model unless
-`LEDGER_MODEL` is already set in Claude Code's environment.
+record it. The session's model is recorded by `--hook-model` instead (below).
 
 A variable set to an empty value counts as set. A usable value is a non-empty
 string with no control character; any other value leaves its line out and is
@@ -898,6 +897,60 @@ an object is refused with `hook_env_bad_input`, and an input whose
 (exit 3, nothing on stdout). With `--brief` or `--item` it is a usage error
 (exit 2). It never resolves, opens or creates the database, though `--db` or
 `LEDGER_DB` is still required, as for every verb.
+
+`--hook-model` is for the SessionStart and PostModelSwitch hooks (the
+plugin runs it on both). It reads the hook's JSON input on stdin and records
+the session's model in one file per session beside the database:
+`<database file name>.session-models/<sha256 of the session id>.json`, in
+the database's folder. Every write verb reads that file for its own
+`LEDGER_SESSION` when it starts, so a write stamps, in order: the model its
+session's file records, else `LEDGER_MODEL`, else no model. The file for
+another session or another database is never read, and a file that is
+missing, unreadable, malformed, larger than 4096 bytes, a symbolic link or
+not a regular file is ignored (the write falls back to `LEDGER_MODEL`; it is
+never refused for it). One invocation stamps one model on every event it
+writes.
+
+| Input | Records | Writes then stamp |
+|-------|---------|-------------------|
+| PostModelSwitch with a usable `to_model` | that model | that model |
+| SessionStart with a usable `model` | that model | that model |
+| SessionStart with no `model`, or `null` | a reset | `LEDGER_MODEL` |
+| any other `to_model` or `model` value | the model is unknown, then refused with `hook_model_bad_model` | no model |
+
+A usable model is a non-empty string of at most 256 UTF-8 bytes with no
+control character; a refusal never prints the value. The record carries an
+ordering key from a monotonic clock taken when the command starts: a
+PostModelSwitch older than the record already there writes nothing and exits
+0 with `stale` true, and a SessionStart always replaces the record. Records
+are written under a lock on `<hash>.lock` and replaced whole, so a write
+reads the old record or the new one, never a mix. `--json` carries
+`{"recorded": MODEL|null, "state": "model"|"unknown"|"env"|null, "stale": BOOL}`;
+text mode prints nothing.
+
+Refusals exit 3 with nothing on stdout: `hook_model_bad_input` (stdin not one
+UTF-8 JSON object, or no usable `session_id`), `hook_model_wrong_event` (an
+input for another event), `hook_model_bad_model` (above),
+`hook_model_no_folder` (the database's folder does not exist; it is not
+created), `hook_model_unsafe_folder` (the `.session-models` name is a
+symbolic link or not a folder), `hook_model_write_failed`, and
+`hook_model_timeout`: the command must finish within two seconds of its
+start, because Claude Code waits at most five seconds for a PostModelSwitch
+hook before it sends the next request; past that budget it writes nothing.
+The command never opens or creates the database, never reads
+`LEDGER_SESSION` (the input's `session_id` names the file), and creates the
+`.session-models` folder (mode 0700) only inside an existing database
+folder. With `--hook-env`, `--brief` or `--item` it is a usage error
+(exit 2).
+
+The plugin's PostModelSwitch hook (`model-switch.sh`) prints nothing on
+success, since Claude Code adds a PostModelSwitch hook's stdout to Claude's
+context. On a failure it prints one stderr line,
+`ledger-hooks: model record failed (exit N)`, and exits 2, so Claude Code
+shows the line to the user as a hook error; Claude does not see it, and the
+switch is never blocked. The SessionStart hook prints the same line as the
+first line of its output, ahead of the brief, when recording the start model
+fails.
 
 ## Contract
 
