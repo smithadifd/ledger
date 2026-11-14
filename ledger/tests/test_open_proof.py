@@ -447,22 +447,31 @@ def test_a_backup_published_onto_a_side_name_survives_the_refusal_and_the_close(
     assert _held(side) == published["held"]
 
 
+@pytest.mark.parametrize("main_change", ("rename", "hard-link"))
 def test_a_main_swap_refusal_leaves_the_swapped_in_files_side_names_alone(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, main_change: str
 ) -> None:
-    # Another database is moved in whole: main, -wal and -shm. The write is
-    # refused db_swapped, and the close leaves all three names as they were.
+    # Foreign files are moved onto -wal and -shm, and the main name is either
+    # replaced by another database ("rename") or given a second hard link
+    # ("hard-link"). The write is refused db_swapped, and the close leaves
+    # every name as it was. SQLite itself skips the close checkpoint, and so
+    # the -wal delete, once the main file has moved; with a hard link the main
+    # name still names the proved file, so only the ledger's close guard keeps
+    # the side names.
     db = _ledger_with(tmp_path / "ledger.db", ITEM)
     moved = {
-        "": _ledger_with(tmp_path / "other.db", "OTHER-1"),
         "-wal": tmp_path / "other-wal",
         "-shm": tmp_path / "other-shm",
     }
+    if main_change == "rename":
+        moved[""] = _ledger_with(tmp_path / "other.db", "OTHER-1")
     moved["-wal"].write_bytes(b"the moved-in database's -wal")
     moved["-shm"].write_bytes(b"the moved-in database's -shm")
     expected = {suffix: _held(path) for suffix, path in moved.items()}
 
     def act() -> None:
+        if main_change == "hard-link":
+            os.link(db, tmp_path / "alias.db")
         for suffix, path in moved.items():
             os.replace(path, f"{db}{suffix}")
 
