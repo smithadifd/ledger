@@ -119,6 +119,35 @@ class _ExactNames:
         return getattr(os, name)
 
 
+class _EntryGoneOnSecondRead:
+    """``os`` for the backup module: the probed entry vanishes after its first read.
+
+    It stands in for another process renaming the entry away between the
+    case probe's two reads of it, on a volume that folds case: once the entry
+    is gone, its case-swapped name is missing too, which alone would look
+    like a volume that tells case apart.
+    """
+
+    def __init__(self, entry: Path):
+        resolved = Path(entry).parent.resolve() / Path(entry).name
+        self._entry = os.fspath(resolved)
+        self._swapped = os.fspath(resolved.parent / resolved.name.swapcase())
+        self.entry_reads = 0
+
+    def lstat(self, path, *args, **kwargs):
+        name = os.fspath(path)
+        if name == self._entry:
+            self.entry_reads += 1
+            if self.entry_reads > 1:
+                raise FileNotFoundError(2, "No such file or directory", name)
+        elif name == self._swapped:
+            raise FileNotFoundError(2, "No such file or directory", name)
+        return os.lstat(path, *args, **kwargs)
+
+    def __getattr__(self, name: str):
+        return getattr(os, name)
+
+
 # --- backup -----------------------------------------------------------------
 
 
@@ -361,3 +390,24 @@ def test_an_exact_side_suffix_refuses_even_where_case_is_told_apart(
         backup_db(live, out / "copy.db-wal")
     monkeypatch.undo()
     assert sorted(os.listdir(out)) == ["keep.txt"]
+
+
+@pytest.mark.parametrize("verb", ("backup", "restore"))
+def test_a_probed_entry_that_vanishes_between_reads_refuses_a_mixed_case_side_name(
+    tmp_path: Path, monkeypatch, verb: str
+) -> None:
+    export_dir = _export(tmp_path)
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "copy.db").write_text("the only entry the case probe can try\n")
+    stub = _EntryGoneOnSecondRead(out / "copy.db")
+    monkeypatch.setattr(backup_module, "os", stub)
+    with pytest.raises(LedgerError, match="named like a database side file"):
+        if verb == "backup":
+            backup_db(live, out / "copy.db-WAL")
+        else:
+            restore_export(export_dir, out / "copy.db-WAL", system="home")
+    monkeypatch.undo()
+    assert stub.entry_reads == 2, "the case probe never reached its second read"
+    assert sorted(os.listdir(out)) == ["copy.db"], "the refused name was written"
