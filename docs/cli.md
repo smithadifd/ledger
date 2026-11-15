@@ -66,7 +66,9 @@ An optional `config.json` beside the database:
 {
   "search_roots": ["/absolute/path/to/a/notes/repo"],
   "claim_ttl_seconds": 14400,
-  "capture_prompts": true
+  "capture_prompts": true,
+  "capture_optout_paths": ["/absolute/path/to/a/private/folder"],
+  "capture_skip_prefixes": ["<text-a-tool-puts-in-the-prompt>"]
 }
 ```
 
@@ -88,6 +90,24 @@ An optional `config.json` beside the database:
   open, read or parse it refuses `capture_config` with the cause it saw. A
   link whose target is missing, loops or vanishes before the open counts as
   unreadable here, though `search` and `claim` read such a link as no file.
+- `capture_optout_paths`: absolute paths whose sessions' prompts are never
+  captured: `capture --kind prompt` writes nothing and prints `skipped` with
+  reason `cwd_optout` when the hook input's `cwd` is one of them or lies under
+  one. No key, or an empty array, opts nothing out. Any other value (not an
+  array, or an entry that is not a string, is empty or is not an absolute
+  path; `~` is not expanded, so `~/x` is not absolute) refuses with
+  `capture_config` (exit 3) and writes nothing: a fallback here would store
+  the prompts of a folder you opted out. Name the folder here, outside any
+  repository, so a public checkout never has to.
+- `capture_skip_prefixes`: prompts that start with one of these strings are
+  text a tool injected, not the person's: `capture --kind prompt` writes
+  nothing and prints `skipped` with reason `injected`. An array of non-empty
+  strings replaces the built-in list; an empty array means no prefixes. No
+  key, or any other value (not an array, or an entry that is not a non-empty
+  string), keeps the built-in list and capture goes on: a mistake here never
+  stops capture and never skips less than the built-in list. The built-in
+  list is empty, so a deployment that injects prompts lists its own prefixes
+  here.
 
 ## Item verbs
 
@@ -440,10 +460,12 @@ ask an `[ask K]` tag at the start of the first question names. Refusals
 (exit 3): `capture_not_prompt`, `capture_not_picker`, `capture_bad_input`,
 and `capture_config` (below).
 
-Two cases of `--kind prompt` write nothing and exit 0. Both are decided after
+Five cases of `--kind prompt` write nothing and exit 0. All are decided after
 the input is checked (so every refusal above still applies) and before the
-database is opened (so neither creates it). Each prints `skipped`, a tab and
-the reason; `--json` carries `{"event": null, "skipped": "<reason>"}`.
+database is opened (so none creates it), in the order listed; the first that
+applies names the reason. `config.json` is read once, after the `frame`
+check. Each prints `skipped`, a tab and the reason; `--json` carries
+`{"event": null, "skipped": "<reason>"}`.
 
 - `frame`: after its leading ASCII whitespace (space, tab, newline, carriage
   return, vertical tab, form feed), the prompt starts with one of the harness
@@ -454,6 +476,39 @@ the reason; `--json` carries `{"event": null, "skipped": "<reason>"}`.
   is a label, not proof of authorship: a prompt with no frame is stored with
   `origin: person` whoever wrote it, and a person who starts a prompt with a
   frame is not captured.
+- `injected`: after the same leading ASCII whitespace, the prompt starts
+  with one of the prefixes in `capture_skip_prefixes` (see
+  [Configuration file](#configuration-file)), or of the built-in list, which
+  is empty, when that key is absent or invalid. The match is exact and
+  case-sensitive. The list never replaces the harness frames above.
+- `cwd_optout`: the hook input's `cwd` is at or under one of the paths in
+  `capture_optout_paths`. Both are compared after resolving symbolic links
+  and `..` (a part that does not exist is taken as written), so a link or a
+  `..` path into an opted-out folder opts out, and a match ends at a path
+  separator: with `/x/private` opted out, `/x/private/a` opts out and
+  `/x/privatefoo` is captured. Letter case and Unicode form: an opted-out
+  path that exists is also matched by file identity (device and inode), so a
+  `cwd` at or under the same folder opts out whatever its spelling. On a
+  filesystem that treats names differing only in letter case or Unicode
+  normalization as one name (the macOS default), `/x/Private/a` opts out when
+  `/x/private` is configured, and `café` typed in one Unicode form matches
+  the folder stored in the other. On a filesystem that keeps those names
+  apart, they are different folders and the other spelling is captured. An
+  opted-out path that does not exist yet is matched by its text alone, letter
+  case and Unicode form exact, so write it as it will be spelled on disk. A
+  missing or empty `cwd` opts nothing out; with a path configured, a `cwd`
+  that is not an absolute path is refused `capture_bad_input`. An invalid
+  `capture_optout_paths` refuses `capture_config` instead. The `cwd` is where
+  the session is when the prompt is sent, not the files it works on.
+- `cwd_unverified`: an opted-out path is configured, the text match above
+  failed, and the file-identity match could not be decided because `stat`
+  failed for a reason other than the path not existing: on an opted-out path,
+  or, when an opted-out path exists, on the `cwd` or a folder above it (for
+  example a folder above them whose search permission was removed). The `cwd`
+  might be an opted-out folder under another spelling, so the prompt is not
+  stored: the opt-out fails closed. A path that does not exist (`ENOENT` or
+  `ENOTDIR`) is not unverified; it is matched by text as above. If an
+  identity match is found anyway, the reason is `cwd_optout`.
 - `prompts_off`: `capture_prompts` is `false` in `config.json` (see
   [Configuration file](#configuration-file)). A `config.json` entry that
   cannot be opened, read or parsed (a link that does not resolve included) or
