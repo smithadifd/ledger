@@ -540,11 +540,21 @@ def test_t19_the_marketplace_names_its_owner_and_the_plugin() -> None:
     assert (ROOT / entry["source"]).resolve() == PLUGIN.resolve()
 
 
-def test_t19_the_plugin_is_not_named_ledger_and_nothing_sets_a_version() -> None:
-    market, plugin = load(MARKETPLACE), load(PLUGIN_JSON)
-    assert plugin["name"] != "ledger"
-    assert "version" not in market and "version" not in plugin
-    assert all("version" not in entry for entry in market["plugins"])
+def test_t19_the_plugin_is_not_named_ledger() -> None:
+    assert load(PLUGIN_JSON)["name"] != "ledger"
+
+
+def test_t19_the_plugin_manifest_carries_the_release_version() -> None:
+    # Claude Code's plugin list shows this version; without one it shows a commit
+    # id. The release bumps it with the package (docs/releasing.md, section 1).
+    plugin = load(PLUGIN_JSON)
+    assert re.fullmatch(r"\d+\.\d+\.\d+", str(plugin.get("version"))), plugin.get("version")
+    assert plugin["version"] == __version__
+    # One place names it: a version in the marketplace entry would be a second one to bump.
+    market = load(MARKETPLACE)
+    assert "version" not in market
+    carrying = [entry["name"] for entry in market["plugins"] if "version" in entry]
+    assert not carrying, f"marketplace entries carry a second version: {carrying}"
     assert "version" not in market.get("metadata", {})
 
 
