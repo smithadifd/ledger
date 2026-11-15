@@ -486,11 +486,20 @@ check. Each prints `skipped`, a tab and the reason; `--json` carries
   and `..` (a part that does not exist is taken as written), so a link or a
   `..` path into an opted-out folder opts out, and a match ends at a path
   separator: with `/x/private` opted out, `/x/private/a` opts out and
-  `/x/privatefoo` is captured. A missing or empty `cwd` opts nothing out; with
-  a path configured, a `cwd` that is not an absolute path is refused
-  `capture_bad_input`. An invalid `capture_optout_paths` refuses
-  `capture_config` instead. The `cwd` is where the session is when the
-  prompt is sent, not the files it works on.
+  `/x/privatefoo` is captured. Letter case and Unicode form: an opted-out
+  path that exists is also matched by file identity (device and inode), so a
+  `cwd` at or under the same folder opts out whatever its spelling. On a
+  filesystem that treats names differing only in letter case or Unicode
+  normalization as one name (the macOS default), `/x/Private/a` opts out when
+  `/x/private` is configured, and `café` typed in one Unicode form matches
+  the folder stored in the other. On a filesystem that keeps those names
+  apart, they are different folders and the other spelling is captured. An
+  opted-out path that does not exist yet is matched by its text alone, letter
+  case and Unicode form exact, so write it as it will be spelled on disk. A
+  missing or empty `cwd` opts nothing out; with a path configured, a `cwd`
+  that is not an absolute path is refused `capture_bad_input`. An invalid
+  `capture_optout_paths` refuses `capture_config` instead. The `cwd` is where
+  the session is when the prompt is sent, not the files it works on.
 - `prompts_off`: `capture_prompts` is `false` in `config.json` (see
   [Configuration file](#configuration-file)). A `config.json` entry that
   cannot be opened, read or parsed (a link that does not resolve included) or

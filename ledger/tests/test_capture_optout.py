@@ -240,6 +240,91 @@ def test_a_cwd_that_is_not_an_absolute_path_refuses_when_paths_are_set(db: Path,
     assert not db.exists()
 
 
+# --- capture_optout_paths: the same folder under another spelling ----------------
+#
+# realpath keeps a name's letter case and Unicode form, so two spellings of one
+# folder on a filesystem that treats them as one name (the macOS default) stay
+# different strings. The opt-out holds by file identity there. Each test asks
+# the filesystem under tmp_path which kind it is; where it keeps those names
+# apart (Linux), the same identity rule is driven through a hard-linked file:
+# without privileges a directory there has no second name that realpath keeps.
+
+NFC_NAME = "caf\u00e9"
+NFD_NAME = "cafe\u0301"
+
+
+def same_file(a: Path, b: Path) -> bool:
+    try:
+        return os.path.samefile(a, b)
+    except OSError:
+        return False
+
+
+def hard_link_alias(tmp_path: Path) -> tuple[Path, Path]:
+    """An opted-out file and a second name for it that realpath does not resolve."""
+    root = tmp_path / "optout-file"
+    root.write_text("x", encoding="utf-8")
+    alias = tmp_path / "another-name"
+    os.link(root, alias)
+    assert os.path.realpath(alias) != os.path.realpath(root)
+    assert same_file(alias, root)
+    return root, alias
+
+
+def assert_spellings_opt_out(db: Path, typed: Path, cwds: list[Path]) -> None:
+    opt_out(db, typed)
+    for cwd in cwds:
+        assert_skipped(capture_prompt(db, cwd=cwd), "cwd_optout", db)
+    assert not db.exists()
+
+
+def assert_identity_opts_out(db: Path, tmp_path: Path) -> None:
+    # The alias itself, and a not-yet-made path under it, whose nearest
+    # existing part is the alias.
+    root, alias = hard_link_alias(tmp_path)
+    assert_spellings_opt_out(db, root, [alias, alias / "not-yet"])
+
+
+def spelling_case(tmp_path: Path, on_disk_name: str, typed_name: str) -> tuple[Path, Path, bool]:
+    on_disk = tmp_path / on_disk_name
+    (on_disk / "a-project").mkdir(parents=True)
+    typed = tmp_path / typed_name
+    one_name = same_file(typed, on_disk)
+    if one_name:
+        # The string rule alone would capture: realpath keeps both spellings.
+        assert os.path.realpath(typed) != os.path.realpath(on_disk)
+    return on_disk, typed, one_name
+
+
+def test_a_letter_case_variant_of_an_optout_path_opts_out(db: Path, tmp_path: Path) -> None:
+    on_disk, typed, one_name = spelling_case(tmp_path, "Private", "private")
+    if one_name:
+        assert_spellings_opt_out(db, typed, [on_disk, on_disk / "a-project",
+                                             on_disk / "a-project" / "not-yet"])
+    else:
+        assert_identity_opts_out(db, tmp_path)
+
+
+def test_a_unicode_form_variant_of_an_optout_path_opts_out(db: Path, tmp_path: Path) -> None:
+    on_disk, typed, one_name = spelling_case(tmp_path, NFD_NAME, NFC_NAME)
+    if one_name:
+        assert_spellings_opt_out(db, typed, [on_disk, on_disk / "a-project",
+                                             on_disk / "a-project" / "not-yet"])
+    else:
+        assert_identity_opts_out(db, tmp_path)
+
+
+def test_the_same_file_under_another_name_opts_out(db: Path, tmp_path: Path) -> None:
+    assert_identity_opts_out(db, tmp_path)
+
+
+def test_a_letter_case_variant_sibling_is_still_captured(db: Path, tmp_path: Path) -> None:
+    (tmp_path / "private").mkdir()
+    (tmp_path / "Privatefoo" / "a-project").mkdir(parents=True)
+    opt_out(db, tmp_path / "private")
+    assert_captured(capture_prompt(db, cwd=tmp_path / "Privatefoo" / "a-project"), db)
+
+
 # --- capture_optout_paths: an invalid value refuses -------------------------------
 
 

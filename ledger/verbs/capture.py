@@ -38,12 +38,18 @@ line ``skipped``, a tab and the reason (JSON ``data``:
   ``os.path.realpath`` (a part that does not exist is taken as written), so a
   symbolic link or ``..`` into an opted-out folder opts out, and a match ends
   at a path separator, so a sibling whose name only starts with the folder's
-  is still captured. ``~`` is never expanded. No key leaves nothing opted out;
-  a missing or empty ``cwd`` opts nothing out. Unlike the prefix list, a value
-  that is not an array of absolute path strings is refused (``capture_config``,
-  exit 3, nothing written): falling back would store the prompts of a folder
-  the person opted out. With a path configured, a ``cwd`` that is not an
-  absolute path string is refused ``capture_bad_input``.
+  is still captured. An opted-out path that exists is also matched by file
+  identity (``st_dev`` and ``st_ino``): the ``cwd``, or any existing folder
+  above it, that is the same file as the opted-out path opts out whatever its
+  spelling, so on a filesystem that treats names differing in letter case or
+  Unicode form as one name (the macOS default) those spellings opt out too.
+  An opted-out path that does not exist is matched by its text alone, letter
+  case and Unicode form exact. ``~`` is never expanded. No key leaves nothing
+  opted out; a missing or empty ``cwd`` opts nothing out. Unlike the prefix
+  list, a value that is not an array of absolute path strings is refused
+  (``capture_config``, exit 3, nothing written): falling back would store the
+  prompts of a folder the person opted out. With a path configured, a ``cwd``
+  that is not an absolute path string is refused ``capture_bad_input``.
 - ``prompts_off``: ``capture_prompts`` is ``false`` in the ``config.json``
   beside the database. No file, no key, or ``true`` leaves prompt capture on.
   A config that cannot be read or parsed, or a value that is not a JSON
@@ -336,14 +342,44 @@ def _hook_cwd(hook: Mapping[str, Any]) -> str | None:
     return value
 
 
+def _identity(path: str) -> tuple[int, int] | None:
+    """The ``(st_dev, st_ino)`` of ``path``; ``None`` when it cannot be stat'ed."""
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return (st.st_dev, st.st_ino)
+
+
+def _self_and_ancestors(path: str):
+    """``path``, then each folder above it, up to the root."""
+    while True:
+        yield path
+        parent = os.path.dirname(path)
+        if parent == path:
+            return
+        path = parent
+
+
 def in_optout(cwd: str, paths: tuple[str, ...]) -> bool:
-    """True when canonical ``cwd`` is one of ``paths`` or lies under one."""
+    """True when canonical ``cwd`` is one of ``paths`` or lies under one.
+
+    Two rules, either enough. By text: canonical ``cwd`` equals a path or
+    starts with it plus a separator. By file identity: ``cwd`` or a folder
+    above it is the same file (device and inode) as an existing path, which
+    catches a spelling that differs only in letter case or Unicode form on a
+    filesystem that treats those as one name. A path that does not exist has
+    no identity and is matched by text alone.
+    """
     here = _canonical(cwd)
     for root in paths:
         boundary = root if root.endswith(os.sep) else root + os.sep
         if here == root or here.startswith(boundary):
             return True
-    return False
+    roots = {ident for ident in map(_identity, paths) if ident is not None}
+    if not roots:
+        return False
+    return any(_identity(part) in roots for part in _self_and_ancestors(here))
 
 
 def _questions(tool_input: Any) -> list[dict[str, Any]]:
