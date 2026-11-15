@@ -2,7 +2,19 @@
 
 This page takes you from nothing to a working ledger, in order. Do each step
 and run its check before the next one. Every command is one you can run
-as written; `vX.Y.Z` is the one thing you fill in.
+as written; `vX.Y.Z` is the one thing you fill in, and step 3 prints what goes
+there.
+
+Setup has four parts, in this order, because each reads only what an earlier
+part made:
+
+1. the `ledger` command (steps 1 to 3);
+2. the environment, which names the database (steps 4 and 5);
+3. the `ledger-hooks` plugin for Claude Code (step 9);
+4. the skills plugin and its setup step (step 10).
+
+The first write, which creates the database, comes after the environment and
+before the check (steps 6 to 8).
 
 ## 1. Python 3.11 or newer
 
@@ -22,15 +34,41 @@ environment of its own and puts it on your `PATH`. Check for it:
 pipx --version
 ```
 
-If that prints "command not found", install it by the steps at
-https://pipx.pypa.io/stable/how-to/install-pipx.html, then run `pipx ensurepath` and open
-a new terminal. Do not use a bare `pip install` for this: current macOS and
-Homebrew Python refuse it (PEP 668, `externally-managed-environment`).
+If that prints "command not found", install it. On a Mac with
+[Homebrew](https://brew.sh/), two commands do it:
+
+```sh
+brew install pipx
+pipx ensurepath
+```
+
+`brew install pipx` puts the `pipx` command in Homebrew's folders, with the
+current Python it depends on. `pipx ensurepath` adds one line to your shell's
+profile file, so that `~/.local/bin`, where pipx links the commands it
+installs, is on your `PATH`. Open a new terminal, then run `pipx --version`
+again. From then on pipx keeps each program it installs in a folder of its own
+(`pipx environment` lists them). Without Homebrew, follow
+https://pipx.pypa.io/stable/how-to/install-pipx.html. Do not use a bare
+`pip install` for this: current macOS and Homebrew Python refuse it
+(PEP 668, `externally-managed-environment`).
 
 ## 3. Install the ledger at a tag
 
-Pick a release tag from https://github.com/smithadifd/ledger/tags and put it
-where `vX.Y.Z` is:
+This step needs `git`, as the install does (on a Mac without it, macOS offers
+to install Apple's command line tools the first time you run `git`). Print the
+newest release tag:
+
+```sh
+git ls-remote --tags --refs --sort=-v:refname https://github.com/smithadifd/ledger 'v*' | sed -n '1s|.*refs/tags/||p'
+```
+
+If the command failed because there is no network, reconnect and run it again.
+If it ran and printed nothing, use the tag named on
+the [latest release page](https://github.com/smithadifd/ledger/releases/latest)
+instead.
+
+Put what it prints where `vX.Y.Z` is (https://github.com/smithadifd/ledger/tags
+lists every tag):
 
 ```sh
 pipx install git+https://github.com/smithadifd/ledger@vX.Y.Z
@@ -58,31 +96,58 @@ export LEDGER_DB=~/.local/share/ledger/work.db
 Use a short name of your own for the body of work this database holds, in
 place of `work` (`<system>` above). Keep the file out of a synced folder (iCloud,
 Dropbox, OneDrive, Syncthing) and out of a git working tree; the ledger
-refuses a synced root.
+refuses a synced root. The shell expands `~` to an absolute path, and the path
+must be absolute: a relative one resolves against whatever folder a session
+starts in.
 
-## 5. Set the environment for writes
+## 5. Set the environment
+
+In your shell, set the two values a write needs besides the database:
 
 ```sh
+export LEDGER_OPERATOR=me
 export LEDGER_HARNESS=cli
-export LEDGER_AGENT=me
 ```
+
+Put step 4's line and these two in your shell profile (for zsh, `~/.zshrc`)
+so every new terminal has them.
 
 - `LEDGER_HARNESS` is required for every write. It says what is writing: a
   tool, a script or an agent runtime, so each event records its source. Use
   `cli` when you type the commands yourself; an agent runtime uses its own
   name, for example `claude-code`.
-- `LEDGER_AGENT` is optional. It names the person or process writing, and
-  the actor stamped on each event is `<operator>/<agent>` when `LEDGER_OPERATOR`
-  is set as well.
+- `LEDGER_OPERATOR` names the person the writes are made for. `LEDGER_AGENT`
+  is optional; it names the process writing, and the actor stamped on each
+  event is `<operator>/<agent>` when both are set.
 - `LEDGER_DB` is the path from step 4.
 
-The plugin or harness that starts an agent session normally exports these for
-the agent. Reads such as `doctor` and `verify` do not need `LEDGER_HARNESS`.
+Claude Code starts its sessions with an environment of its own, so give it the
+database and the operator too: add them to the `env` block of its settings
+(`~/.claude/settings.json` for your user), adding keys and keeping any that
+are already there. Write the database path in full; `echo
+~/.local/share/ledger/work.db` prints it:
+
+```json
+{
+  "env": {
+    "LEDGER_DB": "/absolute/path/to/work.db",
+    "LEDGER_OPERATOR": "me"
+  }
+}
+```
+
+Leave `LEDGER_HARNESS` out of the settings: the plugin's session-start hook
+(step 9) sets it to `claude-code` when it is unset. A session started from a
+shell that exports `LEDGER_HARNESS=cli` inherits that value instead, so run
+`unset LEDGER_HARNESS` before you start Claude Code, or put
+`LEDGER_HARNESS=cli` in front of the commands you type. Reads such as `doctor`
+and `verify` do not need `LEDGER_HARNESS`.
 
 ## 6. Make the first write
 
 There is no `init` verb. The first write creates the database file, and the
-folders above it, and applies every migration:
+folders above it, and applies every migration, so there is no folder to make
+first:
 
 ```sh
 ledger new --type ticket --title "My first item" --id first-1
@@ -110,6 +175,10 @@ characters.
 
 ## 8. Check with `doctor`
 
+`doctor` reads a database that exists, so it fails with `database does not
+exist` until a write (step 6) has made the file; that is why the check comes
+after the first write and not before it.
+
 ```sh
 ledger doctor
 ledger verify
@@ -132,13 +201,7 @@ If `doctor` says `database does not exist`, it is looking at a path where
 nothing has been written: check `echo $LEDGER_DB` and run step 6. If it says
 `pass --db or set LEDGER_DB`, step 4 was not done in this shell.
 
-## 9. Optional: a scheduled export
-
-Once the ledger works, [A scheduled export without the toolkit](scheduled-export.md)
-sets up a private git repository and jobs that export, push and check it on a
-schedule, and shows how to prove the pushed copy restores.
-
-## 10. Optional: connect Claude Code
+## 9. Connect Claude Code: the hooks plugin
 
 To have Claude Code print the ledger's brief when a session starts and record
 your prompts and question-picker answers, install the ledger's plugin from
@@ -150,14 +213,30 @@ claude plugin install ledger-hooks@ledger-plugins
 ```
 
 Its hooks do nothing until `ledger` is on Claude Code's `PATH` and `LEDGER_DB`
-is set in the environment Claude Code starts with. The README's
+is set in the environment Claude Code starts with, which steps 3 and 5 did.
+The brief goes into the model's context; the terminal does not show it. Run
+`ledger resume --brief` to read the same text. The question-picker flow, where
+the ledger records a person's answer to a question, needs an interactive
+Claude Code session: `claude -p` shows no picker. The README's
 [Claude Code plugin](../README.md#claude-code-plugin) section says what each
-hook does.
+hook does, and [Asking a question](../README.md#the-model) shows the payload
+for a question.
+
+## 10. Optional: the skills plugin
+
+Skills for Claude Code that keep their state in the ledger live in the skills
+repository, https://github.com/smithadifd/skills. Install its plugin and run
+its setup step, which pins its `ledger_cli` setting to the command from step 3.
+Follow the steps there; this page does not repeat them.
+
+## 11. Optional: a scheduled export
+
+Once the ledger works, [A scheduled export without the toolkit](scheduled-export.md)
+sets up a private git repository and jobs that export, push and check it on a
+schedule, and shows how to prove the pushed copy restores.
 
 ## Next
 
 - The [README](../README.md) has a longer quick start, the model, and the verb table.
 - [docs/cli.md](cli.md) is the reference for every verb, flag and exit code.
-- Optional: skills for Claude Code that keep their state in the ledger live in
-  the skills repository, https://github.com/smithadifd/skills.
-  Follow the steps there; this page does not repeat them.
+- To remove it all again, see [Uninstall](../README.md#uninstall).
