@@ -5,7 +5,7 @@ frames writes nothing and prints ``skipped<TAB>frame``. ``capture_prompts:
 false`` in the ``config.json`` beside the database skips every prompt
 (``skipped<TAB>prompts_off``); an unreadable or invalid config refuses
 ``capture_config``. Neither skip opens the database, and picker capture never
-reads the config. Each case runs the CLI as a hook does: a subprocess with the
+reads ``capture_prompts``. Each case runs the CLI as a hook does: a subprocess with the
 hook input on stdin. The few cases that stand between the config's ``lstat``
 and its open run the CLI in this process instead, so they can patch the open.
 """
@@ -265,7 +265,8 @@ def test_an_unreadable_config_refuses(db: Path) -> None:
 @pytest.mark.parametrize("kind", ["dangling", "loop"])
 def test_a_config_link_that_does_not_resolve_refuses(db: Path, kind: str) -> None:
     # The shared config reader takes such a link for no file at all; for prompt
-    # capture that would store prompts a person may have turned off.
+    # capture that would store prompts a person may have turned off, and for
+    # picker capture answers from a folder the person opted out.
     db.parent.mkdir(parents=True)
     path = db.parent / "config.json"
     path.symlink_to(path if kind == "loop" else db.parent / "moved-away.json")
@@ -275,10 +276,18 @@ def test_a_config_link_that_does_not_resolve_refuses(db: Path, kind: str) -> Non
     assert str(path) in env["error"]["message"] and secret not in env["error"]["message"]
     assert "a symbolic link that does not resolve" in env["error"]["message"]
     assert not db.exists()
-    asked = ask_and_answer(db)
-    code, env = run_json(db, "pick", ITEM, "--ask", str(asked))
-    assert code == 0, env
-    assert prompt_events(db) == []
+    hook = {
+        "session_id": "sess-filter",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "AskUserQuestion",
+        "tool_use_id": "toolu_filter",
+        "tool_input": {"questions": [{"question": QUESTION, "options": OPTIONS}]},
+        "tool_response": {"answers": {QUESTION: "ship"}},
+    }
+    code, env = run_json(db, "capture", "--kind", "picker", stdin=json.dumps(hook))
+    assert code == 3 and env["error"]["code"] == "capture_config", env
+    assert "a symbolic link that does not resolve" in env["error"]["message"]
+    assert not db.exists()
 
 
 def capture_in_process(monkeypatch, db: Path, prompt: str) -> tuple[int, dict]:
@@ -379,12 +388,35 @@ def test_a_config_whose_lstat_fails_refuses(monkeypatch, db: Path) -> None:
     assert not db.exists()
 
 
-@pytest.mark.parametrize("name", sorted(INVALID_CONFIGS))
-def test_an_invalid_config_never_stops_a_picker_capture(db: Path, name: str) -> None:
+# A config that parses as an object but holds a bad capture_prompts: picker
+# capture never reads that key. One that cannot be read refuses a picker
+# answer too, since its capture_optout_paths cannot be decided.
+UNREADABLE_CONFIGS = ("array", "bad-json", "not-utf8")
+
+
+@pytest.mark.parametrize("name", sorted(set(INVALID_CONFIGS) - set(UNREADABLE_CONFIGS)))
+def test_an_invalid_capture_prompts_never_stops_a_picker_capture(db: Path, name: str) -> None:
     write_config(db, INVALID_CONFIGS[name])
     asked = ask_and_answer(db)
     code, env = run_json(db, "pick", ITEM, "--ask", str(asked))
     assert code == 0, env
+
+
+@pytest.mark.parametrize("name", UNREADABLE_CONFIGS)
+def test_an_unreadable_config_refuses_a_picker_capture(db: Path, name: str) -> None:
+    path = write_config(db, INVALID_CONFIGS[name])
+    hook = {
+        "session_id": "sess-filter",
+        "hook_event_name": "PostToolUse",
+        "tool_name": "AskUserQuestion",
+        "tool_use_id": "toolu_filter",
+        "tool_input": {"questions": [{"question": QUESTION, "options": OPTIONS}]},
+        "tool_response": {"answers": {QUESTION: "ship"}},
+    }
+    code, env = run_json(db, "capture", "--kind", "picker", stdin=json.dumps(hook))
+    assert code == 3 and env["error"]["code"] == "capture_config", env
+    assert str(path) in env["error"]["message"]
+    assert not db.exists()
 
 
 def test_a_frame_is_skipped_before_the_config_is_read(db: Path) -> None:

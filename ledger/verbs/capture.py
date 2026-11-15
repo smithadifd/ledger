@@ -71,7 +71,19 @@ line ``skipped``, a tab and the reason (JSON ``data``:
 A valid input is checked first, so every refusal above still applies to a
 frame. The config is read once, after the frame check and before the other
 four, so an unreadable config refuses any prompt that is not a frame.
-``--kind picker`` never reads the config.
+
+``--kind picker`` honours the same cwd opt-out and reads nothing else from
+the config. After the input is checked, so every picker refusal still
+stands, the ``config.json`` beside the database is read once by the same
+rule, and the same two skips apply before the database is opened, so
+neither creates it: ``cwd_optout`` and ``cwd_unverified``, decided exactly
+as above. A config that cannot be read or parsed, or that is not a JSON
+object, or an invalid ``capture_optout_paths``, refuses ``capture_config``
+(exit 3) and writes nothing, because the opt-out cannot be decided; with a
+path configured, a ``cwd`` that is not an absolute path refuses
+``capture_bad_input``. ``capture_prompts`` and ``capture_skip_prefixes``
+never apply to a picker answer, so a value of either, valid or not, never
+stops picker capture.
 
 ``--kind picker`` takes the PostToolUse hook input for AskUserQuestion
 (``hook_event_name`` ``PostToolUse``, ``tool_name`` ``AskUserQuestion``,
@@ -146,11 +158,12 @@ HARNESS_FRAMES = (
 # ASCII whitespace only: a frame after a no-break space is still captured, so
 # the filter fails toward capture.
 _ASCII_WHITESPACE = " \t\n\r\v\f"
-# The config.json key that turns prompt capture off; picker capture never reads it.
+# The config.json key that turns prompt capture off; picker capture ignores it.
 PROMPTS_CONFIG_KEY = "capture_prompts"
 # The config.json key whose array of injected-prompt prefixes replaces the default.
 PREFIXES_CONFIG_KEY = "capture_skip_prefixes"
-# The config.json key naming the folders whose sessions' prompts are not captured.
+# The config.json key naming the folders whose sessions' prompts and picker
+# answers are not captured.
 OPTOUT_CONFIG_KEY = "capture_optout_paths"
 # The injected-prompt prefixes in force when capture_skip_prefixes is absent or
 # invalid. Empty by default: a deployment lists its own in that key.
@@ -421,6 +434,20 @@ def optout_reason(cwd: str, paths: tuple[str, ...]) -> str | None:
     return "cwd_unverified" if unverified else None
 
 
+def cwd_skip(
+    hook: Mapping[str, Any], path: os.PathLike[str], config: Mapping[str, Any] | None
+) -> str | None:
+    """The skip reason the cwd opt-out gives ``hook`` under ``config``, or ``None``.
+
+    Both capture kinds use it, so prompts and picker answers opt out by one rule.
+    """
+    paths = optout_paths(path, config)
+    if not paths:
+        return None
+    cwd = _hook_cwd(hook)
+    return None if cwd is None else optout_reason(cwd, paths)
+
+
 def _questions(tool_input: Any) -> list[dict[str, Any]]:
     if type(tool_input) is not dict:
         raise _bad_input("tool_input must be an object")
@@ -576,14 +603,19 @@ def run(args, ctx: Context) -> Result:
         path, config = _capture_config(ctx.db)
         if is_injected(hook["prompt"], skip_prefixes(config)):
             return _skipped("injected")
-        paths = optout_paths(path, config)
-        if paths:
-            cwd = _hook_cwd(hook)
-            reason = None if cwd is None else optout_reason(cwd, paths)
-            if reason is not None:
-                return _skipped(reason)
+        reason = cwd_skip(hook, path, config)
+        if reason is not None:
+            return _skipped(reason)
         if not _prompts_value(path, config):
             return _skipped("prompts_off")
+    elif args.kind == "picker":
+        # Validate first, so every refusal stands; then the cwd opt-out, the
+        # only config key a picker answer reads, before open_db, which would
+        # create the database.
+        picker_capture(hook)
+        reason = cwd_skip(hook, *_capture_config(ctx.db))
+        if reason is not None:
+            return _skipped(reason)
     lg = open_db(ctx, write=True)
     try:
         event = write_capture(lg, args.kind, hook, **actor_kwargs(ctx))
