@@ -1,11 +1,13 @@
 # Upgrading across many releases
 
 This page is for a machine whose ledger is 0.1.8 or older, moving to the
-current release, 0.1.22. Four changes in between can stop a machine that works
-today. Do the four checks in section 1, install the tag in section 2, run the
-three upgrade commands in section 3, and run the check after each. For a later
-tag, change the tag in the commands and read the [CHANGELOG](../CHANGELOG.md)
-entries after 0.1.22.
+current release, 0.3.0. Four changes in between can stop a machine that works
+today, and 0.2.0, 0.2.1 and 0.3.0 add a few more things to check. Do the checks
+in section 1, install the tag in section 2, run the three upgrade commands in
+section 3, and run the check after each. A machine already on 0.1.22, 0.2.0 or
+0.2.1 has already passed the changes in 1.1 to 1.4 and needs only 1.5. For a
+later tag, change the tag in the commands and read the
+[CHANGELOG](../CHANGELOG.md) entries after 0.3.0.
 
 To see which release you have, run `pipx list`. `ledger --version` only exists
 from 0.1.16; on an older release it fails with `the following arguments are
@@ -157,9 +159,85 @@ doctor` says `argument verb: invalid choice: 'PATH' (choose from ...)`.
 
 Fix: spell the option in full.
 
+### 1.5 What 0.2.0, 0.2.1 and 0.3.0 add
+
+None of the three changes the database schema or needs a migration. Each item
+below applies only to a machine that does the thing it names; check the ones
+that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
+
+- **A scheduled export (0.2.1).** Before 0.2.1 the credential scan covered
+  attached documents, not the text of other events. Since 0.2.1 `ledger export`,
+  `export --commit` and `export --push` scan every event's text. An event
+  already in the ledger, or already committed in the export repository, whose
+  text holds a credential shape is now refused by name (`export_doc_credential`,
+  exit 3), where 0.2.0 exported and pushed it. If you run a scheduled export,
+  run `ledger export --commit` and then `ledger export --push` once by hand
+  after upgrading, before the next scheduled run, with the same `--dir` or
+  `LEDGER_EXPORT_DIR` your job uses. An export repository whose history already
+  holds such an event file refuses `--push` until that file is removed from its
+  history with git; rotate the credential if it was pushed before
+  ([scheduled-export.md](scheduled-export.md)).
+- **Picker capture reads `config.json` (0.3.0).** This applies if a hook runs
+  `ledger capture --kind picker`, as the `ledger-hooks` plugin does. Picker
+  capture now refuses with `capture_config` (exit 3) and writes nothing when the
+  `config.json` beside the database cannot be read or is not a JSON object, or
+  when its `capture_optout_paths` is not an array of absolute path strings.
+  Before, it ignored that file. Check that the file, if you have one, is a JSON
+  object:
+
+  ```sh
+  python3 -c 'import json,sys;assert isinstance(json.load(open(sys.argv[1])),dict)' "$(dirname "${LEDGER_DB:?}")/config.json"
+  ```
+
+  The command exits 0 when the file is a JSON object. If it fails with
+  `FileNotFoundError`, there is no file and nothing to fix; any other failure
+  means the file is unreadable or not an object. It does not check
+  `capture_optout_paths`, so read that key yourself if the file has it.
+- **Output of `ledger resume --brief` (0.2.0 and 0.3.0).** The text gains a
+  "Finding things" line in 0.2.0, and since 0.3.0 its first line is the ledger
+  version, exactly what `ledger --version` prints. With `--json`, `--brief` adds
+  `version` (the bare number, such as `0.3.0`). Anything that matches the output
+  from its first character needs updating.
+- **Hand-written `also at` notes (0.2.0).** For an item whose source is
+  `row:<ID>`, `ledger export-item --ticket` takes the locator only from a note
+  whose idempotency key starts with `row-item:also-at:`, the notes the roadmap
+  importer and `row-item.sh ensure` write. A note written by hand, for example
+  with `ledger note`, no longer counts. With no keyed note the command refuses
+  `row_source_no_also_at`, or prints the item's spec when it has one. Fix:
+  re-create the note through the importer or `row-item.sh ensure`, or give the
+  item a spec.
+- **Writes, `backup` and `restore` check what the path names (0.3.0).** A write
+  is reported only after the database path is checked to still name the files
+  it was written to. If another file was put at the database's name, or at its
+  `-wal` or `-shm` name, the write is refused with `db_swapped` or
+  `db_sibling_unsafe` (exit 3). The write did land; the CHANGELOG entry says
+  where. `backup` now refuses a destination that is the live database or one
+  of its side files, told by file identity and not by spelling, so a hard link
+  or a differently spelled name for the live file is refused; `restore` checks
+  its destination by file identity too. Both refuse a destination whose name
+  ends in `-wal`, `-shm` or `-journal`. Check the destinations your scripts
+  give `backup --to` and `restore`. A backup destination may hold a `FILE.partial` left by an older
+  version, or a `.FILE.<random>.partial` left by a killed backup; either is safe
+  to delete when no backup is running.
+- **Library callers (0.3.0).** `ledger.dbfile.checked_connect` returns
+  `(conn, mode, proof)` and `ledger.store.connect` returns `(conn, proof)`;
+  `Ledger(conn, path, proof)` takes the proof. A caller that unpacked two values
+  from `checked_connect`, or used the return of `connect` as a connection, must
+  unpack the new shape. `open_ledger` and `open_ledger_readonly` are unchanged.
+- **The `ledger-hooks` plugin (new in 0.2.0, optional).** Installing it is
+  optional and changes nothing until you do. It runs the first `ledger` on the
+  `PATH` Claude Code gives it, and it follows the repository's commits, not a
+  tag, so upgrade the `ledger` CLI first. If you installed it with 0.2.0 or
+  0.2.1, update it after the CLI (the same two steps as section 3.2, with the
+  marketplace `ledger-plugins` and the plugin `ledger-hooks@ledger-plugins`):
+  0.3.0 adds its PostModelSwitch hook, which needs Claude Code v2.1.251 or
+  later. If the skills plugin's session-start hook is also installed with an
+  explicit `ledger_cli`, a session prints the brief twice, and a separate
+  prompt-capture hook records each prompt twice.
+
 ## 2. Which tag to install
 
-Install `@v0.1.22`. Never pin 0.1.14. It shipped with a descriptor check that
+Install `@v0.3.0`. Never pin 0.1.14. It shipped with a descriptor check that
 compared the whole process's open descriptors before and after each connect, so
 another thread's open in that window, or SQLite reusing a descriptor it already
 held, refused a valid connect (`db_fd_unknown`, and sometimes `db_not_regular`,
@@ -190,16 +268,16 @@ would decide which one runs. Choose one:
   folder that holds that `bin/ledger`:
 
   ```sh
-  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.1.22"
+  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.3.0"
   ```
 
 - Or remove that venv, then run the pipx line below.
 
 Either way, `command -v ledger` then shows one path and `ledger --version`
-prints `ledger 0.1.22`.
+prints `ledger 0.3.0`.
 
 ```sh
-pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.1.22
+pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.3.0
 ```
 
 This is the [README's upgrade command](../README.md#upgrade) with the Python you
@@ -211,7 +289,7 @@ ledger --version
 ledger doctor
 ```
 
-`ledger --version` prints `ledger 0.1.22`. `ledger doctor` opens the database
+`ledger --version` prints `ledger 0.3.0`. `ledger doctor` opens the database
 that `--db` or `LEDGER_DB` names, so it also proves 1.1 and 1.2 on the real
 file: it exits 0 and prints the path, the schema version and the search-index
 state. A refusal from section 1 shows up here. If your shell says `ledger:
@@ -234,7 +312,7 @@ plugin's session-start hook uses.
 
 Prove it: `claude plugin list` shows `sdlc@skills` and its version, which is
 the newest in that repository's `CHANGELOG.md`. With `ledger_cli` set, a new
-session's first lines show `ledger 0.1.22` and the ledger's brief, or one
+session's first lines show `ledger 0.3.0` and the ledger's brief, or one
 `ledger session-start: ...` line naming what failed.
 
 ### 3.3 The ledger mod
@@ -248,4 +326,4 @@ claude plugin update ledger
 Then restart the session. Prove it: `claude plugin list` shows `ledger@mods` and
 its version, which is the newest in that repository's `CHANGELOG.md`, and
 `/ledger` opens its pane in a new session. The pane reads the ledger with
-`--json`; it needs ledger 0.1.5 or newer, so it needs nothing more of 0.1.22.
+`--json`; it needs ledger 0.1.5 or newer, so it needs nothing more of 0.3.0.
