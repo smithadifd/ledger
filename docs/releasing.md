@@ -13,12 +13,26 @@ releases.
 
 ## 1. Open a `chore(release)` pull request
 
-The last two tags used a squash-merged pull request whose tree changed
-exactly these three files:
+The release is one squash-merged pull request whose tree changes exactly these
+four files:
 
 - `pyproject.toml` — set `[project] version` to `"X.Y.Z"` (see Choosing the version)
 - `ledger/__init__.py` — set `__version__` to `"X.Y.Z"`
 - `CHANGELOG.md` — add the dated section at the top of the file
+- `docs/upgrading.md` — name `X.Y.Z` as the current release; when the new
+  changelog section has an "Upgrading" paragraph, carry what an upgrader needs
+  from it into section 1.5
+
+The pull requests for v0.1.21 and v0.1.22 changed only the first three files.
+`docs/upgrading.md` joined the list because it kept calling 0.1.22 the current
+release through 0.2.0, 0.2.1 and 0.3.0.
+
+In `docs/upgrading.md`, change every pinned tag (`@vX.Y.Z`), every printed
+`ledger X.Y.Z` and every sentence that names the current release. Then list
+every version number on the page and read each hit; each one is `X.Y.Z` or a
+release named on purpose as history (for example, the 0.1.14 warning):
+
+    grep -nE '[0-9]+\.[0-9]+\.[0-9]+' docs/upgrading.md
 
 Shape of the changelog section (see the 0.1.22 and 0.1.21 entries):
 
