@@ -221,7 +221,10 @@ export LEDGER_HARNESS=cli
 
 In Claude Code, add the database and the operator to the `env` block of its
 settings (`~/.claude/settings.json` for your user), adding keys and keeping
-any that are already there. Write the database path in full;
+any that are already there. If that file does not exist yet, create it (and
+the `~/.claude` folder, if that is missing too) holding exactly the block
+below, with your real absolute path and name filled in: the block as printed
+is already a whole valid settings file. Write the database path in full;
 `echo ~/.local/share/ledger/work.db` prints it:
 
 ```json
