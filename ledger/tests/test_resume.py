@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from ledger import __version__
 from ledger.card import WORD_LIMIT, word_count
 from ledger.schema import PHASES
 from ledger.store import Ledger, current_anchors, open_ledger
@@ -27,6 +28,8 @@ from ledger.verbs.resume import SHORT_FORM, _entry_text
 from test_cli import invoke, seed
 
 PKG_PARENT = Path(__file__).resolve().parent.parent.parent  # makes ``python -m ledger`` importable
+VERSION_LINE = f"ledger {__version__}"
+BRIEF_HEAD = VERSION_LINE + "\n" + SHORT_FORM  # what ``resume --brief`` prints before the list
 
 
 def _db(tmp_path: Path) -> str:
@@ -528,8 +531,64 @@ def test_brief_short_form_is_short_and_prints_before_the_list(
     _stop(monkeypatch, db, "it-a", "stop a")
     code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
     assert code == 0, err
-    assert out.startswith(SHORT_FORM)
-    assert "stop a" in out[len(SHORT_FORM):]
+    assert out.startswith(BRIEF_HEAD)
+    assert "stop a" in out[len(BRIEF_HEAD):]
+
+
+def test_brief_first_line_is_what_ledger_version_prints(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop a")
+    code, version_out, err = invoke(monkeypatch, ["--version"])
+    assert code == 0, err
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
+    assert code == 0, err
+    assert out.splitlines()[0] == version_out.rstrip("\n")
+    # The version line is followed by the unchanged short form and the body.
+    assert out.startswith(version_out + SHORT_FORM + "\n")
+    assert "stop a" in out[len(version_out + SHORT_FORM):]
+
+
+def test_brief_prints_the_version_line_before_any_database_exists(
+    tmp_path, monkeypatch
+) -> None:
+    db = _db(tmp_path)
+    code, version_out, err = invoke(monkeypatch, ["--version"])
+    assert code == 0, err
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
+    assert code == 0, err
+    assert out.splitlines()[0] == version_out.rstrip("\n")
+    assert out == version_out + SHORT_FORM + "\n" + "no open items\n"
+    assert not Path(db).exists()
+
+
+def test_resume_without_brief_prints_no_version_line_and_no_version_key(
+    tmp_path, monkeypatch
+) -> None:
+    db = _db(tmp_path)
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert out == "no open items\n"
+    seed(monkeypatch, db, "it-a")
+    _stop(monkeypatch, db, "it-a", "stop a")
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    assert VERSION_LINE not in out.splitlines()
+    assert not out.startswith("ledger ")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
+    assert code == 0, err
+    assert set(json.loads(out)["data"]) == {"items", "open_without_stop"}
+
+
+def test_brief_json_carries_the_version_beside_the_contract(tmp_path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", db, "resume", "--brief"])
+    assert code == 0, err
+    data = json.loads(out)["data"]
+    assert data["version"] == __version__
+    assert data["contract"] == SHORT_FORM
+    assert set(data) == {"items", "open_without_stop", "version", "contract"}
 
 
 def _short_form_command(prefix: str) -> list[str]:
@@ -673,7 +732,7 @@ def test_user_text_never_forges_a_generated_command_line(
     db = _hostile_db(tmp_path, monkeypatch, field, text)
     code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
     assert code == 0, err
-    body = out[len(SHORT_FORM):]
+    body = out[len(BRIEF_HEAD):]
     # Only \n separates lines: no other break survives into the output.
     assert "\r" not in body and "\u2028" not in body and "\u2029" not in body
     assert "\x85" not in body and "\x1b" not in body
@@ -732,7 +791,7 @@ def test_fresh_install_prints_the_short_form_and_no_open_items(tmp_path, monkeyp
     db = _db(tmp_path)
     code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--brief"])
     assert code == 0, err
-    assert out.startswith(SHORT_FORM)
+    assert out.startswith(BRIEF_HEAD)
     assert out.rstrip().endswith("no open items")
     code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
     assert code == 0, err

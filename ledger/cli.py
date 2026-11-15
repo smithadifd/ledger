@@ -17,8 +17,6 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping
 
-from ledger import __version__
-
 from ledger.dbfile import UnsafeDatabaseFile
 from ledger.paths import SharedDatabaseError
 from ledger.schema import ValidationError
@@ -38,6 +36,7 @@ from ledger.verbs import (
     EXIT_REFUSED,
     EXIT_STALE,
     EXIT_USAGE,
+    VERSION_LINE,
     CliError,
     Context,
     Result,
@@ -93,7 +92,7 @@ def build_parser(table: dict[str, Verb]) -> LedgerParser:
     parser.add_argument(
         "--version",
         action="version",
-        version=f"ledger {__version__}",
+        version=VERSION_LINE,
     )
     parser.add_argument(
         "--json",
