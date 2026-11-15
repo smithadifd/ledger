@@ -226,8 +226,11 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   unpack the new shape. `open_ledger` and `open_ledger_readonly` are unchanged.
 - **The `ledger-hooks` plugin (new in 0.2.0, optional).** Installing it is
   optional and changes nothing until you do. It runs the first `ledger` on the
-  `PATH` Claude Code gives it, and it follows the repository's commits, not a
-  tag, so upgrade the `ledger` CLI first. If you installed it with 0.2.0 or
+  `PATH` Claude Code gives it, so upgrade the `ledger` CLI first. Its manifest
+  names a `version`, the release number, and Claude Code takes a plugin's
+  version from that field: an update replaces your installed copy only when a
+  release changes it. (Before the manifest named a version, the plugin
+  followed the repository's commits.) If you installed it with 0.2.0 or
   0.2.1, update it after the CLI (the same two steps as section 3.2, with the
   marketplace `ledger-plugins` and the plugin `ledger-hooks@ledger-plugins`):
   0.3.0 adds its PostModelSwitch hook, which needs Claude Code v2.1.251 or
