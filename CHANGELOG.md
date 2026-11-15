@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **The install steps say to create the settings file when it does not exist.** The README and `docs/start-here.md` now say that when `~/.claude/settings.json` is missing (and the `~/.claude` folder with it), you create it holding the `env` block shown, which is already a whole valid settings file; an existing file still gets the keys added and its other keys kept.
+
 ## 0.3.1 — 2026-11-15
 
 Documentation and the plugin manifest only: one setup order from a bare Mac to a first write, a command that prints the newest release tag, an uninstall section, and a version on the `ledger-hooks` manifest; nothing under `ledger/` changes.
