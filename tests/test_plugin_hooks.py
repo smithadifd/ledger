@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from ledger import __version__
 from ledger.store import open_ledger
 from ledger.verbs.capture import HARNESS_FRAMES
 
@@ -39,6 +40,8 @@ PLUGIN_JSON = PLUGIN / ".claude-plugin" / "plugin.json"
 MARKETPLACE = ROOT / ".claude-plugin" / "marketplace.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "ledger-hooks"
 BASE_PATH = "/usr/bin:/bin"
+# `resume --brief` prints the version line, then the short form of the contract.
+BRIEF_START = f"ledger {__version__}\nLEDGER AGENT CONTRACT"
 FRAMES = (
     "<task-notification>",
     "<cross-session-message",
@@ -223,7 +226,7 @@ def assert_quiet(ran: Ran) -> None:
 def test_t1_session_start_prints_the_brief(rig: Rig) -> None:
     new_item(rig)
     expected = ledger(rig, "resume", "--brief")
-    assert expected.returncode == 0 and expected.stdout.startswith("LEDGER AGENT CONTRACT")
+    assert expected.returncode == 0 and expected.stdout.startswith(BRIEF_START)
     ran = session_hook(rig)
     assert (ran.returncode, ran.stderr) == (0, "")
     assert ran.stdout == expected.stdout
@@ -241,7 +244,7 @@ def test_t2_session_start_appends_what_hook_env_prints(rig: Rig) -> None:
     assert expected.returncode == 0 and expected.stdout, expected.stderr
     ran = session_hook(rig, hook, env={"CLAUDE_ENV_FILE": str(env_file)})
     assert (ran.returncode, ran.stderr) == (0, "")
-    assert ran.stdout.startswith("LEDGER AGENT CONTRACT")
+    assert ran.stdout.startswith(BRIEF_START)
     assert env_file.read_text() == "export ALREADY_THERE=1\n" + expected.stdout
     sourced = subprocess.run(
         ["/bin/sh", "-c",
@@ -259,7 +262,7 @@ def test_t2_without_claude_env_file_no_file_is_written_and_the_brief_prints(rig:
     before = sorted(p.name for p in rig.tmp.iterdir())
     ran = session_hook(rig)
     assert (ran.returncode, ran.stderr) == (0, "")
-    assert ran.stdout.startswith("LEDGER AGENT CONTRACT")
+    assert ran.stdout.startswith(BRIEF_START)
     assert sorted(p.name for p in rig.tmp.iterdir()) == before
 
 
@@ -515,7 +518,7 @@ def test_t26_the_real_cli_refusal_leaves_the_env_file_byte_identical(rig: Rig) -
     assert ran.stderr == "ledger-hooks: session env failed (exit 3)\n"
     # --hook-model refuses the same input; its line comes first, then the brief.
     assert ran.stdout.startswith(
-        "ledger-hooks: model record failed (exit 3)\nLEDGER AGENT CONTRACT")
+        "ledger-hooks: model record failed (exit 3)\n" + BRIEF_START)
     assert env_file.read_bytes() == b"export KEEP=1\n"
 
 

@@ -3,9 +3,11 @@
 ``ledger resume`` lists, for each open item that has an ``item.stopped``
 event, the newest stop (its point, the skills the next session invokes, the
 files it reads) and the literal commands that continue: ``resume --item`` and
-``card``. ``--item ID`` shows that one item. ``--brief`` prepends the short
+``card``. ``--item ID`` shows that one item. ``--brief`` prepends the ledger
+version line (exactly what ``ledger --version`` prints) and then the short
 form of the agent contract (the full page is in the ledger repository's
-docs folder) so a session-start hook can print both into context.
+docs folder), so a session-start hook can print the version and the contract
+into context. The JSON data then also carries ``version`` and ``contract``.
 
 The JSON data always carries ``open_without_stop``: how many open items have
 no stop recorded (0 when there are none, and 0 with ``--item``). Those items
@@ -63,12 +65,13 @@ import sys
 import unicodedata
 from typing import Any, Mapping
 
-from ledger import session_model
+from ledger import __version__, session_model
 from ledger.paths import resolve_db_path
 from ledger.store import open_ledger_readonly
 from ledger.verbs import (
     EXIT_NOT_FOUND,
     EXIT_REFUSED,
+    VERSION_LINE,
     CliError,
     Context,
     Result,
@@ -127,7 +130,7 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--brief",
         action="store_true",
-        help="print the agent contract's short form first",
+        help="print the ledger version and the agent contract's short form first",
     )
     parser.add_argument(
         "--hook-env",
@@ -442,8 +445,9 @@ def run(args, ctx: Context) -> Result:
     data: dict[str, Any] = {"items": entries, "open_without_stop": open_without_stop}
     text = body
     if args.brief:
+        data["version"] = __version__
         data["contract"] = SHORT_FORM
-        text = SHORT_FORM + "\n" + body
+        text = VERSION_LINE + "\n" + SHORT_FORM + "\n" + body
     return Result(data=data, text=text)
 
 
