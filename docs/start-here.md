@@ -62,6 +62,10 @@ newest release tag:
 git ls-remote --tags --refs --sort=-v:refname https://github.com/smithadifd/ledger 'v*' | sed -n '1s|.*refs/tags/||p'
 ```
 
+If it prints nothing (no network, or no `v*` tag exists), use the tag named on
+the [latest release page](https://github.com/smithadifd/ledger/releases/latest)
+instead.
+
 Put what it prints where `vX.Y.Z` is (https://github.com/smithadifd/ledger/tags
 lists every tag):
 
