@@ -112,22 +112,67 @@ restore needs that directory copied beside the restored database.
 
 ## Install
 
+Setup is four steps, in this order. Each reads only what an earlier step made:
+the environment names the database, the hooks need the `ledger` command and
+`LEDGER_DB`, and the skills' pin needs the command.
+
+1. [Install the `ledger` command](#1-install-the-ledger-command) at a release
+   tag.
+2. [Set the environment](#2-set-the-environment): `LEDGER_DB`,
+   `LEDGER_OPERATOR` and, for writes you type yourself, `LEDGER_HARNESS`, in
+   your shell and in the `env` block of Claude Code's settings.
+3. Install the `ledger-hooks` plugin
+   ([Claude Code plugin](#claude-code-plugin)).
+4. Install the skills plugin and run its setup step, which pins its
+   `ledger_cli` setting to the command from step 1. That step belongs to the
+   [skills repository](https://github.com/smithadifd/skills), which has the
+   commands ([Working with agent skills](#working-with-agent-skills)).
+
+The first write, which creates the database, comes after step 2 and before the
+self-check: `ledger doctor` fails with `database does not exist` until a write
+has made the file ([Quick start](#quick-start)). For the same walk with each
+step checked before the next, follow [docs/start-here.md](docs/start-here.md).
+
+### 1. Install the ledger command
+
 You need Python 3.11 or newer. Its `sqlite3` module must carry the JSON
-functions and FTS5, which the usual distributions do. For a walk from nothing
-to a working ledger, in order, follow [docs/start-here.md](docs/start-here.md).
+functions and FTS5, which the usual distributions do.
 
 Install with [pipx](https://pipx.pypa.io/), which puts `ledger` on your `PATH`
 in an environment of its own. There is no wrapper script to write and no
-symlink to make:
+symlink to make. If `pipx --version` prints "command not found", get pipx
+first. On a Mac with [Homebrew](https://brew.sh/), two commands do it:
+
+```sh
+brew install pipx
+pipx ensurepath
+```
+
+`brew install pipx` puts the `pipx` command in Homebrew's folders, with the
+current Python it depends on. `pipx ensurepath` adds one line to your shell's
+profile file, so that `~/.local/bin`, where pipx links the commands it
+installs, is on your `PATH`; open a new terminal for the line to take effect.
+From then on pipx keeps each program it installs in a folder of its own
+(`pipx environment` lists them). Without Homebrew, follow
+[pipx's install page](https://pipx.pypa.io/stable/how-to/install-pipx.html).
+
+Pick the release tag to install. This needs `git`, as the install does (on a
+Mac without it, macOS offers to install Apple's command line tools the first
+time you run `git`). It prints the newest tag:
+
+```sh
+git ls-remote --tags --refs --sort=-v:refname https://github.com/smithadifd/ledger 'v*' | sed -n '1s|.*refs/tags/||p'
+```
+
+Put what it prints where `vX.Y.Z` is:
 
 ```sh
 pipx install git+https://github.com/smithadifd/ledger@vX.Y.Z
 ledger --version
 ```
 
-`vX.Y.Z` stands for a release tag; the repository's
-[tags page](https://github.com/smithadifd/ledger/tags) lists them. Without
-`@vX.Y.Z`, pipx installs the default branch.
+The repository's [tags page](https://github.com/smithadifd/ledger/tags) lists
+every tag. Without `@vX.Y.Z`, pipx installs the default branch.
 
 To work on the ledger itself, install from a clone into a virtual
 environment:
@@ -145,8 +190,52 @@ Homebrew Python refuse it (PEP 668, `externally-managed-environment`). From a
 clone with nothing installed, `python3 -m ledger <verb>` is the same as
 `ledger <verb>`.
 
-To connect Claude Code to the ledger, install the plugin as well:
-[Claude Code plugin](#claude-code-plugin).
+### 2. Set the environment
+
+The ledger has no default database path and takes its settings from the
+environment. Set the same values in two places: your shell, for the commands
+you type, and the `env` block of Claude Code's settings, for the sessions it
+starts.
+
+| Variable | Set it to | Where |
+|----------|-----------|-------|
+| `LEDGER_DB` | an absolute path, `~/.local/share/ledger/<system>.db`, with a short name of your own for `<system>` (a relative path resolves against whatever folder a session starts in) | shell and Claude Code settings |
+| `LEDGER_OPERATOR` | your name: the person the writes are made for | shell and Claude Code settings |
+| `LEDGER_HARNESS` | `cli`: what is writing, which every write you type needs | shell; optional in Claude Code settings, where the plugin's session-start hook sets `claude-code` when it is unset |
+
+In your shell, put these lines in your profile (for zsh, `~/.zshrc`) so every
+new terminal has them; the shell expands `~` to an absolute path. The first
+write creates the folders above the database, so there is nothing to make
+first:
+
+```sh
+export LEDGER_DB=~/.local/share/ledger/work.db
+export LEDGER_OPERATOR=me
+export LEDGER_HARNESS=cli
+```
+
+In Claude Code, add the database and the operator to the `env` block of its
+settings (`~/.claude/settings.json` for your user), adding keys and keeping
+any that are already there. Write the database path in full;
+`echo ~/.local/share/ledger/work.db` prints it:
+
+```json
+{
+  "env": {
+    "LEDGER_DB": "/absolute/path/to/work.db",
+    "LEDGER_OPERATOR": "me"
+  }
+}
+```
+
+A Claude Code session started from a shell that exports `LEDGER_HARNESS=cli`
+inherits it, and its writes then say `cli` rather than `claude-code`: run
+`unset LEDGER_HARNESS` before you start it, or leave the line out of your
+profile and put `LEDGER_HARNESS=cli` in front of the commands you type.
+
+Steps 3 and 4 are the plugin and the skills:
+[Claude Code plugin](#claude-code-plugin) and
+[Working with agent skills](#working-with-agent-skills).
 
 ## Upgrade
 
@@ -179,13 +268,52 @@ Moving across many releases at once, from 0.1.8 or older? Read
 [docs/upgrading.md](docs/upgrading.md) first: it lists the four changes
 that can stop a machine and the check to run for each.
 
+## Uninstall
+
+Remove the pieces in the reverse of the install order. None of these steps
+touches your database.
+
+1. The plugins, from Claude Code:
+
+   ```sh
+   claude plugin uninstall ledger-hooks@ledger-plugins
+   claude plugin marketplace remove ledger-plugins
+   ```
+
+   The skills plugin comes out the way the
+   [skills repository](https://github.com/smithadifd/skills) says.
+2. The environment: delete the `LEDGER_` lines from your shell profile, and the
+   `LEDGER_` keys from the `env` block of Claude Code's settings. Leave its
+   other keys alone.
+3. The command, and pipx if you want it gone:
+
+   ```sh
+   pipx uninstall ledger
+   brew uninstall pipx
+   ```
+
+   `pipx ensurepath` also added a line to your shell profile that puts
+   `~/.local/bin` on your `PATH`. Delete it if you removed pipx and nothing
+   else you run lives there.
+
+The database folder, `~/.local/share/ledger`, is data and not part of the
+install: the steps above leave it, and it stays until you delete it yourself.
+It holds each `<system>.db` and the files beside it (the search index, the
+`config.json` and the per-session model records). Take a `ledger export` or a
+`ledger backup` first if you may want the events back.
+
 ## Quick start
+
+The values below are throwaway: a database in `/tmp` that you can delete when
+you are done. A real ledger takes its values from
+[step 2 of the install](#2-set-the-environment), and
+[docs/start-here.md](docs/start-here.md) walks through them.
 
 ```sh
 mkdir -p /tmp/ledger-demo
-export LEDGER_DB=/tmp/ledger-demo/ledger.db   # or pass --db on every call
+export LEDGER_DB=/tmp/ledger-demo/ledger.db   # throwaway; real: ~/.local/share/ledger/<system>.db
 export LEDGER_HARNESS=cli                     # required for writes: what is writing
-export LEDGER_AGENT=me                        # optional: who is writing
+export LEDGER_OPERATOR=me                     # who the writes are for
 
 ledger new --type ticket --title "Write the quick start" --id demo-1
 ledger doctor
@@ -228,7 +356,9 @@ This card is a projection; the events are the authority (ledger export-item -- d
 
 `search` builds a derived full-text index (`search.db`, beside the database)
 on first use and ranks matches with BM25. `verify` walks the hash chain and
-re-validates every payload (`ok events=3`).
+re-validates every payload (`ok events=3`). When you are done, close the
+terminal or run `unset LEDGER_DB LEDGER_HARNESS LEDGER_OPERATOR`, so that a
+later command does not write to the demo database.
 
 The ledger has no default database path: every call needs `--db` or
 `LEDGER_DB`. The supported location for a real database is
@@ -314,6 +444,37 @@ ledger elect demo-1 --question "Short or long quick start?" \
 A quote that is not in the utterance (`--quote "shorter version"`) is refused
 with exit 3: `quote is not a verbatim substring of utterance 4`.
 
+**Asking a question.** A question to the person is a `decision.asked`
+event. It has no verb of its own: write it with one `append`. The payload is
+one JSON object:
+
+- `question` (required): the question text.
+- `options` (required): a list of objects, each with a `label` (required) and
+  a `description`. The picker needs two to four options with distinct labels.
+- `scope`: what the answer covers. The picker needs it, and an election takes
+  its scope from the ask.
+- `recommendation`: the answer you recommend.
+
+```sh
+ledger append --item demo-1 --kind decision.asked --payload '{
+  "question": "Which database name?",
+  "options": [
+    {"label": "work", "description": "one file for work"},
+    {"label": "home", "description": "one file for home"}
+  ],
+  "recommendation": "work",
+  "scope": "the name of the first database"
+}'
+# appended  decision.asked  event=6  item=demo-1
+```
+
+`ledger ask-display 6` (the event id `append` printed) prints the picker
+input; send it as an AskUserQuestion call, and once the person has answered,
+`ledger pick demo-1 --ask 6` records the election. That flow needs an
+interactive Claude Code session with a person at the picker: under
+`claude -p` nothing shows the picker and nobody answers, so no answer is
+captured and `pick` refuses (`capture_missing`).
+
 ## Verbs
 
 | Verb | What it does | Writes? |
@@ -342,7 +503,7 @@ with exit 3: `quote is not a verbatim substring of utterance 4`.
 | `card` | render a bounded resume card for an item | no |
 | `resume` | list each open item's newest stop and the command that continues it; `--brief` adds the agent contract's short form | no |
 | `contract` | print the full agent contract from the installed package; never opens the database | no |
-| `decisions` | list decision records with their current standing | no |
+| `decisions` | list decision records (`decision.recorded`) with their current standing; it does not list elections, which are on the item's `card` under Decisions and found by `search` | no |
 | `entities` | render the entity registry as markdown tables or JSON, naming the ledger revision | no |
 | `context` | print a bounded orientation pack for an item or initiative and its linked items | no |
 | `grants` | render trust grants from their election records, or `--check` that one is standing | no |
@@ -402,8 +563,10 @@ Its one plugin, `ledger-hooks`, connects a Claude Code session to the ledger
 with four hooks. (It is not called `ledger` because another plugin already
 has that name.)
 
-- **SessionStart** prints `ledger resume --brief` into the session, and with
-  `ledger resume --hook-env` stamps the session's environment:
+- **SessionStart** puts `ledger resume --brief` into the model's context (the
+  terminal does not show it; run that command yourself to read the same
+  text), and with `ledger resume --hook-env` stamps the session's
+  environment:
   `LEDGER_SESSION` from the session id, and `LEDGER_AGENT` and
   `LEDGER_HARNESS` when they are not already set. It stamps no
   `LEDGER_MODEL`, because the model can change during a session; instead
@@ -419,7 +582,8 @@ has that name.)
 - **PostToolUse** on AskUserQuestion passes it to
   `ledger capture --kind picker`: the capture `ledger pick ITEM --ask K` binds.
 
-Install it from Claude Code:
+This is step 3 of the [install](#install), after the command and the
+environment, because the hooks need both. Install it from Claude Code:
 
 ```sh
 claude plugin marketplace add smithadifd/ledger
@@ -428,9 +592,9 @@ claude plugin install ledger-hooks@ledger-plugins
 
 The ledger is on when a `ledger` command is on the `PATH` Claude Code runs
 hooks with and `LEDGER_DB` names a database in Claude Code's environment (set
-it in your shell before you start Claude Code, or in the `env` block of its
-settings). Otherwise every hook is silent: it prints nothing and writes
-nothing.
+it as in [step 2](#2-set-the-environment), in your shell before you start
+Claude Code and in the `env` block of its settings). Otherwise every hook is
+silent: it prints nothing and writes nothing.
 
 Each hook runs the first `ledger` on that `PATH`, so a different `ledger`
 earlier on the `PATH` runs instead and receives your prompts and picker
@@ -484,6 +648,10 @@ treat `stale_revision` as a lost race rather than an error.
   writes nothing. On resume, the pass reads `export-item` and reconciles from
   the events rather than from a note.
 
+Using them is step 4 of the [install](#install): install the skills plugin and
+run its setup step, which pins `ledger_cli` to the command from step 1. The
+commands are in the skills repository, not here.
+
 Each skill states the verbs, flags, envelope fields and error codes it calls
 as a contract, so any CLI that meets the contract would do; this one does.
 [docs/working-with-skills.md](docs/working-with-skills.md) walks both
@@ -506,7 +674,8 @@ contracts against a fresh database, command by command.
 - **CI runs what you can run.** On every push and pull request: the suite on
   Python 3.11 and 3.12, `gen_verb_registry --check` (the static verb list
   matches the modules), then `new`, `doctor` and `verify` against a fresh
-  database.
+  database. The suite also runs the README's quick start and the setup
+  commands of [docs/start-here.md](docs/start-here.md) in an empty home.
 - **One copy, pinned.** Repositories that use the ledger carry `ledger/`
   byte for byte at one path, pinned to one commit here, and check the copy
   for drift; a change lands here first. [VENDORING.md](VENDORING.md) defines

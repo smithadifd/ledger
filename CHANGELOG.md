@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **The `ledger-hooks` plugin manifest carries a version.** `plugins/ledger-hooks/.claude-plugin/plugin.json` names the release (`0.3.0`), so Claude Code's plugin list shows a version instead of a commit id. A test requires it to equal the package version, and `docs/releasing.md` lists the manifest among the files a release changes.
+
 ## 0.3.0 — 2026-11-15
 
 A write is reported only once the database path still names the file it was written to; `backup` and `restore` tell a destination from the live database by file identity, not by spelling; two simultaneous first claims of the same name both succeed; the plugin's model stamp follows a mid-session model switch, and a keyed retry after a switch is no longer refused; prompt capture and picker capture can skip an opted-out folder; `resume --brief` prints the ledger version first; and library callers get the proof from `checked_connect` and `connect`.

@@ -209,6 +209,21 @@ content with the same source (or with no `--source`) again reports
 it over the same content writes a new version with the same content and the new
 source, and moving it back is another change. `--source-rev` is not compared. `show [--version N]`
 prints a version; `diff ITEM [FROM [TO]]` prints the change field by field.
+`set` needs one of `--body` or `--body-file`, and `--acceptance` takes one
+value, so several acceptance bullets are one value with a newline between
+them. From bash or zsh, `$'...'` writes the newline; from any POSIX shell,
+`printf` does:
+
+```sh
+ledger spec set demo-1 --title "Quick start" --body "What to write" \
+  --acceptance $'- the examples run\n- the output is checked'
+ledger spec set demo-1 --title "Quick start" --body "What to write" \
+  --acceptance "$(printf '%s\n' '- the examples run' '- the output is checked')"
+```
+
+Both write the same two-line acceptance, so the second reports `unchanged`.
+A repeated `--acceptance` does not add a bullet: the last one replaces the
+earlier ones.
 `set ... --expect-revision ID` writes only while the item's newest event is
 still `ID`, with the values and refusals `note` takes. The check runs in the
 same write transaction as the compare, after the not-found check (a missing
@@ -418,6 +433,37 @@ one transaction: all land or none do.
 
 ## Decision verbs
 
+**Asking a question: `append --kind decision.asked --payload JSON`** An ask
+has no verb of its own; write it with `append`. The payload is one JSON object:
+
+- `question` (required): the question text.
+- `options` (required): a list of objects, each with a `label` (required) and
+  a `description`.
+- `scope`: what the answer covers. `ask-display` refuses an ask without one
+  (`ask_not_pickable`), and an election takes its scope from the ask.
+- `recommendation`: the answer you recommend; it is stored with the ask and
+  `questions --json` returns it.
+
+`default` and `question_id` are optional too, and `ledger/schema.py` lists the
+rest. A picker needs two to four options with distinct labels, which
+`ask-display` checks.
+
+```sh
+ledger append --item demo-1 --kind decision.asked --payload '{
+  "question": "Which database name?",
+  "options": [
+    {"label": "work", "description": "one file for work"},
+    {"label": "home", "description": "one file for home"}
+  ],
+  "recommendation": "work",
+  "scope": "the name of the first database"
+}'
+# appended  decision.asked  event=6  item=demo-1
+```
+
+`append` prints the ask's event id (`event=6` here); `ask-display 6` and
+`pick demo-1 --ask 6` take it.
+
 **`elect ITEM --question Q --chosen LABEL --chosen-description D --rejected LABEL... --scope S --quote-ref EVENT --quote SPAN... [--ask EVENT]`**
 Record an election. Every flag but `--ask` is required, and `--rejected`
 and `--quote` are repeatable: give `--rejected` once for each alternative that
@@ -438,6 +484,9 @@ carries `{asked_event_id, item_id, input, display_sha256}`. An ask with no
 `scope`, with fewer than two or more than four options, with a repeated
 label, or whose header would pass 12 characters is refused with
 `ask_not_pickable` (exit 3); an id that is no ask exits 1 (`ask_not_found`).
+The picker flow (`ask-display`, the picker, then `pick`) needs an interactive
+Claude Code session with a person at the picker; under `claude -p` nothing
+shows the picker, so `pick` finds no answer and refuses (`capture_missing`).
 
 **`pick ITEM --ask EVENT [--idempotency-key K]`** Record the owner's picker
 answer to an open ask as an election. The answer is the earliest
@@ -543,7 +592,10 @@ never merges two submissions.
 **`lint-quotes [--item ITEM]`** Re-check every election's quotes.
 
 **`decisions [--item ITEM] [--tag TYPE:ID] [--standing lean|settled|superseded] [--limit N]`**
-List decision records with their current standing.
+List decision records (`decision.recorded` events) with their current
+standing. It does not list elections: an election (`decision.elected`) is on
+its item's card, under Decisions, and `search` and `events --kind
+decision.elected` find it. With nothing to list it exits 1.
 
 ## Reading verbs
 

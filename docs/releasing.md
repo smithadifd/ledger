@@ -13,11 +13,14 @@ releases.
 
 ## 1. Open a `chore(release)` pull request
 
-The last two tags used a squash-merged pull request whose tree changed
-exactly these three files:
+The release is a squash-merged pull request whose tree changes exactly these
+four files:
 
 - `pyproject.toml` — set `[project] version` to `"X.Y.Z"` (see Choosing the version)
 - `ledger/__init__.py` — set `__version__` to `"X.Y.Z"`
+- `plugins/ledger-hooks/.claude-plugin/plugin.json` — set `version` to
+  `"X.Y.Z"`, the same value; the plugin list shows it, and
+  `tests/test_plugin_hooks.py` fails when it differs from `__version__`
 - `CHANGELOG.md` — add the dated section at the top of the file
 
 Shape of the changelog section (see the 0.1.22 and 0.1.21 entries):

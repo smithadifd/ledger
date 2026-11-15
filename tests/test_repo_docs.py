@@ -6,8 +6,10 @@ files are always present, so nothing skips. ``LEDGER_REPO_ROOT`` is not needed.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -16,6 +18,7 @@ from pathlib import Path
 
 from ledger import cli
 from ledger.paths import SUPPORTED_LOCATION
+from ledger.schema import SCHEMAS
 from ledger.verbs import discover_verbs
 from ledger.verbs.resume import SHORT_FORM
 
@@ -528,3 +531,294 @@ def test_concepts_documents_note_search_and_severity() -> None:
     assert "A note is searched as part of its item, not as its own document" in _squash(section)
     for severity in ("`ok`", "`info`", "`warn`"):
         assert f"| {severity} |" in section
+
+
+# ---- the install path, run as printed -------------------------------------------
+#
+# The walk from nothing to a working ledger is run from the docs' own fenced
+# blocks, in an empty home, with only `ledger` on PATH (a wrapper that runs this
+# checkout). A step the docs do not print is a step the run does not have.
+
+
+def _fenced(text: str, lang: str) -> list[str]:
+    """The unindented fenced blocks of one language, in order, each with its final newline."""
+    return re.findall(rf"^```{lang}\n(.*?)^```$", text, flags=re.MULTILINE | re.DOTALL)
+
+
+def _between(text: str, start: str, end: str) -> str:
+    assert text.count(start) == 1, f"{start!r} occurs {text.count(start)} times"
+    return text.split(start, 1)[1].split(end, 1)[0]
+
+
+def _start_steps() -> dict[int, str]:
+    """docs/start-here.md's numbered steps: number -> the text from the heading's title on."""
+    parts = re.split(r"^## (\d+)\. ", START.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    return {int(number): body for number, body in zip(parts[1::2], parts[2::2])}
+
+
+def _empty_home(tmp_path: Path) -> tuple[Path, dict[str, str]]:
+    """An empty home and an environment whose PATH has a `ledger` and the system tools only."""
+    home = tmp_path / "home"
+    home.mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True)
+    wrapper = bin_dir / "ledger"
+    wrapper.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} -m ledger "$@"\n')
+    wrapper.chmod(0o755)
+    env = {key: value for key, value in os.environ.items() if not key.startswith("LEDGER_")}
+    env.update(
+        HOME=str(home),
+        PATH=f"{bin_dir}:/usr/bin:/bin",
+        PYTHONPATH=str(ROOT),
+        PYTHONIOENCODING="utf-8",
+    )
+    return home, env
+
+
+def _sh(script: str, home: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["bash", "-e", "-c", script],
+        cwd=home, env=env, capture_output=True, text=True, timeout=180,
+    )
+
+
+def test_the_readme_quick_start_runs_as_printed_in_an_empty_home(tmp_path) -> None:
+    section = _between(README.read_text(encoding="utf-8"), "\n## Quick start\n", "\n## ")
+    [block] = _fenced(section, "sh")
+    lead = section.split("```sh", 1)[0]
+    assert "throwaway" in lead, "the quick start does not call its values throwaway"
+    assert "(#2-set-the-environment)" in lead, "the quick start does not point at step 2"
+    assert "throwaway" in block, "the quick start's values are not marked as throwaway"
+    demo = tmp_path / "demo"
+    script = block.replace("/tmp/ledger-demo", str(demo))
+    assert script != block, "the quick start no longer uses /tmp/ledger-demo"
+    home, env = _empty_home(tmp_path)
+    done = _sh(script, home, env)
+    assert done.returncode == 0, (done.stdout, done.stderr)
+    assert "ok events=3" in done.stdout, done.stdout
+    assert (demo / "ledger.db").is_file()
+
+
+def test_start_here_setup_steps_run_as_printed_in_an_empty_home(tmp_path) -> None:
+    steps = _start_steps()
+    titles = {number: body.split("\n", 1)[0] for number, body in steps.items()}
+    for number, word in (
+        (3, "Install the ledger"), (4, "database lives"), (5, "environment"),
+        (6, "first write"), (7, "Claim"), (8, "Check"), (9, "hooks"), (10, "skills"),
+    ):
+        assert word in titles[number], (number, titles.get(number))
+    script = "\n".join(
+        block for number in range(4, 9) for block in _fenced(steps[number], "sh")
+    )
+    assert "ledger new --type ticket" in script and "ledger doctor" in script
+    assert "mkdir" not in script, "the walk needs no folder made by hand"
+    home, env = _empty_home(tmp_path)
+    done = _sh(script, home, env)
+    assert done.returncode == 0, (done.stdout, done.stderr)
+    database = home / ".local" / "share" / "ledger" / "work.db"
+    assert database.is_file()
+    assert f"path: {database.resolve()}" in done.stdout, done.stdout
+    assert "claimed for work" in done.stdout and "schema_version:" in done.stdout
+    assert "ok events=" in done.stdout
+
+
+def test_a_check_before_the_first_write_fails_as_start_here_says(tmp_path) -> None:
+    body = _start_steps()[8]
+    assert "fails with `database does not exist`" in _squash(body)
+    home, env = _empty_home(tmp_path)
+    env["LEDGER_DB"] = str(home / ".local" / "share" / "ledger" / "work.db")
+    done = _sh("ledger doctor", home, env)
+    assert done.returncode == 1, (done.stdout, done.stderr)
+    assert "database does not exist" in done.stderr
+
+
+def test_the_printed_tag_command_prints_the_newest_release_tag(tmp_path) -> None:
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    env = {
+        **os.environ,
+        "HOME": str(tmp_path),
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+    }
+    git = ["git", "-c", "user.name=docs", "-c", "user.email=docs@example.invalid"]
+    for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "a"]):
+        subprocess.run([*git, *args], cwd=remote, env=env, check=True, capture_output=True)
+    for tag in ("v0.2.1", "v0.10.0", "v0.3.0", "v0.9.9", "not-a-release"):
+        subprocess.run([*git, "tag", tag], cwd=remote, env=env, check=True, capture_output=True)
+    for page in (README, START):
+        commands = [b for b in _fenced(page.read_text(encoding="utf-8"), "sh") if "git ls-remote" in b]
+        assert len(commands) == 1, page.name
+        assert "https://github.com/smithadifd/ledger" in commands[0], page.name
+        script = commands[0].replace("https://github.com/smithadifd/ledger", str(remote))
+        done = subprocess.run(
+            ["sh", "-c", script], env=env, capture_output=True, text=True, timeout=60
+        )
+        assert (done.returncode, done.stdout) == (0, "v0.10.0\n"), (
+            f"{page.name}: the tag command printed {done.stdout!r} ({done.stderr!r}), "
+            "not the newest tag"
+        )
+
+
+def test_both_docs_give_the_two_pipx_commands_and_say_what_pipx_writes() -> None:
+    for page in (README, START):
+        text = page.read_text(encoding="utf-8")
+        assert "brew install pipx\npipx ensurepath\n" in _fenced(text, "sh"), (
+            f"{page.name} does not print the two pipx commands in one block"
+        )
+        flat = _flat(page)
+        for needle in ("shell's profile file", "`~/.local/bin`", "folder of its own"):
+            assert needle in flat, (page.name, needle)
+
+
+def test_the_four_setup_parts_come_in_one_order_in_both_docs() -> None:
+    readme = README.read_text(encoding="utf-8")
+    intro = _between(readme, "\n## Install\n", "\n### 1. ")
+    order = [
+        "Install the `ledger` command",
+        "Set the environment",
+        "Install the `ledger-hooks` plugin",
+        "Install the skills plugin",
+    ]
+    positions = [intro.index(item) for item in order]
+    assert positions == sorted(positions), dict(zip(order, positions))
+    assert "after step 2 and before the self-check" in _squash(intro)
+    headings = re.findall(r"^#{2,3} (.+)$", readme, flags=re.MULTILINE)
+    where = [
+        headings.index(name)
+        for name in (
+            "Install", "1. Install the ledger command", "2. Set the environment",
+            "Quick start", "Claude Code plugin", "Working with agent skills",
+        )
+    ]
+    assert where == sorted(where), where
+    start = START.read_text(encoding="utf-8")
+    start_intro = _between(start, "Setup has four parts", "\n## 1. ")
+    parts = ["the `ledger` command", "the environment", "the `ledger-hooks` plugin", "the skills plugin"]
+    spots = [start_intro.index(part) for part in parts]
+    assert spots == sorted(spots), dict(zip(parts, spots))
+    steps = _start_steps()
+    assert "(steps 6 to 8)" in _squash(start_intro)
+    for number, word in ((5, "environment"), (6, "first write"), (8, "Check"), (9, "hooks"), (10, "skills")):
+        assert word in steps[number].split("\n", 1)[0], (number, word)
+
+
+def test_both_docs_set_the_environment_one_way() -> None:
+    for page in (README, START):
+        text = page.read_text(encoding="utf-8")
+        [settings] = [json.loads(block) for block in _fenced(text, "json")]
+        env = settings["env"]
+        assert set(env) == {"LEDGER_DB", "LEDGER_OPERATOR"}, (page.name, env)
+        assert env["LEDGER_DB"].startswith("/"), (page.name, env["LEDGER_DB"])
+        assert re.search(r"/(?:Users|home)/", env["LEDGER_DB"]) is None
+        shell = [b for b in _fenced(text, "sh") if "export LEDGER_OPERATOR=" in b]
+        assert shell and all("export LEDGER_HARNESS=cli" in b or "LEDGER_DB" in b for b in shell), page.name
+        flat = _flat(page)
+        assert "sets `claude-code`" in flat or "sets it to `claude-code`" in flat, page.name
+        assert "settings" in flat and "`env`" in flat, page.name
+
+
+def test_the_documented_ask_is_accepted_and_the_picker_can_show_it(tmp_path) -> None:
+    schema = SCHEMAS[("decision.asked", 1)]
+    assert set(schema["required"]) == {"question", "options"}
+    assert {"recommendation", "scope"} <= set(schema["optional"])
+    for index, page in enumerate((README, CLI_PAGE)):
+        text = page.read_text(encoding="utf-8")
+        asks = [block for block in _fenced(text, "sh") if "--kind decision.asked" in block]
+        assert len(asks) == 1, page.name
+        for field in ("question", "options", "label", "description", "scope", "recommendation"):
+            assert f"`{field}`" in text, (page.name, field)
+        home, env = _empty_home(tmp_path / f"page{index}")
+        env.update(
+            LEDGER_DB=str(home / "ledger.db"), LEDGER_HARNESS="cli", LEDGER_OPERATOR="me"
+        )
+        made = _sh(f"ledger new --type ticket --title T --id demo-1\n{asks[0]}", home, env)
+        assert made.returncode == 0, (page.name, made.stdout, made.stderr)
+        event = re.findall(r"event=(\d+)", made.stdout)[-1]
+        shown = _sh(f"ledger ask-display {event}", home, env)
+        assert shown.returncode == 0, (page.name, shown.stdout, shown.stderr)
+        assert f"[ask {event}] Which database name? (scope: the name of the first database)" in shown.stdout
+    assert "under `claude -p`" in _flat(README)
+    assert "interactive" in _flat(README) and "capture_missing" in _flat(README)
+
+
+def test_decisions_lists_records_not_elections_and_the_docs_say_so(tmp_path) -> None:
+    home, env = _empty_home(tmp_path)
+    env.update(LEDGER_DB=str(home / "ledger.db"), LEDGER_HARNESS="cli", LEDGER_OPERATOR="me")
+    made = _sh(
+        "ledger new --type ticket --title T --id demo-1\n"
+        "ledger append --item demo-1 --kind utterance.captured --channel terminal "
+        "--provenance-class submitted-prompt "
+        "--payload '{\"text\": \"Ship the short version first.\", \"origin\": \"person\"}'\n"
+        "ledger elect demo-1 --question 'Short or long?' --chosen short "
+        "--chosen-description 'five commands' --rejected long --scope 'the README' "
+        "--quote-ref 2 --quote 'short version'",
+        home, env,
+    )
+    assert made.returncode == 0, (made.stdout, made.stderr)
+    listed = _sh("ledger decisions", home, env).returncode
+    assert listed == 1, "ledger decisions now lists elections: update the README row and docs/cli.md"
+    card = _sh("ledger card demo-1", home, env).stdout
+    assert "## Decisions" in card and "Short or long? -> short" in card
+    found = _sh("ledger search short", home, env).stdout
+    assert "elected: Short or long?" in found
+    row = next(
+        line for line in README.read_text(encoding="utf-8").splitlines()
+        if line.startswith("| `decisions` |")
+    )
+    assert "does not list elections" in row and "`card`" in row and "`search`" in row
+    entry = _squash(CLI_PAGE.read_text(encoding="utf-8").split("**`decisions [", 1)[1].split("\n**`", 1)[0])
+    assert "It does not list elections" in entry and "card" in entry and "`search`" in entry
+
+
+def test_several_acceptance_bullets_pass_from_a_shell_as_documented(tmp_path) -> None:
+    text = CLI_PAGE.read_text(encoding="utf-8")
+    [block] = [b for b in _fenced(text, "sh") if "--acceptance" in b]
+    assert "$'" in block and "printf" in block
+    home, env = _empty_home(tmp_path)
+    env.update(LEDGER_DB=str(home / "ledger.db"), LEDGER_HARNESS="cli", LEDGER_OPERATOR="me")
+    done = _sh("ledger new --type ticket --title T --id demo-1\n" + block, home, env)
+    assert done.returncode == 0, (done.stdout, done.stderr)
+    assert "\tv1\tevent=" in done.stdout and "\tv1\tunchanged" in done.stdout, done.stdout
+    shown = _sh("ledger spec show demo-1", home, env).stdout
+    assert "## Acceptance\n- the examples run\n- the output is checked\n" in shown, shown
+    repeated = _sh(
+        'ledger spec set demo-1 --title T --body b --acceptance "- a" --acceptance "- b"\n'
+        "ledger spec show demo-1",
+        home, env,
+    ).stdout
+    assert "## Acceptance\n- b\n" in repeated and "- a" not in repeated, repeated
+    assert "the last one replaces" in _squash(text)
+
+
+def test_the_readme_uninstall_names_each_piece_and_keeps_the_database() -> None:
+    section = _between(README.read_text(encoding="utf-8"), "\n## Uninstall\n", "\n## ")
+    flat = _squash(section)
+    market = json.loads((ROOT / ".claude-plugin" / "marketplace.json").read_text(encoding="utf-8"))
+    plugin = market["plugins"][0]["name"]
+    for needle in (
+        f"claude plugin uninstall {plugin}@{market['name']}",
+        f"claude plugin marketplace remove {market['name']}",
+        "pipx uninstall ledger",
+        "brew uninstall pipx",
+        "your shell profile",
+        "`~/.local/bin`",
+        "`LEDGER_` keys from the `env` block",
+        "is data",
+        "it stays until you delete it yourself",
+    ):
+        assert needle in flat, f"the uninstall section lacks: {needle}"
+    assert "~/.local/share/ledger" in flat
+
+
+def test_the_docs_say_the_brief_goes_to_the_model_and_the_picker_needs_a_session() -> None:
+    for page in (README, START):
+        flat = _flat(page)
+        assert "model's context" in flat, f"{page.name} does not say the brief goes to the model"
+        assert "terminal does not show it" in flat, (
+            f"{page.name} does not say the terminal does not show the brief"
+        )
+        assert "interactive" in flat and "`claude -p`" in flat, (
+            f"{page.name} does not say the picker needs an interactive session"
+        )
+    assert "`claude -p`" in _flat(CLI_PAGE) and "interactive" in _flat(CLI_PAGE)
