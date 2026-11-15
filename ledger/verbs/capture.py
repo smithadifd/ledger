@@ -13,7 +13,7 @@ lets no other writer use a channel that starts with ``hook:``.
 as a pointer: a fixed text line plus ``omitted_bytes`` and
 ``omitted_sha256``.
 
-Four cases of ``--kind prompt`` write nothing and exit 0, all decided before
+Five cases of ``--kind prompt`` write nothing and exit 0, all decided before
 the database is opened, so none creates it. They are checked in the order
 below, and the first that applies names the reason. The result is the text
 line ``skipped``, a tab and the reason (JSON ``data``:
@@ -43,13 +43,21 @@ line ``skipped``, a tab and the reason (JSON ``data``:
   above it, that is the same file as the opted-out path opts out whatever its
   spelling, so on a filesystem that treats names differing in letter case or
   Unicode form as one name (the macOS default) those spellings opt out too.
-  An opted-out path that does not exist is matched by its text alone, letter
-  case and Unicode form exact. ``~`` is never expanded. No key leaves nothing
+  An opted-out path that does not exist (``stat`` fails with ``ENOENT`` or
+  ``ENOTDIR``) is matched by its text alone, letter case and Unicode form
+  exact. ``~`` is never expanded. No key leaves nothing
   opted out; a missing or empty ``cwd`` opts nothing out. Unlike the prefix
   list, a value that is not an array of absolute path strings is refused
   (``capture_config``, exit 3, nothing written): falling back would store the
   prompts of a folder the person opted out. With a path configured, a ``cwd``
   that is not an absolute path string is refused ``capture_bad_input``.
+- ``cwd_unverified``: an opted-out path is configured, the text rule did not
+  match, and the identity rule could not be decided: ``stat`` failed for a
+  reason other than the path not existing (a folder above it whose search
+  permission was removed, say) on an opted-out path, or, when an opted-out
+  path exists, on the ``cwd`` or a folder above it. The ``cwd`` might be an
+  opted-out folder under another spelling, so the prompt is not stored: the
+  opt-out fails closed. An identity match found anyway names ``cwd_optout``.
 - ``prompts_off``: ``capture_prompts`` is ``false`` in the ``config.json``
   beside the database. No file, no key, or ``true`` leaves prompt capture on.
   A config that cannot be read or parsed, or a value that is not a JSON
@@ -62,7 +70,7 @@ line ``skipped``, a tab and the reason (JSON ``data``:
 
 A valid input is checked first, so every refusal above still applies to a
 frame. The config is read once, after the frame check and before the other
-three, so an unreadable config refuses any prompt that is not a frame.
+four, so an unreadable config refuses any prompt that is not a frame.
 ``--kind picker`` never reads the config.
 
 ``--kind picker`` takes the PostToolUse hook input for AskUserQuestion
@@ -342,12 +350,24 @@ def _hook_cwd(hook: Mapping[str, Any]) -> str | None:
     return value
 
 
+class _IdentityUnknown(Exception):
+    """``stat`` failed for a reason other than the path not existing."""
+
+
 def _identity(path: str) -> tuple[int, int] | None:
-    """The ``(st_dev, st_ino)`` of ``path``; ``None`` when it cannot be stat'ed."""
+    """The ``(st_dev, st_ino)`` of ``path``; ``None`` when it does not exist.
+
+    Only ``ENOENT`` and ``ENOTDIR`` mean the path does not exist. Any other
+    failure (a folder above it without search permission, say) leaves its
+    identity unknown and raises ``_IdentityUnknown``: reading that as "no
+    identity" would let a spelling of an opted-out folder be captured.
+    """
     try:
         st = os.stat(path)
-    except (OSError, ValueError):
+    except (FileNotFoundError, NotADirectoryError):
         return None
+    except (OSError, ValueError) as exc:
+        raise _IdentityUnknown(path) from exc
     return (st.st_dev, st.st_ino)
 
 
@@ -361,25 +381,44 @@ def _self_and_ancestors(path: str):
         path = parent
 
 
-def in_optout(cwd: str, paths: tuple[str, ...]) -> bool:
-    """True when canonical ``cwd`` is one of ``paths`` or lies under one.
+def optout_reason(cwd: str, paths: tuple[str, ...]) -> str | None:
+    """``cwd_optout`` when canonical ``cwd`` is one of ``paths`` or lies under
+    one, ``cwd_unverified`` when that cannot be decided, else ``None``.
 
     Two rules, either enough. By text: canonical ``cwd`` equals a path or
     starts with it plus a separator. By file identity: ``cwd`` or a folder
     above it is the same file (device and inode) as an existing path, which
     catches a spelling that differs only in letter case or Unicode form on a
     filesystem that treats those as one name. A path that does not exist has
-    no identity and is matched by text alone.
+    no identity and is matched by text alone. A ``stat`` that fails for any
+    other reason, on a configured path or on a part of ``cwd`` checked against
+    an existing one, makes a miss unprovable, so the answer fails closed.
     """
     here = _canonical(cwd)
     for root in paths:
         boundary = root if root.endswith(os.sep) else root + os.sep
         if here == root or here.startswith(boundary):
-            return True
-    roots = {ident for ident in map(_identity, paths) if ident is not None}
-    if not roots:
-        return False
-    return any(_identity(part) in roots for part in _self_and_ancestors(here))
+            return "cwd_optout"
+    unverified = False
+    roots = set()
+    for root in paths:
+        try:
+            ident = _identity(root)
+        except _IdentityUnknown:
+            unverified = True
+            continue
+        if ident is not None:
+            roots.add(ident)
+    if roots:
+        for part in _self_and_ancestors(here):
+            try:
+                ident = _identity(part)
+            except _IdentityUnknown:
+                unverified = True
+                continue
+            if ident in roots:
+                return "cwd_optout"
+    return "cwd_unverified" if unverified else None
 
 
 def _questions(tool_input: Any) -> list[dict[str, Any]]:
@@ -529,7 +568,7 @@ def run(args, ctx: Context) -> Result:
         raise _bad_input(f"stdin is not UTF-8 text: {exc}") from exc
     hook = read_hook_input(raw)
     if args.kind == "prompt":
-        # Validate first, so every refusal stands; then the four skips, all
+        # Validate first, so every refusal stands; then the five skips, all
         # before open_db, which would create the database.
         prompt_capture(hook)
         if is_harness_frame(hook["prompt"]):
@@ -540,8 +579,9 @@ def run(args, ctx: Context) -> Result:
         paths = optout_paths(path, config)
         if paths:
             cwd = _hook_cwd(hook)
-            if cwd is not None and in_optout(cwd, paths):
-                return _skipped("cwd_optout")
+            reason = None if cwd is None else optout_reason(cwd, paths)
+            if reason is not None:
+                return _skipped(reason)
         if not _prompts_value(path, config):
             return _skipped("prompts_off")
     lg = open_db(ctx, write=True)

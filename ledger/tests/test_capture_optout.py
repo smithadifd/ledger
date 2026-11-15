@@ -325,6 +325,64 @@ def test_a_letter_case_variant_sibling_is_still_captured(db: Path, tmp_path: Pat
     assert_captured(capture_prompt(db, cwd=tmp_path / "Privatefoo" / "a-project"), db)
 
 
+# --- capture_optout_paths: an identity that cannot be read fails closed ----------
+#
+# With search permission removed from a folder, nothing under it can be
+# stat'ed, and realpath keeps a link under it as written. A link there is a
+# second spelling of a folder on every filesystem, so these run on Linux CI
+# too. They need a user the permission bits bind (not root).
+
+
+def capture_while_locked(db: Path, locked: Path, cwd: Path) -> subprocess.CompletedProcess[str]:
+    os.chmod(locked, 0o600)
+    try:
+        with pytest.raises(PermissionError):
+            os.stat(locked / "probe")
+        return capture_prompt(db, cwd=cwd)
+    finally:
+        os.chmod(locked, 0o700)
+
+
+def test_an_optout_path_that_cannot_be_stated_fails_closed(db: Path, tmp_path: Path) -> None:
+    # The opted-out path is a link to the cwd's folder, both under a folder
+    # that loses search permission: the text differs, and neither side's
+    # identity can be read.
+    locked = tmp_path / "locked"
+    real = locked / "room"
+    (real / "a-project").mkdir(parents=True)
+    (locked / "room-link").symlink_to(real, target_is_directory=True)
+    opt_out(db, locked / "room-link")
+    assert_skipped(capture_while_locked(db, locked, real / "a-project"), "cwd_unverified", db)
+    assert not db.exists()
+
+
+def test_a_cwd_that_cannot_be_stated_fails_closed(db: Path, optout_dir: Path,
+                                                  tmp_path: Path) -> None:
+    # The opted-out path is readable; the cwd reaches it through a link under
+    # a folder that loses search permission, so its identity cannot be read.
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    (locked / "into-optout").symlink_to(optout_dir, target_is_directory=True)
+    opt_out(db, optout_dir)
+    done = capture_while_locked(db, locked, locked / "into-optout" / "a-project")
+    assert_skipped(done, "cwd_unverified", db)
+    assert not db.exists()
+
+
+@pytest.mark.parametrize("where", ["cwd", "optout-path"])
+def test_a_path_that_does_not_exist_is_not_unverified(db: Path, optout_dir: Path, tmp_path: Path,
+                                                      where: str) -> None:
+    (tmp_path / "work").mkdir()
+    (tmp_path / "a-file").write_text("x", encoding="utf-8")
+    if where == "cwd":
+        opt_out(db, optout_dir)
+        cwd = tmp_path / "a-file" / "gone"  # ENOTDIR, then ENOENT above it
+    else:
+        opt_out(db, tmp_path / "not-made-yet", tmp_path / "a-file" / "below")
+        cwd = tmp_path / "work"
+    assert_captured(capture_prompt(db, cwd=cwd), db)
+
+
 # --- capture_optout_paths: an invalid value refuses -------------------------------
 
 

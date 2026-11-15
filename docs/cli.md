@@ -460,7 +460,7 @@ ask an `[ask K]` tag at the start of the first question names. Refusals
 (exit 3): `capture_not_prompt`, `capture_not_picker`, `capture_bad_input`,
 and `capture_config` (below).
 
-Four cases of `--kind prompt` write nothing and exit 0. All are decided after
+Five cases of `--kind prompt` write nothing and exit 0. All are decided after
 the input is checked (so every refusal above still applies) and before the
 database is opened (so none creates it), in the order listed; the first that
 applies names the reason. `config.json` is read once, after the `frame`
@@ -500,6 +500,15 @@ check. Each prints `skipped`, a tab and the reason; `--json` carries
   that is not an absolute path is refused `capture_bad_input`. An invalid
   `capture_optout_paths` refuses `capture_config` instead. The `cwd` is where
   the session is when the prompt is sent, not the files it works on.
+- `cwd_unverified`: an opted-out path is configured, the text match above
+  failed, and the file-identity match could not be decided because `stat`
+  failed for a reason other than the path not existing: on an opted-out path,
+  or, when an opted-out path exists, on the `cwd` or a folder above it (for
+  example a folder above them whose search permission was removed). The `cwd`
+  might be an opted-out folder under another spelling, so the prompt is not
+  stored: the opt-out fails closed. A path that does not exist (`ENOENT` or
+  `ENOTDIR`) is not unverified; it is matched by text as above. If an
+  identity match is found anyway, the reason is `cwd_optout`.
 - `prompts_off`: `capture_prompts` is `false` in `config.json` (see
   [Configuration file](#configuration-file)). A `config.json` entry that
   cannot be opened, read or parsed (a link that does not resolve included) or
