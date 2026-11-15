@@ -575,16 +575,21 @@ class Pin(NamedTuple):
     why: str
 
 
-_FENCE = re.compile(r"^([ \t]*)(`{3,}|~{3,})(.*)$")
+_FENCE = re.compile(r"^((?:[ \t]*>)*[ \t]*)(`{3,}|~{3,})(.*)$")
 _INDENTED = re.compile(r"^(?: {4,}|\t)\S")
+_PRE = re.compile(r"<pre\b", re.IGNORECASE)
 
 
 def _blocks(text: str) -> list[Block]:
     """Every block of a stretch of a page, in order.
 
     A fence is three or more backticks or tildes at the start of a line, after
-    any indent, so a fence inside a list item counts; it closes at the first line
-    of the same character, at least as long, with nothing else on it. A block
+    any indent and any `>` blockquote prefixes, so a fence inside a list item or a
+    blockquote counts; it closes at the first line of the same character, at
+    least as long, with nothing else on it, behind the same number of `>`
+    prefixes. A blockquoted block's text has those prefixes (each with one
+    following space) removed, and its indent keeps them, so it never equals a
+    pin that has none. A block
     with no closing fence keeps an info string starting `unclosed`, which no pin
     has. Outside a fence, a run of lines indented four spaces or a tab (with the
     blank lines between them) is one `indented` block.
@@ -596,11 +601,14 @@ def _blocks(text: str) -> list[Block]:
         fence = _FENCE.match(lines[i])
         if fence:
             indent, marker, info = fence.groups()
-            close = re.compile(rf"^[ \t]*{re.escape(marker[0])}{{{len(marker)},}}[ \t]*$")
+            depth = indent.count(">")
+            quote = rf"(?:[ \t]*>){{{depth}}}"
+            close = re.compile(rf"^{quote}[ \t]*{re.escape(marker[0])}{{{len(marker)},}}[ \t]*$")
+            strip = re.compile(rf"^(?:[ \t]*>[ \t]?){{{depth}}}")
             body: list[str] = []
             i += 1
             while i < len(lines) and not close.match(lines[i]):
-                body.append(lines[i] + "\n")
+                body.append(strip.sub("", lines[i], count=1) + "\n")
                 i += 1
             found.append(Block(indent, info if i < len(lines) else f"unclosed {info}", "".join(body)))
             i += 1
@@ -859,6 +867,9 @@ def _assert_pinned(*names: str) -> None:
     sections = dict(_walked_sections())
     for name in names:
         assert name in sections, f"{name}: the page no longer has this section"
+        assert not _PRE.search(sections[name]), (
+            f"{name}: an HTML <pre> block is refused: it can hold code the walk does not enumerate"
+        )
         found = _blocks(sections[name])
         pins = PINS[name]
         for index, (pin, block) in enumerate(zip(pins, found), 1):
@@ -879,6 +890,20 @@ def test_every_block_of_a_walked_section_is_pinned_in_order() -> None:
     for name, pins in PINS.items():
         for pin in pins:
             assert pin.why.strip(), f"{name}: {pin.name!r} gives no reason"
+
+
+def test_a_blockquoted_fence_is_a_block_and_a_pre_block_is_refused(monkeypatch) -> None:
+    quoted = "Lead.\n\n> ```sh\n> ledger sentinel-verb\n> ```\n"
+    assert _blocks(quoted) == [Block("> ", "sh", "ledger sentinel-verb\n")], _blocks(quoted)
+    nested = "> > ~~~sh\n> > a\n> > ~~~\n"
+    assert _blocks(nested) == [Block("> > ", "sh", "a\n")], _blocks(nested)
+    # A `>` line inside an unquoted fence is code, and is kept as written.
+    assert _blocks("```sh\n> not a quote\n```\n") == [Block("", "sh", "> not a quote\n")]
+    name = "docs/start-here.md, ## 6. Make the first write"
+    planted = dict(_walked_sections())[name] + "\n<pre><code>ledger sentinel-verb</code></pre>\n"
+    monkeypatch.setattr(sys.modules[__name__], "_walked_sections", lambda: [(name, planted)])
+    with pytest.raises(AssertionError, match="HTML <pre> block is refused"):
+        _assert_pinned(name)
 
 
 def test_the_pins_marked_run_are_the_constants_the_walk_runs() -> None:
@@ -1170,11 +1195,15 @@ def test_both_docs_say_what_to_do_when_the_tag_command_prints_nothing() -> None:
     for page in (README, START):
         text = page.read_text(encoding="utf-8")
         flat = _flat(page)
-        needle = "If it prints nothing (no network, or no `v*` tag exists), use the tag named on"
-        assert needle in flat, f"{page.name} does not say what to do when the tag command prints nothing"
+        failed = "If the command failed because there is no network, reconnect and run it again."
+        nothing = "If it ran and printed nothing, use the tag named on"
+        assert failed in flat, f"{page.name} does not say what to do when the tag command fails offline"
+        assert nothing in flat, f"{page.name} does not say what to do when the tag command prints nothing"
         assert "https://github.com/smithadifd/ledger/releases/latest" in flat, page.name
-        assert text.index(needle.split(",")[0]) > text.index("git ls-remote"), page.name
-        assert text.index(needle.split(",")[0]) < text.index("Put what it prints where"), page.name
+        first, second = text.index(failed.split(",")[0]), text.index(nothing.split(",")[0])
+        assert text.index("git ls-remote") < first < second < text.index("Put what it prints where"), (
+            page.name
+        )
 
 
 def test_both_docs_give_the_two_pipx_commands_and_say_what_pipx_writes() -> None:

@@ -164,7 +164,8 @@ time you run `git`). It prints the newest tag:
 git ls-remote --tags --refs --sort=-v:refname https://github.com/smithadifd/ledger 'v*' | sed -n '1s|.*refs/tags/||p'
 ```
 
-If it prints nothing (no network, or no `v*` tag exists), use the tag named on
+If the command failed because there is no network, reconnect and run it again.
+If it ran and printed nothing, use the tag named on
 the [latest release page](https://github.com/smithadifd/ledger/releases/latest)
 instead.
 
