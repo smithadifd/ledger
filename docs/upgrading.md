@@ -1,13 +1,13 @@
 # Upgrading across many releases
 
 This page is for a machine whose ledger is 0.1.8 or older, moving to the
-current release, 0.3.0. Four changes in between can stop a machine that works
+current release, 0.3.1. Four changes in between can stop a machine that works
 today, and 0.2.0, 0.2.1 and 0.3.0 add a few more things to check. Do the checks
 in section 1, install the tag in section 2, run the three upgrade commands in
 section 3, and run the check after each. A machine already on 0.1.22, 0.2.0 or
 0.2.1 has already passed the changes in 1.1 to 1.4 and needs only 1.5. For a
 later tag, change the tag in the commands and read the
-[CHANGELOG](../CHANGELOG.md) entries after 0.3.0.
+[CHANGELOG](../CHANGELOG.md) entries after 0.3.1.
 
 To see which release you have, run `pipx list`. `ledger --version` only exists
 from 0.1.16; on an older release it fails with `the following arguments are
@@ -240,7 +240,7 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
 
 ## 2. Which tag to install
 
-Install `@v0.3.0`. Never pin 0.1.14. It shipped with a descriptor check that
+Install `@v0.3.1`. Never pin 0.1.14. It shipped with a descriptor check that
 compared the whole process's open descriptors before and after each connect, so
 another thread's open in that window, or SQLite reusing a descriptor it already
 held, refused a valid connect (`db_fd_unknown`, and sometimes `db_not_regular`,
@@ -271,16 +271,16 @@ would decide which one runs. Choose one:
   folder that holds that `bin/ledger`:
 
   ```sh
-  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.3.0"
+  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.3.1"
   ```
 
 - Or remove that venv, then run the pipx line below.
 
 Either way, `command -v ledger` then shows one path and `ledger --version`
-prints `ledger 0.3.0`.
+prints `ledger 0.3.1`.
 
 ```sh
-pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.3.0
+pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.3.1
 ```
 
 This is the [README's upgrade command](../README.md#upgrade) with the Python you
@@ -292,7 +292,7 @@ ledger --version
 ledger doctor
 ```
 
-`ledger --version` prints `ledger 0.3.0`. `ledger doctor` opens the database
+`ledger --version` prints `ledger 0.3.1`. `ledger doctor` opens the database
 that `--db` or `LEDGER_DB` names, so it also proves 1.1 and 1.2 on the real
 file: it exits 0 and prints the path, the schema version and the search-index
 state. A refusal from section 1 shows up here. If your shell says `ledger:
@@ -315,7 +315,7 @@ plugin's session-start hook uses.
 
 Prove it: `claude plugin list` shows `sdlc@skills` and its version, which is
 the newest in that repository's `CHANGELOG.md`. With `ledger_cli` set, a new
-session's first lines show `ledger 0.3.0` and the ledger's brief, or one
+session's first lines show `ledger 0.3.1` and the ledger's brief, or one
 `ledger session-start: ...` line naming what failed.
 
 ### 3.3 The ledger mod
@@ -329,4 +329,4 @@ claude plugin update ledger
 Then restart the session. Prove it: `claude plugin list` shows `ledger@mods` and
 its version, which is the newest in that repository's `CHANGELOG.md`, and
 `/ledger` opens its pane in a new session. The pane reads the ledger with
-`--json`; it needs ledger 0.1.5 or newer, so it needs nothing more of 0.3.0.
+`--json`; it needs ledger 0.1.5 or newer, so it needs nothing more of 0.3.1.

@@ -1,8 +1,20 @@
 # Changelog
 
-## Unreleased
+## 0.3.1 — 2026-11-15
 
-- **The `ledger-hooks` plugin manifest carries a version.** `plugins/ledger-hooks/.claude-plugin/plugin.json` names the release (`0.3.0`), so Claude Code's plugin list shows a version instead of a commit id. A test requires it to equal the package version, and `docs/releasing.md` lists the manifest among the files a release changes.
+Documentation and the plugin manifest only: one setup order from a bare Mac to a first write, a command that prints the newest release tag, an uninstall section, and a version on the `ledger-hooks` manifest; nothing under `ledger/` changes.
+
+- **The `ledger-hooks` plugin manifest carries a version.** `plugins/ledger-hooks/.claude-plugin/plugin.json` names the release version (`0.3.1` in this release), so Claude Code's plugin list shows a version instead of a commit id. A test requires it to equal the package version, and `docs/releasing.md` lists the manifest among the files a release changes.
+- **Install on a bare Mac, in one order.** The README and `docs/start-here.md` give the two commands that get pipx when it is missing (`brew install pipx`, `pipx ensurepath`) and say what pipx writes: one line in the shell profile that puts `~/.local/bin` on `PATH`, and a folder of its own per installed program. Setup runs in one order in both pages: install the `ledger` command at a release tag, set the environment, install the `ledger-hooks` plugin, install the skills plugin and run its setup step. The first write, which creates the database, comes after the environment and before `ledger doctor`, which fails with `database does not exist` until a write has made the file.
+- **A command prints the newest release tag.** Both pages give a `git ls-remote --tags --refs --sort=-v:refname` command that prints the newest tag, so the pages never name a version that goes stale.
+- **One convention for the environment values.** `LEDGER_DB` as an absolute path, `LEDGER_OPERATOR`, and `LEDGER_HARNESS` (`cli` in the shell, left to the hook in Claude Code's settings), set in the shell profile and in the `env` block of Claude Code's settings. The quick start's values are marked throwaway and point at the install step that sets the real ones.
+- **Asking a question is documented.** The `decision.asked` payload (`question`, `options` with `label` and `description`, `recommendation`, `scope`) and one worked `append` are in the README and `docs/cli.md`. There is no new verb.
+- **`decisions` lists decision records, not elections.** The verb table and `docs/cli.md` say so and name where an election is found: the card's Decisions section, and `search`.
+- **Several acceptance bullets from a shell.** `docs/cli.md` shows `ledger spec set --acceptance` with a newline between bullets, written with `$'...\n...'` or `printf`, and says that a repeated `--acceptance` keeps only the last.
+- **The picker flow and the session brief.** The docs say the picker flow (`ask-display`, the picker, then `pick`) needs an interactive Claude Code session, not `claude -p`, and that SessionStart puts `ledger resume --brief` into the model's context, not the terminal.
+- **An uninstall section in the README.** It removes the plugin and marketplace, the environment, and pipx and the command, and says that the database folder is data and stays.
+
+Upgrade with `@v0.3.1`.
 
 ## 0.3.0 — 2026-11-15
 
