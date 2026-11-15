@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -537,15 +538,18 @@ def test_concepts_documents_note_search_and_severity() -> None:
 
 # ---- the install path, run as printed -------------------------------------------
 #
-# The walk from nothing to a working ledger is run from the docs' own fenced
-# blocks, in an empty home, with only `ledger` on PATH (a wrapper that runs this
+# The walk from nothing to a working ledger runs the commands the docs print, in
+# order, in an empty home, with only `ledger` on PATH (a wrapper that runs this
 # checkout). A step the docs do not print is a step the run does not have.
 #
-# No documentation text reaches a shell. Each fenced block is split into
-# commands, each command is tokenised with `shlex.split` and checked against a
-# closed grammar, and an accepted command runs as an argument vector with no
-# shell. A line outside the grammar fails the test by name before any command
-# of its block runs.
+# No byte of a page is ever run, and none becomes a path or an environment value.
+# Every block of a walked section (fenced with any info string, fenced inside a
+# list, or indented) is pinned below, in order, as a text constant of this file,
+# and the page's block must equal its constant exactly. A test that runs a block
+# first checks the block's section against its pins, so a new, removed,
+# reordered, retagged or changed block fails by name before anything runs. The
+# commands then come from the constant alone, and run as argument vectors with no
+# shell, in the throwaway home, with an explicit minimal environment.
 
 
 def _fenced(text: str, lang: str) -> list[str]:
@@ -556,6 +560,334 @@ def _fenced(text: str, lang: str) -> list[str]:
 def _between(text: str, start: str, end: str) -> str:
     assert text.count(start) == 1, f"{start!r} occurs {text.count(start)} times"
     return text.split(start, 1)[1].split(end, 1)[0]
+
+
+class Block(NamedTuple):
+    indent: str  # the indent of the opening fence; "" for an indented block
+    info: str  # the fence's info string, or "indented"
+    text: str  # every line between the fences, verbatim, each with its newline
+
+
+class Pin(NamedTuple):
+    name: str
+    block: Block
+    runs: bool
+    why: str
+
+
+_FENCE = re.compile(r"^([ \t]*)(`{3,}|~{3,})(.*)$")
+_INDENTED = re.compile(r"^(?: {4,}|\t)\S")
+
+
+def _blocks(text: str) -> list[Block]:
+    """Every block of a stretch of a page, in order.
+
+    A fence is three or more backticks or tildes at the start of a line, after
+    any indent, so a fence inside a list item counts; it closes at the first line
+    of the same character, at least as long, with nothing else on it. A block
+    with no closing fence keeps an info string starting `unclosed`, which no pin
+    has. Outside a fence, a run of lines indented four spaces or a tab (with the
+    blank lines between them) is one `indented` block.
+    """
+    lines = text.split("\n")
+    found: list[Block] = []
+    i = 0
+    while i < len(lines):
+        fence = _FENCE.match(lines[i])
+        if fence:
+            indent, marker, info = fence.groups()
+            close = re.compile(rf"^[ \t]*{re.escape(marker[0])}{{{len(marker)},}}[ \t]*$")
+            body: list[str] = []
+            i += 1
+            while i < len(lines) and not close.match(lines[i]):
+                body.append(lines[i] + "\n")
+                i += 1
+            found.append(Block(indent, info if i < len(lines) else f"unclosed {info}", "".join(body)))
+            i += 1
+        elif _INDENTED.match(lines[i]):
+            body = []
+            while i < len(lines) and (_INDENTED.match(lines[i]) or not lines[i].strip()):
+                body.append(lines[i] + "\n")
+                i += 1
+            found.append(Block("", "indented", "".join(body)))
+        else:
+            i += 1
+    return found
+
+
+# The one pipeline the docs print. Its block is pinned like every other; the pipe
+# is never given to a shell: the test splits the constant at its pipe and runs
+# the two halves as argument vectors, the first one's output fed to the second.
+TAG_COMMAND = (
+    "git ls-remote --tags --refs --sort=-v:refname https://github.com/smithadifd/ledger 'v*'"
+    " | sed -n '1s|.*refs/tags/||p'"
+)
+TAG_REPOSITORY = "https://github.com/smithadifd/ledger"
+TAG_BLOCK = TAG_COMMAND + "\n"
+
+PIPX_BLOCK = "brew install pipx\npipx ensurepath\n"
+PIPX_INSTALL_BLOCK = (
+    "pipx install git+https://github.com/smithadifd/ledger@vX.Y.Z\n"
+    "ledger --version\n"
+)
+CLONE_BLOCK = (
+    "git clone https://github.com/smithadifd/ledger\n"
+    "cd ledger\n"
+    "python3 -m venv .venv\n"
+    ".venv/bin/python -m pip install .\n"
+    ".venv/bin/ledger --version\n"
+)
+README_ENV_BLOCK = (
+    "export LEDGER_DB=~/.local/share/ledger/work.db\n"
+    "export LEDGER_OPERATOR=me\n"
+    "export LEDGER_HARNESS=cli\n"
+)
+SETTINGS_ENV_BLOCK = (
+    "{\n"
+    '  "env": {\n'
+    '    "LEDGER_DB": "/absolute/path/to/work.db",\n'
+    '    "LEDGER_OPERATOR": "me"\n'
+    "  }\n"
+    "}\n"
+)
+UNINSTALL_PLUGINS_BLOCK = (
+    "   claude plugin uninstall ledger-hooks@ledger-plugins\n"
+    "   claude plugin marketplace remove ledger-plugins\n"
+)
+UNINSTALL_COMMAND_BLOCK = "   pipx uninstall ledger\n   brew uninstall pipx\n"
+QUICK_START_BLOCK = (
+    "mkdir -p /tmp/ledger-demo\n"
+    "export LEDGER_DB=/tmp/ledger-demo/ledger.db   # throwaway; real: ~/.local/share/ledger/<system>.db\n"
+    "export LEDGER_HARNESS=cli                     # required for writes: what is writing\n"
+    "export LEDGER_OPERATOR=me                     # who the writes are for\n"
+    "\n"
+    'ledger new --type ticket --title "Write the quick start" --id demo-1\n'
+    "ledger doctor\n"
+    'ledger note demo-1 --text "First draft of the quick start is done"\n'
+    "ledger append --item demo-1 --kind item.progress \\\n"
+    "  --payload '{\"text\": \"examples checked against a fresh database\"}'\n"
+    "ledger card demo-1\n"
+    "ledger search draft\n"
+    "ledger verify\n"
+)
+QUICK_START_DOCTOR_OUTPUT = (
+    "path: /tmp/ledger-demo/ledger.db\n"
+    "schema_version: N\n"
+    "search: missing (ledger index rebuilds it)\n"
+)
+QUICK_START_CARD_OUTPUT = (
+    "# demo-1\n"
+    "revision: 3 <hash of event 3>\n"
+    "source_event_ids: 1, 2, 3\n"
+    "type: ticket\n"
+    "title: Write the quick start\n"
+    "status: open\n"
+    "...\n"
+    "## Notes\n"
+    "- event=2: First draft of the quick start is done\n"
+    "\n"
+    "## Progress\n"
+    "- event=3: examples checked against a fresh database\n"
+    "\n"
+    "This card is a projection; the events are the authority (ledger export-item -- demo-1)\n"
+)
+# README.md and docs/cli.md print the same ask, so one constant pins both.
+ASK_BLOCK = (
+    "ledger append --item demo-1 --kind decision.asked --payload '{\n"
+    '  "question": "Which database name?",\n'
+    '  "options": [\n'
+    '    {"label": "work", "description": "one file for work"},\n'
+    '    {"label": "home", "description": "one file for home"}\n'
+    "  ],\n"
+    '  "recommendation": "work",\n'
+    '  "scope": "the name of the first database"\n'
+    "}'\n"
+    "# appended  decision.asked  event=6  item=demo-1\n"
+)
+# The two commands docs/cli.md prints for several acceptance bullets. The block
+# uses shell syntax (`$'...'` and a command substitution) a shell would expand,
+# so the test derives from the constant the one value both forms stand for and
+# runs `spec set` with that value as an argument vector.
+ACCEPTANCE_BLOCK = (
+    'ledger spec set demo-1 --title "Quick start" --body "What to write" \\\n'
+    "  --acceptance $'- the examples run\\n- the output is checked'\n"
+    'ledger spec set demo-1 --title "Quick start" --body "What to write" \\\n'
+    "  --acceptance \"$(printf '%s\\n' '- the examples run' '- the output is checked')\"\n"
+)
+START_PYTHON_BLOCK = "python3 --version\n"
+START_PIPX_CHECK_BLOCK = "pipx --version\n"
+START_DB_BLOCK = "export LEDGER_DB=~/.local/share/ledger/work.db\n"
+START_ENV_BLOCK = "export LEDGER_OPERATOR=me\nexport LEDGER_HARNESS=cli\n"
+START_FIRST_WRITE_BLOCK = 'ledger new --type ticket --title "My first item" --id first-1\n'
+START_CLAIM_BLOCK = "ledger claim-system work\n"
+START_CHECK_BLOCK = "ledger doctor\nledger verify\n"
+START_CHECK_OUTPUT = (
+    "path: <the database path from step 4>\n"
+    "schema_version: N\n"
+    "search: missing (ledger index rebuilds it)\n"
+)
+START_HOOKS_BLOCK = (
+    "claude plugin marketplace add smithadifd/ledger\n"
+    "claude plugin install ledger-hooks@ledger-plugins\n"
+)
+
+
+def _pin(name: str, text: str, *, runs: bool, why: str, info: str = "sh", indent: str = "") -> Pin:
+    return Pin(name, Block(indent, info, text), runs, why)
+
+
+_OUTPUT = "printed output to compare by eye, not a command"
+_HOST = "changes the machine it runs on"
+
+# Each walked section, in page order, with every block it holds, in order.
+PINS: dict[str, tuple[Pin, ...]] = {
+    "README.md, Install": (
+        _pin("install pipx", PIPX_BLOCK, runs=False, why=f"installs pipx; {_HOST}"),
+        _pin("newest tag", TAG_BLOCK, runs=True, why="TAG_COMMAND, against a local repository"),
+        _pin("install at a tag", PIPX_INSTALL_BLOCK, runs=False,
+             why="installs from the network; the walk runs this checkout's ledger"),
+        _pin("install from a clone", CLONE_BLOCK, runs=False, why="clones from the network"),
+        _pin("shell environment", README_ENV_BLOCK, runs=False,
+             why="the values of start-here steps 4 and 5, which the walk runs"),
+        _pin("settings env block", SETTINGS_ENV_BLOCK, info="json", runs=False,
+             why="settings file content, not a command"),
+    ),
+    "README.md, Uninstall": (
+        _pin("remove the plugins", UNINSTALL_PLUGINS_BLOCK, indent="   ", runs=False,
+             why=f"removes Claude Code plugins; {_HOST}"),
+        _pin("remove the command", UNINSTALL_COMMAND_BLOCK, indent="   ", runs=False,
+             why=f"removes ledger and pipx; {_HOST}"),
+    ),
+    "README.md, Quick start": (
+        _pin("quick start", QUICK_START_BLOCK, runs=True,
+             why="QUICK_START_BLOCK, with /tmp/ledger-demo moved under the test's folder"),
+        _pin("doctor output", QUICK_START_DOCTOR_OUTPUT, info="text", runs=False, why=_OUTPUT),
+        _pin("card output", QUICK_START_CARD_OUTPUT, info="text", runs=False, why=_OUTPUT),
+    ),
+    "README.md, Asking a question": (
+        _pin("ask", ASK_BLOCK, runs=True, why="ASK_BLOCK, after a first item"),
+    ),
+    "docs/cli.md, spec set": (
+        _pin("acceptance", ACCEPTANCE_BLOCK, runs=True,
+             why="the one value both forms of ACCEPTANCE_BLOCK stand for, passed to spec set"),
+    ),
+    "docs/cli.md, Asking a question": (
+        _pin("ask", ASK_BLOCK, runs=True, why="ASK_BLOCK, after a first item"),
+    ),
+    "docs/start-here.md, before the first step": (),
+    "docs/start-here.md, ## 1. Python 3.11 or newer": (
+        _pin("python version", START_PYTHON_BLOCK, runs=False,
+             why="the interpreter running this suite is the check"),
+    ),
+    "docs/start-here.md, ## 2. pipx": (
+        _pin("pipx check", START_PIPX_CHECK_BLOCK, runs=False,
+             why="reads the machine's pipx, which the walk does not use"),
+        _pin("install pipx", PIPX_BLOCK, runs=False, why=f"installs pipx; {_HOST}"),
+    ),
+    "docs/start-here.md, ## 3. Install the ledger at a tag": (
+        _pin("newest tag", TAG_BLOCK, runs=True, why="TAG_COMMAND, against a local repository"),
+        _pin("install at a tag", PIPX_INSTALL_BLOCK, runs=False,
+             why="installs from the network; the walk runs this checkout's ledger"),
+    ),
+    "docs/start-here.md, ## 4. Decide where the database lives": (
+        _pin("database path", START_DB_BLOCK, runs=True, why="the walk, step 4"),
+    ),
+    "docs/start-here.md, ## 5. Set the environment": (
+        _pin("operator and harness", START_ENV_BLOCK, runs=True, why="the walk, step 5"),
+        _pin("settings env block", SETTINGS_ENV_BLOCK, info="json", runs=False,
+             why="settings file content, not a command"),
+    ),
+    "docs/start-here.md, ## 6. Make the first write": (
+        _pin("first write", START_FIRST_WRITE_BLOCK, runs=True, why="the walk, step 6"),
+    ),
+    "docs/start-here.md, ## 7. Claim the database for its system": (
+        _pin("claim", START_CLAIM_BLOCK, runs=True, why="the walk, step 7"),
+    ),
+    "docs/start-here.md, ## 8. Check with `doctor`": (
+        _pin("check", START_CHECK_BLOCK, runs=True, why="the walk, step 8"),
+        _pin("check output", START_CHECK_OUTPUT, info="text", runs=False, why=_OUTPUT),
+    ),
+    "docs/start-here.md, ## 9. Connect Claude Code: the hooks plugin": (
+        _pin("hooks plugin", START_HOOKS_BLOCK, runs=False,
+             why=f"installs a Claude Code plugin from the network; {_HOST}"),
+    ),
+    "docs/start-here.md, ## 10. Optional: the skills plugin": (),
+    "docs/start-here.md, ## 11. Optional: a scheduled export": (),
+    "docs/start-here.md, ## Next": (),
+}
+
+# Where each section of README.md and docs/cli.md starts and ends. docs/start-here.md
+# is walked whole, one section per `## ` heading.
+_SLICES = {
+    "README.md, Install": (README, "\n## Install\n", "\n## Upgrade\n"),
+    "README.md, Uninstall": (README, "\n## Uninstall\n", "\n## Quick start\n"),
+    "README.md, Quick start": (README, "\n## Quick start\n", "\n## The model\n"),
+    "README.md, Asking a question": (README, "**Asking a question.**", "\n## Verbs\n"),
+    "docs/cli.md, spec set": (CLI_PAGE, "**`spec set|show|diff ITEM ...`**", "\n**`"),
+    "docs/cli.md, Asking a question": (
+        CLI_PAGE, "**Asking a question: `append --kind decision.asked", "\n**`"
+    ),
+}
+_START_PREFIX = "docs/start-here.md, "
+
+
+def _slice(text: str, start: str, end: str) -> str:
+    assert text.count(start) == 1, f"{start!r} occurs {text.count(start)} times"
+    rest = text.split(start, 1)[1]
+    assert end in rest, f"nothing ends the section after {start!r} with {end!r}"
+    return rest.split(end, 1)[0]
+
+
+def _walked_sections() -> list[tuple[str, str]]:
+    sections = [
+        (name, _slice(page.read_text(encoding="utf-8"), start, end))
+        for name, (page, start, end) in _SLICES.items()
+    ]
+    parts = re.split(r"^(## .*)$", START.read_text(encoding="utf-8"), flags=re.MULTILINE)
+    sections.append((_START_PREFIX + "before the first step", parts[0]))
+    sections += [(_START_PREFIX + heading, body) for heading, body in zip(parts[1::2], parts[2::2])]
+    return sections
+
+
+def _start_section(number: int) -> str:
+    [name] = [name for name in PINS if name.startswith(f"{_START_PREFIX}## {number}. ")]
+    return name
+
+
+def _assert_pinned(*names: str) -> None:
+    """Each named section's blocks are exactly its pins, in order; fails by section and block."""
+    sections = dict(_walked_sections())
+    for name in names:
+        assert name in sections, f"{name}: the page no longer has this section"
+        found = _blocks(sections[name])
+        pins = PINS[name]
+        for index, (pin, block) in enumerate(zip(pins, found), 1):
+            assert block == pin.block, (
+                f"{name}: block {index} is not the pinned {pin.name!r} block: "
+                f"pinned {pin.block!r}, found {block!r}"
+            )
+        assert len(found) == len(pins), (
+            f"{name}: {len(found)} blocks found, {len(pins)} pinned; "
+            f"unpinned {found[len(pins):]!r}; missing {[pin.name for pin in pins[len(found):]]!r}"
+        )
+
+
+def test_every_block_of_a_walked_section_is_pinned_in_order() -> None:
+    names = [name for name, _ in _walked_sections()]
+    assert names == list(PINS), f"the walked sections are not the pinned ones: {names!r}"
+    _assert_pinned(*PINS)
+    for name, pins in PINS.items():
+        for pin in pins:
+            assert pin.why.strip(), f"{name}: {pin.name!r} gives no reason"
+
+
+def test_the_pins_marked_run_are_the_constants_the_walk_runs() -> None:
+    runs = [pin.block.text for pins in PINS.values() for pin in pins if pin.runs]
+    assert runs == [
+        TAG_BLOCK, QUICK_START_BLOCK, ASK_BLOCK, ACCEPTANCE_BLOCK, ASK_BLOCK, TAG_BLOCK,
+        START_DB_BLOCK, START_ENV_BLOCK, START_FIRST_WRITE_BLOCK, START_CLAIM_BLOCK,
+        START_CHECK_BLOCK,
+    ]
 
 
 def _start_steps() -> dict[int, str]:
@@ -582,126 +914,67 @@ def _empty_home(tmp_path: Path) -> tuple[Path, dict[str, str]]:
     return home, env
 
 
-class DocsGrammarError(AssertionError):
-    """A documented line is outside the closed grammar the walk runs."""
+_BASE_ENV = frozenset({"HOME", "PATH", "PYTHONPATH", "PYTHONIOENCODING"})
+_LEDGER_ENV = frozenset({"LEDGER_DB", "LEDGER_HARNESS", "LEDGER_OPERATOR"})
 
 
-def _refuse(reason: str, line: str) -> None:
-    raise DocsGrammarError(f"docs block refused ({reason}): {line!r}")
+def _constant_steps(constant: str, home: Path) -> list[tuple[str, ...]]:
+    """A block constant of this file as ("env", NAME, value) and ("run", program, args...) steps.
 
-
-# The environment names the ledger itself reads, and the characters a command may
-# not carry outside quotes: a shell would read each of them as syntax.
-WALK_VARIABLES = frozenset({"LEDGER_DB", "LEDGER_HARNESS", "LEDGER_OPERATOR"})
-BARE_METACHARACTERS = frozenset("|&;<>()`$\\{}*?[]!")
-
-
-def _commands(block: str) -> list[str]:
-    """Split a fenced block into command lines, refusing shell syntax by name.
-
-    A command ends at a newline outside quotes; a backslash before a newline joins
-    two lines; a `#` that starts a word begins a comment, which is dropped. Inside
-    single quotes any character is data. Inside double quotes `$`, a backtick and a
-    backslash are refused. Outside quotes every character of BARE_METACHARACTERS is
-    refused, and so is a `~` that does not start a path.
+    It is only ever given a constant defined above, never text read from a page.
+    A backslash before a newline joins two lines and a `#` that starts a word
+    begins a comment. A value that starts `~/` is put under the throwaway home.
     """
-    commands: list[str] = []
-    current: list[str] = []
-    quote = ""
-    i = 0
-
-    def flush() -> None:
-        line = "".join(current).strip()
-        if line:
-            commands.append(line)
-        current.clear()
-
-    while i < len(block):
-        ch = block[i]
-        if ord(ch) < 32 and ch not in "\n\t":
-            _refuse("control character", repr(ch))
-        if quote == "'":
-            current.append(ch)
-            if ch == "'":
-                quote = ""
-        elif quote == '"':
-            if ch in "$`\\":
-                _refuse("metacharacter", "".join(current) + ch)
-            current.append(ch)
-            if ch == '"':
-                quote = ""
-        elif ch in "'\"":
-            quote = ch
-            current.append(ch)
-        elif ch == "\\" and block[i + 1 : i + 2] == "\n":
-            i += 1
-        elif ch == "#" and (not current or current[-1] in " \t"):
-            while i + 1 < len(block) and block[i + 1] != "\n":
-                i += 1
-        elif ch == "\n":
-            flush()
-        elif ch == "~" and block[i + 1 : i + 2] == "/" and (not current or current[-1] in " \t="):
-            current.append(ch)
-        elif ch == "~" or ch in BARE_METACHARACTERS:
-            _refuse("metacharacter", "".join(current) + ch)
-        else:
-            current.append(ch)
-        i += 1
-    if quote:
-        _refuse("unterminated quote", "".join(current))
-    flush()
-    return commands
-
-
-def _inside(path: str, root: Path, line: str) -> None:
-    if not Path(path).is_absolute() or not Path(path).resolve().is_relative_to(root.resolve()):
-        _refuse("path outside the throwaway home", line)
-
-
-def _parse_block(block: str, home: Path) -> list[tuple[str, ...]]:
-    """Every command of a block as ("export", NAME, value) or ("run", program, args...).
-
-    The whole block is parsed first, so one refused line stops it before any of its
-    commands runs. Programs: `export` of the ledger's own variables, `mkdir -p` of a
-    path under the throwaway root, and `ledger <registered verb> ...`.
-    """
-    root = home.parent
-    verbs = set(discover_verbs())
     steps: list[tuple[str, ...]] = []
-    for command in _commands(block):
-        try:
-            words = shlex.split(command, comments=False, posix=True)
-        except ValueError:
-            _refuse("unparsable line", command)
-        program, args = words[0], words[1:]
-        if program == "export":
-            if len(args) != 1 or "=" not in args[0]:
-                _refuse("malformed export", command)
-            name, value = args[0].split("=", 1)
-            if name not in WALK_VARIABLES:
-                _refuse("unknown variable", command)
+    for line in constant.replace("\\\n", " ").splitlines():
+        words = shlex.split(line, comments=True)
+        if not words:
+            continue
+        if words[0] == "export":
+            [assignment] = words[1:]
+            name, value = assignment.split("=", 1)
+            assert name in _LEDGER_ENV, f"a constant exports {name!r}"
             if value.startswith("~/"):
                 value = str(home / value[2:])
-            if name == "LEDGER_DB" or value.startswith("/"):
-                _inside(value, root, command)
-            steps.append(("export", name, value))
-        elif program == "mkdir":
-            if len(args) != 2 or args[0] != "-p":
-                _refuse("malformed mkdir", command)
-            _inside(args[1], root, command)
-            steps.append(("run", "mkdir", "-p", args[1]))
-        elif program == "ledger":
-            if not args or args[0] not in verbs:
-                _refuse("unknown verb", command)
-            for arg in args:
-                if arg.startswith("~"):
-                    _refuse("tilde outside an export", command)
-                if arg.startswith("/"):
-                    _inside(arg, root, command)
-            steps.append(("run", "ledger", *args))
+            steps.append(("env", name, value))
+        elif words[0] in ("mkdir", "ledger"):
+            steps.append(("run", *words))
         else:
-            _refuse("unknown program", command)
+            raise AssertionError(f"a constant names a program the walk does not run: {line!r}")
     return steps
+
+
+def _quick_start_steps(demo: Path, home: Path) -> list[tuple[str, ...]]:
+    script = QUICK_START_BLOCK.replace("/tmp/ledger-demo", str(demo))
+    assert script != QUICK_START_BLOCK, "QUICK_START_BLOCK no longer uses /tmp/ledger-demo"
+    return _constant_steps(script, home)
+
+
+def _start_here_steps(home: Path) -> list[tuple[str, ...]]:
+    """Steps 4 to 8 of docs/start-here.md, in order, from their constants."""
+    walk = (START_DB_BLOCK, START_ENV_BLOCK, START_FIRST_WRITE_BLOCK, START_CLAIM_BLOCK, START_CHECK_BLOCK)
+    return [step for constant in walk for step in _constant_steps(constant, home)]
+
+
+def _ask_argv() -> list[str]:
+    argv = shlex.split(ASK_BLOCK, comments=True)
+    assert argv[:2] == ["ledger", "append"], argv
+    return argv
+
+
+def _acceptance_values() -> tuple[str, str]:
+    """The value each form of ACCEPTANCE_BLOCK stands for: `$'...'`, then `$(printf ...)`."""
+    [ansi] = re.findall(r"--acceptance \$'([^'\\]*(?:\\n[^'\\]*)*)'", ACCEPTANCE_BLOCK)
+    [items] = re.findall(r"\$\(printf '%s\\n'((?: '[^']*')+)\)", ACCEPTANCE_BLOCK)
+    # `$(...)` drops the final newline printf writes.
+    return ansi.replace("\\n", "\n"), "\n".join(shlex.split(items))
+
+
+def _tag_argvs() -> tuple[list[str], list[str]]:
+    listing, picking = (shlex.split(part) for part in TAG_COMMAND.split(" | "))
+    assert listing[0] == "git" and picking[0] == "sed", (listing, picking)
+    assert listing.count(TAG_REPOSITORY) == 1, listing
+    return listing, picking
 
 
 def _run_argv(argv: list[str], home: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
@@ -714,13 +987,14 @@ def _ledger(args: list[str], home: Path, env: dict[str, str]) -> subprocess.Comp
     return _run_argv(["ledger", *args], home, env)
 
 
-def _run_block(block: str, home: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
-    """Run a fenced block's commands in order as argument vectors; stop at the first failure."""
-    steps = _parse_block(block, home)
+def _run_steps(
+    steps: list[tuple[str, ...]], home: Path, env: dict[str, str]
+) -> subprocess.CompletedProcess:
+    """Run derived steps in order as argument vectors; stop at the first failure."""
     env = dict(env)
     stdout = stderr = ""
     for step in steps:
-        if step[0] == "export":
+        if step[0] == "env":
             env[step[1]] = step[2]
             continue
         done = _run_argv(list(step[1:]), home, env)
@@ -731,24 +1005,51 @@ def _run_block(block: str, home: Path, env: dict[str, str]) -> subprocess.Comple
     return subprocess.CompletedProcess([], 0, stdout, stderr)
 
 
+def test_every_run_derives_its_commands_from_its_own_constant(tmp_path, monkeypatch) -> None:
+    module = sys.modules[__name__]
+    home = tmp_path / "home"
+    sentinel = ("run", "ledger", "sentinel-verb")
+    for name in (
+        "QUICK_START_BLOCK", "START_DB_BLOCK", "START_ENV_BLOCK", "START_FIRST_WRITE_BLOCK",
+        "START_CLAIM_BLOCK", "START_CHECK_BLOCK",
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(module, name, getattr(module, name) + "ledger sentinel-verb\n")
+            if name == "QUICK_START_BLOCK":
+                derived = _quick_start_steps(tmp_path / "demo", home)
+            else:
+                derived = _start_here_steps(home)
+            assert sentinel in derived, f"the walk's commands do not follow {name}"
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "ASK_BLOCK", ASK_BLOCK.replace("Which database name?", "Sentinel?"))
+        assert '"question": "Sentinel?"' in _ask_argv()[-1], "the ask does not follow ASK_BLOCK"
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "ACCEPTANCE_BLOCK", ACCEPTANCE_BLOCK.replace("examples run", "sentinel"))
+        assert all("sentinel" in value for value in _acceptance_values()), (
+            "the acceptance value does not follow ACCEPTANCE_BLOCK"
+        )
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "TAG_COMMAND", TAG_COMMAND.replace("-v:refname", "v:refname"))
+        assert "--sort=v:refname" in _tag_argvs()[0], "the tag command does not follow TAG_COMMAND"
+
+
 def test_the_readme_quick_start_runs_as_printed_in_an_empty_home(tmp_path) -> None:
-    section = _between(README.read_text(encoding="utf-8"), "\n## Quick start\n", "\n## ")
-    [block] = _fenced(section, "sh")
+    _assert_pinned("README.md, Quick start")
+    section = _slice(README.read_text(encoding="utf-8"), "\n## Quick start\n", "\n## The model\n")
     lead = section.split("```sh", 1)[0]
     assert "throwaway" in lead, "the quick start does not call its values throwaway"
     assert "(#2-set-the-environment)" in lead, "the quick start does not point at step 2"
-    assert "throwaway" in block, "the quick start's values are not marked as throwaway"
+    assert "throwaway" in QUICK_START_BLOCK, "the quick start's values are not marked as throwaway"
     demo = tmp_path / "demo"
-    script = block.replace("/tmp/ledger-demo", str(demo))
-    assert script != block, "the quick start no longer uses /tmp/ledger-demo"
     home, env = _empty_home(tmp_path)
-    done = _run_block(script, home, env)
+    done = _run_steps(_quick_start_steps(demo, home), home, env)
     assert done.returncode == 0, (done.stdout, done.stderr)
     assert "ok events=3" in done.stdout, done.stdout
     assert (demo / "ledger.db").is_file()
 
 
 def test_start_here_setup_steps_run_as_printed_in_an_empty_home(tmp_path) -> None:
+    _assert_pinned(*(name for name in PINS if name.startswith(_START_PREFIX)))
     steps = _start_steps()
     titles = {number: body.split("\n", 1)[0] for number, body in steps.items()}
     for number, word in (
@@ -756,13 +1057,12 @@ def test_start_here_setup_steps_run_as_printed_in_an_empty_home(tmp_path) -> Non
         (6, "first write"), (7, "Claim"), (8, "Check"), (9, "hooks"), (10, "skills"),
     ):
         assert word in titles[number], (number, titles.get(number))
-    script = "\n".join(
-        block for number in range(4, 9) for block in _fenced(steps[number], "sh")
-    )
-    assert "ledger new --type ticket" in script and "ledger doctor" in script
-    assert "mkdir" not in script, "the walk needs no folder made by hand"
     home, env = _empty_home(tmp_path)
-    done = _run_block(script, home, env)
+    walk = _start_here_steps(home)
+    assert ("run", "ledger", "new", "--type", "ticket") == walk[3][:5], walk
+    assert ("run", "ledger", "doctor") in walk, walk
+    assert all(step[1] != "mkdir" for step in walk), "the walk needs no folder made by hand"
+    done = _run_steps(walk, home, env)
     assert done.returncode == 0, (done.stdout, done.stderr)
     database = home / ".local" / "share" / "ledger" / "work.db"
     assert database.is_file()
@@ -781,149 +1081,44 @@ def test_a_check_before_the_first_write_fails_as_start_here_says(tmp_path) -> No
     assert "database does not exist" in done.stderr
 
 
-def test_the_walk_runs_each_documented_command_as_an_argument_vector_never_a_shell(
+def test_the_walk_runs_each_command_as_an_argument_vector_in_the_home_never_a_shell(
     tmp_path, monkeypatch
 ) -> None:
-    section = _between(README.read_text(encoding="utf-8"), "\n## Quick start\n", "\n## ")
-    [block] = _fenced(section, "sh")
-    script = block.replace("/tmp/ledger-demo", str(tmp_path / "demo"))
+    _assert_pinned("README.md, Quick start")
     home, env = _empty_home(tmp_path)
     real = subprocess.run
     calls: list[list[str]] = []
 
     def recorder(args, **kwargs):
         assert isinstance(args, list) and all(isinstance(part, str) for part in args), args
-        assert kwargs.get("shell", False) is False, f"a documented command ran through a shell: {args}"
+        assert kwargs.get("shell", False) is False, f"a command ran through a shell: {args}"
+        assert kwargs.get("cwd") == home, f"a command ran outside the throwaway home: {args}"
+        assert set(kwargs["env"]) <= _BASE_ENV | _LEDGER_ENV, sorted(kwargs["env"])
         calls.append(args)
         return real(args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", recorder)
-    done = _run_block(script, home, env)
+    done = _run_steps(_quick_start_steps(tmp_path / "demo", home), home, env)
     assert done.returncode == 0, (done.stdout, done.stderr)
     assert [call[0] for call in calls][:2] == ["mkdir", "ledger"], calls
     assert {call[0] for call in calls} == {"mkdir", "ledger"}, calls
     assert len(calls) == 8, calls
 
 
-_HOSTILE_LINES = {
-    "metacharacter": [
-        "ledger doctor | tee MARKER",
-        "ledger doctor ; touch MARKER",
-        "ledger doctor && touch MARKER",
-        "ledger doctor || touch MARKER",
-        "ledger doctor > MARKER",
-        "ledger doctor 2> MARKER",
-        "ledger doctor < MARKER",
-        "ledger doctor &",
-        "ledger note demo-1 --text $(touch MARKER)",
-        "ledger note demo-1 --text `touch MARKER`",
-        'ledger note demo-1 --text "$(touch MARKER)"',
-        'ledger note demo-1 --text "`touch MARKER`"',
-        "ledger note demo-1 --text $HOME",
-        "ledger note demo-1 --text ${IFS}",
-        "ledger note demo-1 --text a\\ b",
-        'ledger note demo-1 --text "a\\"b"',
-        "ledger note demo-1 --text *",
-        "ledger note demo-1 --text ~root",
-        "(touch MARKER)",
-        "{ touch MARKER; }",
-    ],
-    "control character": ["ledger doctor\rtouch MARKER", "ledger doctor\x00"],
-    "unknown program": [
-        "touch MARKER",
-        "printf probe",
-        "bash -lc 'touch MARKER'",
-        "sh -ec 'touch MARKER'",
-        "python3 -c 'print(1)'",
-        "./ledger doctor",
-        "/usr/bin/touch MARKER",
-        "env touch MARKER",
-        "cd /",
-    ],
-    "unknown variable": [
-        "export PATH=/tmp",
-        "export HOME=/",
-        "export BASH_ENV=MARKER",
-        "export LD_PRELOAD=MARKER",
-        "export PYTHONPATH=MARKER",
-        "export LEDGER_DB_EXTRA=x",
-    ],
-    "malformed export": ["export LEDGER_HARNESS", "export LEDGER_HARNESS=cli LEDGER_OPERATOR=me"],
-    "malformed mkdir": ["mkdir MARKER", "mkdir -p", "mkdir -p a b"],
-    "unknown verb": ["ledger frobnicate", "ledger --version", "ledger"],
-    "path outside the throwaway home": [
-        "mkdir -p /etc/ledger-probe",
-        "export LEDGER_DB=/etc/ledger-probe.db",
-        "export LEDGER_DB=relative.db",
-        "ledger note demo-1 --text x --db /etc/ledger-probe.db",
-        "ledger doctor --db /etc/ledger-probe.db",
-    ],
-    "tilde outside an export": ["ledger doctor --db ~/x.db"],
-    "unterminated quote": ["ledger note demo-1 --text 'abc", 'ledger note demo-1 --text "abc'],
-}
-
-
-def test_a_documented_line_outside_the_grammar_fails_by_name_and_runs_nothing(tmp_path) -> None:
-    home, env = _empty_home(tmp_path)
-    marker = tmp_path / "marker"
-    database = tmp_path / "ledger.db"
-    opening = (
-        f"export LEDGER_DB={database}\n"
-        "export LEDGER_HARNESS=cli\n"
-        "export LEDGER_OPERATOR=me\n"
-        "ledger new --type ticket --title T --id demo-1\n"
-    )
-    cases = [(reason, line) for reason, lines in _HOSTILE_LINES.items() for line in lines]
-    assert len(cases) > 40
-    for reason, line in cases:
-        line = line.replace("MARKER", str(marker))
-        with pytest.raises(DocsGrammarError, match=re.escape(f"({reason})")):
-            _run_block(opening + line + "\nledger doctor\n", home, env)
-        assert not marker.exists(), f"{line!r} ran"
-        assert not database.exists(), f"{line!r} let an earlier command of its block run"
-    # The same opening with no hostile line is accepted and does run.
-    done = _run_block(opening + "ledger doctor\n", home, env)
-    assert done.returncode == 0, (done.stdout, done.stderr)
-    assert database.is_file()
-
-
-def test_the_grammar_accepts_comments_continuations_and_quoted_data_the_docs_print() -> None:
-    block = (
-        "export LEDGER_HARNESS=cli   # who writes; real: <system>.db | x\n"
-        "# a whole-line comment with ; and $(x)\n"
-        "ledger note demo-1 \\\n"
-        "  --text 'a | b ; c $(d) `e`'\n"
-        'ledger note demo-1 --text "a | b; c"\n'
-    )
-    assert _commands(block) == [
-        "export LEDGER_HARNESS=cli",
-        "ledger note demo-1   --text 'a | b ; c $(d) `e`'",
-        'ledger note demo-1 --text "a | b; c"',
-    ]
-
-
-# The one pipeline the docs print. It is a closed shape, compared as text with the
-# documented block: a page that prints anything else fails by name. The pipe is
-# never given to a shell; the test splits the constant at its pipe and runs the two
-# halves as argument vectors, the first one's output fed to the second.
-TAG_COMMAND = (
-    "git ls-remote --tags --refs --sort=-v:refname https://github.com/smithadifd/ledger 'v*'"
-    " | sed -n '1s|.*refs/tags/||p'"
-)
-TAG_REPOSITORY = "https://github.com/smithadifd/ledger"
-
-
 def _documented_tag_command(text: str, name: str) -> str:
     commands = [b for b in _fenced(text, "sh") if "ls-remote" in b]
     assert len(commands) == 1, name
-    assert commands[0].strip() == TAG_COMMAND, (
+    assert commands[0] == TAG_BLOCK, (
         f"{name}: the tag command is not the one closed shape this test knows: "
         f"{commands[0]!r}"
     )
-    return commands[0].strip()
+    return TAG_COMMAND
 
 
 def test_the_printed_tag_command_prints_the_newest_release_tag(tmp_path) -> None:
+    _assert_pinned("README.md, Install", _start_section(3))
+    for page in (README, START):
+        _documented_tag_command(page.read_text(encoding="utf-8"), page.name)
     remote = tmp_path / "remote"
     remote.mkdir()
     env = {
@@ -941,24 +1136,19 @@ def test_the_printed_tag_command_prints_the_newest_release_tag(tmp_path) -> None
         subprocess.run(
             [*git, "tag", tag], cwd=remote, env=env, check=True, capture_output=True, shell=False
         )
-    listing, picking = (shlex.split(part) for part in TAG_COMMAND.split(" | "))
-    assert listing[0] == "git" and picking[0] == "sed", (listing, picking)
-    assert listing.count(TAG_REPOSITORY) == 1, listing
+    listing, picking = _tag_argvs()
     listing[listing.index(TAG_REPOSITORY)] = str(remote)
-    for page in (README, START):
-        _documented_tag_command(page.read_text(encoding="utf-8"), page.name)
-        listed = subprocess.run(
-            listing, env=env, capture_output=True, text=True, timeout=60, shell=False
-        )
-        assert listed.returncode == 0, (page.name, listed.stderr)
-        picked = subprocess.run(
-            picking, input=listed.stdout, env=env, capture_output=True, text=True,
-            timeout=60, shell=False,
-        )
-        assert (picked.returncode, picked.stdout) == (0, "v0.10.0\n"), (
-            f"{page.name}: the tag command printed {picked.stdout!r} ({picked.stderr!r}), "
-            "not the newest tag"
-        )
+    listed = subprocess.run(
+        listing, env=env, capture_output=True, text=True, timeout=60, shell=False
+    )
+    assert listed.returncode == 0, listed.stderr
+    picked = subprocess.run(
+        picking, input=listed.stdout, env=env, capture_output=True, text=True,
+        timeout=60, shell=False,
+    )
+    assert (picked.returncode, picked.stdout) == (0, "v0.10.0\n"), (
+        f"the tag command printed {picked.stdout!r} ({picked.stderr!r}), not the newest tag"
+    )
 
 
 def test_a_tag_command_off_the_closed_shape_fails_by_name() -> None:
@@ -968,6 +1158,7 @@ def test_a_tag_command_off_the_closed_shape_fails_by_name() -> None:
             TAG_COMMAND + " ; touch marker",
             TAG_COMMAND.replace(" | sed", " | tee marker | sed"),
             TAG_COMMAND.replace("git ls-remote", "git -c core.pager=x ls-remote"),
+            TAG_COMMAND + " ",
         ):
             changed = text.replace(TAG_COMMAND, planted)
             assert changed != text
@@ -1045,27 +1236,24 @@ def test_both_docs_set_the_environment_one_way() -> None:
 
 
 def test_the_documented_ask_is_accepted_and_the_picker_can_show_it(tmp_path) -> None:
+    _assert_pinned("README.md, Asking a question", "docs/cli.md, Asking a question")
     schema = SCHEMAS[("decision.asked", 1)]
     assert set(schema["required"]) == {"question", "options"}
     assert {"recommendation", "scope"} <= set(schema["optional"])
-    for index, page in enumerate((README, CLI_PAGE)):
+    for page in (README, CLI_PAGE):
         text = page.read_text(encoding="utf-8")
-        asks = [block for block in _fenced(text, "sh") if "--kind decision.asked" in block]
-        assert len(asks) == 1, page.name
         for field in ("question", "options", "label", "description", "scope", "recommendation"):
             assert f"`{field}`" in text, (page.name, field)
-        home, env = _empty_home(tmp_path / f"page{index}")
-        env.update(
-            LEDGER_DB=str(home / "ledger.db"), LEDGER_HARNESS="cli", LEDGER_OPERATOR="me"
-        )
-        item = _ledger(["new", "--type", "ticket", "--title", "T", "--id", "demo-1"], home, env)
-        assert item.returncode == 0, (page.name, item.stdout, item.stderr)
-        made = _run_block(asks[0], home, env)
-        assert made.returncode == 0, (page.name, made.stdout, made.stderr)
-        event = re.findall(r"event=(\d+)", made.stdout)[-1]
-        shown = _ledger(["ask-display", event], home, env)
-        assert shown.returncode == 0, (page.name, shown.stdout, shown.stderr)
-        assert f"[ask {event}] Which database name? (scope: the name of the first database)" in shown.stdout
+    home, env = _empty_home(tmp_path)
+    env.update(LEDGER_DB=str(home / "ledger.db"), LEDGER_HARNESS="cli", LEDGER_OPERATOR="me")
+    item = _ledger(["new", "--type", "ticket", "--title", "T", "--id", "demo-1"], home, env)
+    assert item.returncode == 0, (item.stdout, item.stderr)
+    made = _run_argv(_ask_argv(), home, env)
+    assert made.returncode == 0, (made.stdout, made.stderr)
+    event = re.findall(r"event=(\d+)", made.stdout)[-1]
+    shown = _ledger(["ask-display", event], home, env)
+    assert shown.returncode == 0, (shown.stdout, shown.stderr)
+    assert f"[ask {event}] Which database name? (scope: the name of the first database)" in shown.stdout
     assert "under `claude -p`" in _flat(README)
     assert "interactive" in _flat(README) and "capture_missing" in _flat(README)
 
@@ -1103,24 +1291,12 @@ def test_decisions_lists_records_not_elections_and_the_docs_say_so(tmp_path) -> 
     assert "It does not list elections" in entry and "card" in entry and "`search`" in entry
 
 
-# The two commands docs/cli.md prints for several acceptance bullets. The block uses
-# shell syntax (`$'...'` and a command substitution) that the walk's grammar refuses,
-# so it is a closed shape compared as text; the test then derives the one value each
-# form stands for and runs `spec set` with that value as an argument vector.
-ACCEPTANCE_BLOCK = (
-    'ledger spec set demo-1 --title "Quick start" --body "What to write" \\\n'
-    "  --acceptance $'- the examples run\\n- the output is checked'\n"
-    'ledger spec set demo-1 --title "Quick start" --body "What to write" \\\n'
-    "  --acceptance \"$(printf '%s\\n' '- the examples run' '- the output is checked')\"\n"
-)
-
-
 def _documented_acceptance_block(text: str) -> str:
     [block] = [b for b in _fenced(text, "sh") if "--acceptance" in b]
     assert block == ACCEPTANCE_BLOCK, (
         f"docs/cli.md prints a different acceptance block than the closed shape: {block!r}"
     )
-    return block
+    return ACCEPTANCE_BLOCK
 
 
 def test_an_acceptance_block_off_the_closed_shape_fails_by_name() -> None:
@@ -1136,12 +1312,10 @@ def test_an_acceptance_block_off_the_closed_shape_fails_by_name() -> None:
 
 
 def test_several_acceptance_bullets_pass_as_one_value_as_documented(tmp_path) -> None:
+    _assert_pinned("docs/cli.md, spec set")
     text = CLI_PAGE.read_text(encoding="utf-8")
-    block = _documented_acceptance_block(text)
-    [ansi] = re.findall(r"--acceptance \$'([^'\\]*(?:\\n[^'\\]*)*)'", block)
-    from_ansi = ansi.replace("\\n", "\n")
-    [items] = re.findall(r"\$\(printf '%s\\n'((?: '[^']*')+)\)", block)
-    from_printf = "\n".join(shlex.split(items))  # `$(...)` drops the final newline
+    _documented_acceptance_block(text)
+    from_ansi, from_printf = _acceptance_values()
     value = "- the examples run\n- the output is checked"
     assert from_ansi == from_printf == value, (from_ansi, from_printf)
     home, env = _empty_home(tmp_path)
@@ -1150,10 +1324,10 @@ def test_several_acceptance_bullets_pass_as_one_value_as_documented(tmp_path) ->
     assert made.returncode == 0, (made.stdout, made.stderr)
     spec = [
         "spec", "set", "demo-1", "--title", "Quick start", "--body", "What to write",
-        "--acceptance", value,
+        "--acceptance", from_ansi,
     ]
     first = _ledger(spec, home, env)
-    second = _ledger(spec, home, env)
+    second = _ledger(spec[:-1] + [from_printf], home, env)
     assert first.returncode == 0 and second.returncode == 0, (first.stderr, second.stderr)
     assert "\tv1\tevent=" in first.stdout and "\tv1\tunchanged" in second.stdout, (
         first.stdout, second.stdout
