@@ -14,6 +14,9 @@ Two keys in the ``config.json`` beside the database:
 Every skip is decided before the database is opened, so none creates it. Each
 case runs the CLI as a hook does, a subprocess with the hook input on stdin,
 except the few that patch the built-in default and so run in this process.
+Picker capture honours ``capture_optout_paths`` too and never reads
+``capture_skip_prefixes``; its opt-out cases are in
+``test_capture_picker_optout.py``.
 """
 from __future__ import annotations
 
@@ -566,8 +569,10 @@ def test_an_unreadable_config_refuses_a_prompt_that_is_not_a_frame(db: Path) -> 
     assert not db.exists()
 
 
-def test_picker_capture_ignores_both_keys(db: Path, optout_dir: Path) -> None:
-    write_config(db, {"capture_optout_paths": "not an array", "capture_skip_prefixes": 1})
+def test_picker_capture_ignores_the_prefix_list(db: Path, optout_dir: Path) -> None:
+    # An invalid prefix list never stops a picker answer; the cwd opt-out does
+    # apply to one (test_capture_picker_optout.py).
+    write_config(db, {"capture_skip_prefixes": 1})
     hook = {
         "session_id": "sess-optout", "cwd": str(optout_dir), "hook_event_name": "PostToolUse",
         "tool_name": "AskUserQuestion", "tool_use_id": "toolu_optout",

@@ -84,21 +84,24 @@ An optional `config.json` beside the database:
   boolean (`"false"`, `0` and `null` included), or a `config.json` that cannot
   be read or is not a JSON object, makes `capture --kind prompt` refuse with
   `capture_config` (exit 3) and write nothing, so a typo never turns a `false`
-  into stored prompts; picker capture still works. Prompt capture decides
+  into stored prompts. A bad value of this key never stops picker capture,
+  but a `config.json` that cannot be read or is not a JSON object refuses it
+  too, since its `capture_optout_paths` cannot be decided. Both kinds decide
   with one `lstat`: no entry named `config.json` means no file; any entry (a
   file, a link, anything else) is opened and read once, and any failure to
   open, read or parse it refuses `capture_config` with the cause it saw. A
   link whose target is missing, loops or vanishes before the open counts as
   unreadable here, though `search` and `claim` read such a link as no file.
-- `capture_optout_paths`: absolute paths whose sessions' prompts are never
-  captured: `capture --kind prompt` writes nothing and prints `skipped` with
-  reason `cwd_optout` when the hook input's `cwd` is one of them or lies under
-  one. No key, or an empty array, opts nothing out. Any other value (not an
-  array, or an entry that is not a string, is empty or is not an absolute
-  path; `~` is not expanded, so `~/x` is not absolute) refuses with
-  `capture_config` (exit 3) and writes nothing: a fallback here would store
-  the prompts of a folder you opted out. Name the folder here, outside any
-  repository, so a public checkout never has to.
+- `capture_optout_paths`: absolute paths whose sessions' prompts and picker
+  answers are never captured: `capture --kind prompt` and `capture --kind
+  picker` write nothing and print `skipped` with reason `cwd_optout` when the
+  hook input's `cwd` is one of them or lies under one. No key, or an empty
+  array, opts nothing out. Any other value (not an array, or an entry that
+  is not a string, is empty or is not an absolute path; `~` is not expanded,
+  so `~/x` is not absolute) refuses with `capture_config` (exit 3) and
+  writes nothing: a fallback here would store the prompts and answers of a
+  folder you opted out. Name the folder here, outside any repository, so a
+  public checkout never has to.
 - `capture_skip_prefixes`: prompts that start with one of these strings are
   text a tool injected, not the person's: `capture --kind prompt` writes
   nothing and prints `skipped` with reason `injected`. An array of non-empty
@@ -513,6 +516,20 @@ check. Each prints `skipped`, a tab and the reason; `--json` carries
   [Configuration file](#configuration-file)). A `config.json` entry that
   cannot be opened, read or parsed (a link that does not resolve included) or
   holds a non-boolean value refuses `capture_config` instead.
+
+`--kind picker` honours the same opt-out and reads no other key. After the
+picker input is checked (so `capture_not_picker` and `capture_bad_input`
+still come first), `config.json` is read once, and the `cwd_optout` and
+`cwd_unverified` skips above apply to the hook input's `cwd` by the same
+rules, before the database is opened, so neither creates it. Both print
+`skipped`, a tab and the reason, as above. `capture_prompts` and
+`capture_skip_prefixes` never apply to a picker answer: `false` or an
+invalid value in either leaves picker capture on. A `config.json` entry
+that cannot be opened, read or parsed, or is not a JSON object, or an
+invalid `capture_optout_paths`, refuses `capture_config` (exit 3) and
+writes nothing, because the opt-out cannot be decided; with a path
+configured, a `cwd` that is not an absolute path is refused
+`capture_bad_input`.
 
 Re-running one hook input: a picker input always carries `tool_use_id`, and
 its key is `capture:picker:<tool_use_id>`; a prompt input that carries
