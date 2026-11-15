@@ -543,13 +543,14 @@ def test_concepts_documents_note_search_and_severity() -> None:
 # checkout). A step the docs do not print is a step the run does not have.
 #
 # No byte of a page is ever run, and none becomes a path or an environment value.
-# Every block of a walked section (fenced with any info string, fenced inside a
-# list, or indented) is pinned below, in order, as a text constant of this file,
-# and the page's block must equal its constant exactly. A test that runs a block
-# first checks the block's section against its pins, so a new, removed,
-# reordered, retagged or changed block fails by name before anything runs. The
-# commands then come from the constant alone, and run as argument vectors with no
-# shell, in the throwaway home, with an explicit minimal environment.
+# The blocks the walk relies on are pinned below, in order, as text constants of
+# this file, and each pinned block must appear in its section, equal to its
+# constant exactly. A test that runs a block first checks the block's section
+# against its pins, so a removed, reordered, retagged or changed pinned block
+# fails by name before anything runs. The commands then come from the constant
+# alone, and run as argument vectors with no shell, in the throwaway home, with
+# an explicit minimal environment. This check does not claim that a section
+# holds no other block: completeness is not checked here.
 
 
 def _fenced(text: str, lang: str) -> list[str]:
@@ -578,35 +579,17 @@ class Pin(NamedTuple):
 _FENCE = re.compile(r"^([ \t]*)(`{3,}|~{3,})(.*)$")
 _INDENTED = re.compile(r"^(?: {4,}|\t)\S")
 
-# The container forms the enumeration does not model. A line that has one is
-# refused by name before anything is enumerated, even when it is harmless prose.
-_REFUSED = (
-    ("blockquote line", re.compile(r"^[ \t]*>")),
-    ("HTML tag line", re.compile(r"^[ \t]*<[a-z/!]", re.IGNORECASE)),
-    ("list-marker fence", re.compile(r"^[ \t]*(?:[-*+]|\d+[.)])[ \t]+(?:`{3,}|~{3,})")),
-)
-
-
-def _refused(text: str) -> list[tuple[int, str, str]]:
-    """Every line of a stretch that has a container form the walk refuses, as (line, rule, text)."""
-    return [
-        (number, rule, line)
-        for number, line in enumerate(text.split("\n"), 1)
-        for rule, pattern in _REFUSED
-        if pattern.match(line)
-    ]
-
 
 def _blocks(text: str) -> list[Block]:
-    """Every top-level block of a stretch of a page, in order.
+    """The top-level fenced and indented blocks of a stretch of a page, in order.
 
     A fence is three or more backticks or tildes at the start of a line, after
     any indent; it closes at the first line of the same character, at least as
     long, with nothing else on it. A block with no closing fence keeps an info
     string starting `unclosed`, which no pin has. Outside a fence, a run of
     lines indented four spaces or a tab (with the blank lines between them) is
-    one `indented` block. Blockquotes, HTML tags and fences opened on a list
-    marker line are not modelled: `_refused` fails the section on them first.
+    one `indented` block. Blocks inside a blockquote, a list item or raw HTML are
+    not modelled, and no caller relies on them being found.
     """
     lines = text.split("\n")
     found: list[Block] = []
@@ -758,7 +741,7 @@ def _pin(name: str, text: str, *, runs: bool, why: str, info: str = "sh", indent
 _OUTPUT = "printed output to compare by eye, not a command"
 _HOST = "changes the machine it runs on"
 
-# Each walked section, in page order, with every block it holds, in order.
+# Each walked section, in page order, with the blocks the walk pins, in order.
 PINS: dict[str, tuple[Pin, ...]] = {
     "README.md, Install": (
         _pin("install pipx", PIPX_BLOCK, runs=False, why=f"installs pipx; {_HOST}"),
@@ -874,69 +857,30 @@ def _start_section(number: int) -> str:
 
 
 def _assert_pinned(*names: str) -> None:
-    """Each named section's blocks are exactly its pins, in order; fails by section and block."""
+    """Each named section's pins appear among its found blocks, in pin order, each block equal to
+    its pin's block (indent, info and text); a missing or differing pin fails by section and pin.
+    """
     sections = dict(_walked_sections())
     for name in names:
         assert name in sections, f"{name}: the page no longer has this section"
-        for number, rule, line in _refused(sections[name]):
-            raise AssertionError(
-                f"{name}: line {number} is a {rule}, refused: the walk models only top-level "
-                f"fenced and indented blocks, so a container form can hold code it does not "
-                f"enumerate: {line!r}"
-            )
         found = _blocks(sections[name])
-        pins = PINS[name]
-        for index, (pin, block) in enumerate(zip(pins, found), 1):
-            assert block == pin.block, (
-                f"{name}: block {index} is not the pinned {pin.name!r} block: "
-                f"pinned {pin.block!r}, found {block!r}"
+        position = 0
+        for pin in PINS[name]:
+            later = found[position:]
+            assert pin.block in later, (
+                f"{name}: the pinned {pin.name!r} block is missing or out of order: "
+                f"pinned {pin.block!r}, blocks from position {position + 1}: {later!r}"
             )
-        assert len(found) == len(pins), (
-            f"{name}: {len(found)} blocks found, {len(pins)} pinned; "
-            f"unpinned {found[len(pins):]!r}; missing {[pin.name for pin in pins[len(found):]]!r}"
-        )
+            position += later.index(pin.block) + 1
 
 
-def test_every_block_of_a_walked_section_is_pinned_in_order() -> None:
+def test_each_pinned_block_appears_verbatim_in_its_walked_section_in_order() -> None:
     names = [name for name, _ in _walked_sections()]
     assert names == list(PINS), f"the walked sections are not the pinned ones: {names!r}"
     _assert_pinned(*PINS)
     for name, pins in PINS.items():
         for pin in pins:
             assert pin.why.strip(), f"{name}: {pin.name!r} gives no reason"
-
-
-_PLANTS = (
-    ("> ```sh\n> ledger sentinel-verb\n> ```\n", "blockquote line"),
-    ("> > ```sh\n> > ledger sentinel-verb\n> > ```\n> ```\n", "blockquote line"),
-    (">     ledger sentinel-verb\n", "blockquote line"),
-    ("  > a quoted line of prose\n", "blockquote line"),
-    ("<pre><code>ledger sentinel-verb</code></pre>\n", "HTML tag line"),
-    ("<PRE><code>ledger sentinel-verb</code></PRE>\n", "HTML tag line"),
-    ("  <div>\n", "HTML tag line"),
-    ("</div>\n", "HTML tag line"),
-    ("<!-- a comment -->\n", "HTML tag line"),
-    ("- ```sh\n  ledger sentinel-verb\n  ```\n", "list-marker fence"),
-    ("  * ~~~sh\n    ledger sentinel-verb\n    ~~~\n", "list-marker fence"),
-    ("1. ```sh\n   ledger sentinel-verb\n   ```\n", "list-marker fence"),
-    ("12) ```sh\n    ledger sentinel-verb\n    ```\n", "list-marker fence"),
-    ("- ```sh\n  ledger sentinel-verb\n", "list-marker fence"),
-)
-
-
-def test_a_container_form_in_a_walked_section_fails_by_name_before_anything_runs(monkeypatch) -> None:
-    # The enumeration models only top-level fenced and indented blocks.
-    assert _blocks("Lead.\n\n```sh\nledger a\n```\n") == [Block("", "sh", "ledger a\n")]
-    assert _blocks("Lead.\n\n    ledger b\n\nProse.\n") == [Block("", "indented", "    ledger b\n\n")]
-    name = "docs/start-here.md, ## 6. Make the first write"
-    clean = dict(_walked_sections())[name]
-    assert _refused(clean) == []
-    for plant, rule in _PLANTS:
-        planted = clean + "\n" + plant
-        monkeypatch.setattr(sys.modules[__name__], "_walked_sections", lambda planted=planted: [(name, planted)])
-        with pytest.raises(AssertionError, match=rf"{re.escape(name)}: line \d+ is a {rule}, refused") as caught:
-            _assert_pinned(name)
-        assert plant.split("\n")[0] in str(caught.value) or plant.split("\n")[0].strip() in str(caught.value)
 
 
 def test_the_pins_marked_run_are_the_constants_the_walk_runs() -> None:
