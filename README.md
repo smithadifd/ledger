@@ -393,7 +393,7 @@ trace.
 
 ## For agents
 
-An agent that has only the installed package should learn from the ledger itself that it exists and what to write. [docs/agent-contract.md](docs/agent-contract.md) is the one page for it: what to write without asking, the reading order, the actor stamps and how to end a session. `ledger resume --brief` prints its short form followed by every open item's stop point and the command to resume it, so a session-start hook can put both into the agent's context. If open items have no stop, it reports their count and points to `ledger query` instead of claiming there are no open items.
+An agent that has only the installed package should learn from the ledger itself that it exists and what to write. [docs/agent-contract.md](docs/agent-contract.md) is the one page for it: what to write without asking, the reading order, the actor stamps and how to end a session. `ledger resume --brief` prints the ledger version line (what `ledger --version` prints), then the contract's short form, then every open item's stop point and the command to resume it, so a session-start hook can put the version, the contract and the stops into the agent's context. If open items have no stop, it reports their count and points to `ledger query` instead of claiming there are no open items.
 
 ## Claude Code plugin
 
