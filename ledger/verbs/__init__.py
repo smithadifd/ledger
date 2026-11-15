@@ -23,7 +23,11 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping
 
+from ledger import __version__
 from ledger.store import Event, Ledger, open_ledger
+
+# The one line `ledger --version` prints and `ledger resume --brief` prints first.
+VERSION_LINE = f"ledger {__version__}"
 
 DEFAULT_LIMIT = 50
 
