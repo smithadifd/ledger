@@ -727,7 +727,10 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
     # which checks LEDGER_HARNESS itself; the ``doc`` branch below runs only
     # ``doc add``.
     assert "doc" not in cli_writers
-    assert set(action_names) == cli_writers | {"restore", "doc"}
+    # ``spec`` is likewise a read verb (show, diff) whose one write action,
+    # ``set``, checks LEDGER_HARNESS itself.
+    assert "spec" not in cli_writers
+    assert set(action_names) == cli_writers | {"restore", "doc", "spec"}
 
     for sequence in range(24):
         item_id = f"property-{sequence}"
