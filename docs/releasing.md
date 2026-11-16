@@ -14,26 +14,51 @@ releases.
 ## 1. Open a `chore(release)` pull request
 
 The release is one squash-merged pull request whose tree changes exactly these
-five files:
+paths:
 
 - `pyproject.toml` — set `[project] version` to `"X.Y.Z"` (see Choosing the version)
 - `ledger/__init__.py` — set `__version__` to `"X.Y.Z"`
 - `plugins/ledger-hooks/.claude-plugin/plugin.json` — set `version` to
-  `"X.Y.Z"`, the same value; the plugin list shows it, and
-  `tests/test_plugin_hooks.py` fails when it differs from `__version__`
+  `"X.Y.Z"`, the same value (between releases it reads the next patch with
+  `-dev`, see section 4); the plugin list shows it, and
+  `tests/test_plugin_hooks.py` fails when it is neither `__version__` nor that
+  next `-dev` version
+- `README.md` and `docs/start-here.md` — set the `#vX.Y.Z` pin in every
+  plugin install command (its source is
+  `https://github.com/smithadifd/ledger.git#vX.Y.Z`) to `vX.Y.Z`, and remove
+  the "from the next release (on main, not in vX.Y.Z)" markers from the
+  sentences about features this release ships (the plugin's `bin/ledger`, the
+  plugin options), so the pinned install is described as having them; find
+  every marker with
+  `grep -rniE "from the next release \(on main" README.md docs CHANGELOG.md`
 - `plugins/ledger-hooks/ledger/` — refresh the bundled copy of `ledger/`
   (except `ledger/tests/`) so `tests/test_plugin_bin.py` still passes
 - `CHANGELOG.md` — add the dated section at the top of the file
-- `docs/upgrading.md` — name `X.Y.Z` as the current release; when the new
-  changelog section has an "Upgrading" paragraph, carry what an upgrader needs
-  from it into section 1.5
+- `docs/upgrading.md` — name `X.Y.Z` as the current release, set the
+  `#vX.Y.Z` pin in its plugin install command, and when the new changelog
+  section has an "Upgrading" paragraph, carry what an upgrader needs from it
+  into section 1.5
+
+`tests/test_docs_pinned_install.py` fails unless every line on `README.md`,
+`docs/start-here.md` and `docs/upgrading.md` (and in `CHANGELOG.md` above its
+first released section) that names a marketplace add carries the exact pinned
+command `claude plugin marketplace add https://github.com/smithadifd/ledger.git#v`
+followed by `__version__` (letter case included), and each of those three
+install pages shows that command on at least one line. Known limits: a pinned
+command that renders as prose rather than as a code block still passes, an add
+command split across lines is not checked, and a line that holds both an
+unpinned add and the pinned command passes. The test also fails when, in any tracked Markdown file (`CHANGELOG.md` above its
+first released section), the grep above finds a different number of
+next-release markers than the file has, as when a marker is wrapped across a
+line break. An unpinned add follows main, so a person who
+ran it would get plugin changes that no release has shipped.
 
 The pull requests for v0.1.21 and v0.1.22 changed only `pyproject.toml`,
 `ledger/__init__.py` and `CHANGELOG.md`.
 `docs/upgrading.md` joined the list because it kept calling 0.1.22 the current
 release through 0.2.0, 0.2.1 and 0.3.0.
 
-In `docs/upgrading.md`, change every pinned tag (`@vX.Y.Z`), every printed
+In `docs/upgrading.md`, change every pinned tag (`@vX.Y.Z` and `#vX.Y.Z`), every printed
 `ledger X.Y.Z` and every sentence that names the current release. Then list
 every version number on the page and read each hit; each one is `X.Y.Z` or a
 release named on purpose as history (for example, the 0.1.14 warning):
@@ -84,7 +109,16 @@ Commands:
 
 Push the tag only. Do not create a GitHub Release.
 
-## 4. After the tag: rerun the mods ledger tests against the new tag
+## 4. Right after the tag: bump the plugin manifest to the next `-dev` version
+
+Main must not name a released version while its plugin tree differs from that
+tag. Right after tagging, open a `chore` pull request that sets `version` in
+`plugins/ledger-hooks/.claude-plugin/plugin.json` to the next patch with a
+`-dev` suffix (`X.Y.(Z+1)-dev`). `tests/test_plugin_hooks.py` accepts exactly
+that value or `__version__`. The next release's pull request sets it back to
+that release's version (section 1).
+
+## 5. After the tag: rerun the mods ledger tests against the new tag
 
 After the tag, rerun the mods ledger tests against the new tag. In the
 `smithadifd/mods` repository, run `claude plugin test ledger`, and recapture

@@ -285,8 +285,10 @@ touches your database.
 
    ```sh
    claude plugin uninstall ledger-hooks@ledger-plugins
-   claude plugin marketplace remove ledger-plugins
    ```
+
+   Then remove its marketplace with
+   `claude plugin marketplace remove ledger-plugins`.
 
    The skills plugin comes out the way the
    [skills repository](https://github.com/smithadifd/skills) says.
@@ -594,33 +596,48 @@ This is step 3 of the [install](#install), after the command and the
 environment, because the hooks need both. Install it from Claude Code:
 
 ```sh
-claude plugin marketplace add smithadifd/ledger
+claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.3.1
 claude plugin install ledger-hooks@ledger-plugins
 ```
 
-After you install the plugin, `ledger` is on the PATH of a Claude Code
-session that has it enabled (the plugin's `bin/ledger`). That command is for
-the session only; in a terminal, install with pipx as in
+The `#v0.3.1` suffix pins the plugin to that release. An add without the
+suffix follows the repository's main branch, which can carry plugin changes
+that no release has shipped. After a later release, put that release's tag
+where `v0.3.1` is.
+
+With v0.3.1, the version pinned above, the plugin ships no command of its
+own: each hook runs the first `ledger` on the `PATH` Claude Code starts with,
+the pipx install from [step 1](#1-install-the-ledger-command), and `ledger` in
+a terminal comes from pipx too.
+
+The hooks are silent until a database is set: with v0.3.1 they print nothing
+and write nothing when `LEDGER_DB` is unset (an empty value counts as unset).
+The hooks and the `ledger` command they run read `LEDGER_DB` and
+`LEDGER_OPERATOR` from the environment Claude Code starts with, so set them
+the way [step 2](#2-set-the-environment) does, in the `env` block of Claude
+Code's settings. The hooks supply `LEDGER_HARNESS` themselves: they pass
+`claude-code` when it is unset, so it can stay out of that block.
+
+From the next release (on main, not in v0.3.1), the plugin's `bin/ledger` puts
+`ledger` on the PATH of a Claude Code session that has the plugin enabled.
+From the next release (on main, not in v0.3.1), that command is for the
+session only; in a terminal, install with pipx as in
 [step 1](#1-install-the-ledger-command).
 
-The hooks are silent until a database is set: they print nothing and write
-nothing when `LEDGER_DB` is unset and the `ledger_db` plugin option is unset
-(an empty value counts as unset). Set the three values either the way
-[step 2](#2-set-the-environment) does, in the `env` block of Claude Code's
-settings, or as plugin options:
-
-```sh
-claude plugin configure ledger-hooks@<marketplace> --values-stdin
-```
-
-with a JSON object whose keys are `ledger_db` (absolute path to the database),
-`ledger_operator`, and `ledger_harness` (optional). An already-set `LEDGER_DB`,
-`LEDGER_OPERATOR` or `LEDGER_HARNESS` environment value is kept; a plugin
+From the next release (on main, not in v0.3.1), the hooks are silent when
+`LEDGER_DB` is unset and the `ledger_db` plugin option is unset, and the three
+values can be set as plugin options instead of in the settings `env` block,
+with `claude plugin configure ledger-hooks@<marketplace> --values-stdin`
+and a JSON object whose keys are `ledger_db` (absolute path to the database),
+`ledger_operator`, and `ledger_harness` (optional).
+From the next release (on main, not in v0.3.1), an already-set `LEDGER_DB`,
+`LEDGER_OPERATOR` or `LEDGER_HARNESS` environment value is kept and a plugin
 option fills only an unset one, so an install that put the values in the
 settings `env` block keeps working unchanged.
 
-Each hook runs the plugin's own `bin/ledger` when that file is executable,
-and otherwise the first `ledger` on `PATH`.
+From the next release (on main, not in v0.3.1), each hook runs the plugin's
+own `bin/ledger` when that file is executable, and otherwise the first
+`ledger` on `PATH`.
 
 No hook blocks a session. Each exits 0 on every path, within a timeout, and a
 failure prints one short line that never holds your text: the brief's goes
