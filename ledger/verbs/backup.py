@@ -9,7 +9,15 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--to",
         required=True,
-        help="destination database file (never a copy of the live file)",
+        help=(
+            "destination database file (never a copy of the live file); "
+            "refused when it already exists unless --overwrite is given"
+        ),
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="replace the destination when it already exists",
     )
 
 
@@ -17,7 +25,7 @@ def run(args, ctx: Context) -> Result:
     dest = args.to
     if not dest:
         raise UsageError("pass --to")
-    result = backup_db(ctx.db, dest)
+    result = backup_db(ctx.db, dest, overwrite=args.overwrite)
     return Result(
         data={"integrity": result.integrity, "path": str(result.path)},
         text=f"backup {result.path} integrity={result.integrity}",

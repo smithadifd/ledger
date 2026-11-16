@@ -368,7 +368,7 @@ def test_a_backup_onto_the_path_after_the_main_check_is_refused_by_the_last_chec
             stages.append(stage)
             if stage == "bound_after_main" and "backup" not in stages:
                 stages.append("backup")
-                backup_db(source, db)
+                backup_db(source, db, overwrite=True)
 
         _arm(monkeypatch, seam)
         with pytest.raises(UnsafeDatabaseFile) as info:
@@ -391,7 +391,7 @@ def test_claim_system_refuses_a_backup_that_lands_after_its_checkpoint(
             if stage == "before_settle" and _same(path, db):
                 settles.append(stage)
                 if len(settles) == 2:
-                    backup_db(source, db)
+                    backup_db(source, db, overwrite=True)
 
         _arm(monkeypatch, seam)
         with pytest.raises(UnsafeDatabaseFile) as info:
@@ -751,12 +751,12 @@ def test_two_backups_to_one_destination_never_remove_each_others_partial(
         if stage == "before_settle" and _same(path, first) and "second" not in seen:
             seen["second"] = None
             seen["before"] = sorted(p.name for p in dest.parent.glob("*.partial"))
-            seen["second"] = backup_db(second, dest)
+            seen["second"] = backup_db(second, dest, overwrite=True)
             seen["after"] = sorted(p.name for p in dest.parent.glob("*.partial"))
             seen["second_items"] = _created_items(dest)
 
     _arm(monkeypatch, seam)
-    result = backup_db(first, dest)
+    result = backup_db(first, dest, overwrite=True)
     assert len(seen["before"]) == 1
     assert seen["after"] == seen["before"], "the second backup removed the first's partial"
     assert seen["second"].integrity == "ok"

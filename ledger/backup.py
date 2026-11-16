@@ -5,6 +5,10 @@ Never copies the live database file. The copy is written at a unique
 ``.<name>.*.partial`` name beside the destination, checked with ``PRAGMA
 integrity_check``, and renamed only when the check returns ``ok`` and the
 source path still names the file the copy was read from.
+
+A destination that already exists is refused unless the caller passes
+``overwrite=True`` (the CLI's ``--overwrite``), the same rule ``restore``
+applies to its target.
 """
 from __future__ import annotations
 
@@ -174,8 +178,35 @@ def _refuse_live_destination(source_path: Path, dest_path: Path) -> None:
         ) from exc
 
 
-def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
-    """Snapshot ``db_path`` into ``dest`` via the online backup API."""
+def _refuse_existing_target(dest_path: Path) -> None:
+    """Refuse a backup destination that any file already has.
+
+    Decided by file identity, as ``restore`` decides its own target: a
+    spelling the volume reads as an existing file's name refuses, and a name
+    that cannot be read refuses too.
+    """
+    try:
+        occupied = file_identity(dest_path) is not None
+    except OSError as exc:
+        raise LedgerError(
+            f"backup target cannot be checked: {dest_path} ({exc})"
+        ) from exc
+    if occupied:
+        raise LedgerError(
+            f"backup target already exists: {dest_path} "
+            f"(pass --overwrite to replace it)"
+        )
+
+
+def backup_db(
+    db_path: Path | str, dest: Path | str, *, overwrite: bool = False
+) -> BackupResult:
+    """Snapshot ``db_path`` into ``dest`` via the online backup API.
+
+    A ``dest`` that already exists is refused (``backup target already
+    exists``) and left untouched, unless ``overwrite`` is true. The live
+    database and its side files are refused either way.
+    """
     source_path = resolve_db_path(db_path)
     dest_path = resolve_db_path(dest)
     # Before the source precheck, which refuses a hard-linked live file for
@@ -186,6 +217,8 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
     # A file published on a name SQLite treats as a side file is removed by
     # a later last closer.
     refuse_side_file_name(dest_path, "backup")
+    if not overwrite:
+        _refuse_existing_target(dest_path)
     # A backup of a newer schema would later be read by this same older code.
     _refuse_newer_schema_before_connect(source_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,6 +262,10 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
             more = f" (+{len(lines) - 1} more)" if len(lines) > 1 else ""
             raise LedgerError(f"backup failed integrity_check: {lines[0]}{more}")
         _refuse_newer_schema_in_copy(partial)
+        if not overwrite:
+            # The copy can take long: look again, so a file that took the
+            # name meanwhile is not replaced either.
+            _refuse_existing_target(dest_path)
         partial.replace(dest_path)
     except BaseException:
         partial.unlink(missing_ok=True)

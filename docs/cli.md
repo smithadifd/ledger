@@ -949,8 +949,16 @@ Refusal codes of the export, commit and push steps, each exit 3:
 - `export_git_failed`: any other git command failed before the push command, or in the commit steps (commit, push).
 - `export_push_failed`: the push command itself failed after it started; the outcome is unknown (push).
 
-**`backup --to FILE`** Online backup with `PRAGMA integrity_check`. The
-backup holds the database only: a by-path document's bytes live under its
+**`backup --to FILE [--overwrite]`** Online backup with `PRAGMA integrity_check`.
+FILE must not exist, as with `restore`: a backup to a path that any file
+already has (a text file, an older backup) is refused with `backup target
+already exists` (exit 3) and the file is left byte for byte as it was. The
+check runs before the copy and again just before it is published, so a file
+that takes the name while the copy runs is not replaced either. Pass
+`--overwrite` to replace the file on purpose; a scheduled backup that reuses
+one name needs it. `--overwrite` does not lift the other refusals: the live
+database, its `-wal`, `-shm` and `-journal` files, and any name ending in one
+of those suffixes are still refused. The backup holds the database only: a by-path document's bytes live under its
 document root, so copy that directory too, and put it beside the restored
 database (see `restore`).
 
