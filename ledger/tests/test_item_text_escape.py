@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import itertools
 import json
+import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -615,11 +616,27 @@ def test_an_item_id_with_a_control_prints_escaped_in_header_and_commands(
     assert_no_raw(out, ESC)
     shown = lines(out.rstrip("\n"))
     assert shown[0] == "# " + r"X\u001b[2J"
-    assert "$'X\\x1b[2J'" in shown[-1]
+    assert "$(printf '%b' 'X\\0033[2J')" in shown[-1]
 
 
-# An id holding every kind of code point a printed command must carry safely.
-HOSTILE_ID = "X" + ESC + "[2J'q\\" + RLO + LS + "\n" + BEL + "\t y"
+# An id holding every kind of code point a printed command must carry safely
+# (an octal digit right after ESC checks the escape ends where it should).
+HOSTILE_ID = "X" + ESC + "7[2J'q\\" + RLO + LS + "\n" + BEL + "\t y"
+# Ids that would run text as shell if a quote ended the word early, or if a
+# substitution inside the id were evaluated.
+INJECTION_ID = "X" + ESC + "';touch PWNED;#"
+SUBSTITUTION_ID = "X" + ESC + "$(touch PWNED)`touch PWNED`%s\\c"
+# Every shell the docs say a printed command runs in.
+SHELLS = ["bash", "zsh", "/bin/sh", "dash"]
+
+
+def _shell_args(shell: str, command: str, cwd: Path) -> list[bytes]:
+    """The arguments ``shell`` passes to ``ledger`` when it runs ``command``,
+    as bytes."""
+    script = "ledger() { printf '%s\\0' \"$@\"; }\n" + command
+    out = subprocess.run([shell, "-c", script], capture_output=True, check=True,
+                         cwd=cwd).stdout
+    return out.split(b"\0")[:-1]
 
 
 def _bash_args(command: str) -> list[str]:
@@ -629,27 +646,39 @@ def _bash_args(command: str) -> list[str]:
     return out.decode("utf-8").split("\0")[:-1]
 
 
+@pytest.mark.parametrize("shell", SHELLS)
+@pytest.mark.parametrize("item_id", [
+    pytest.param(HOSTILE_ID, id="hostile"),
+    pytest.param(INJECTION_ID, id="quote-injection"),
+    pytest.param(SUBSTITUTION_ID, id="substitution"),
+])
 @pytest.mark.parametrize("build,expected", [
-    pytest.param(recover_command, ["export-item", "--json", "--", HOSTILE_ID], id="recover"),
+    pytest.param(recover_command, lambda i: ["export-item", "--json", "--", i], id="recover"),
     pytest.param(lambda item_id, program: footer_line(item_id, program)[len(FOOTER) + 2:-1],
-                 ["export-item", "--", HOSTILE_ID], id="footer"),
-    pytest.param(children_command, ["query", f"--parent={HOSTILE_ID}", "--all"], id="children"),
-    pytest.param(duplicates_command, ["query", f"--duplicate-of={HOSTILE_ID}", "--all"],
+                 lambda i: ["export-item", "--", i], id="footer"),
+    pytest.param(children_command, lambda i: ["query", f"--parent={i}", "--all"],
+                 id="children"),
+    pytest.param(duplicates_command, lambda i: ["query", f"--duplicate-of={i}", "--all"],
                  id="duplicates"),
-    pytest.param(blockers_command, ["query", f"--blocks={HOSTILE_ID}", "--open", "--all"],
+    pytest.param(blockers_command, lambda i: ["query", f"--blocks={i}", "--open", "--all"],
                  id="blockers"),
     pytest.param(
         lambda item_id, program: derive_next_step(
             status="open", blockers=(), open_questions=(), owner=None, claim=None,
             item_id=item_id, program=program,
         )[len("Resume with: "):],
-        ["resume", f"--item={HOSTILE_ID}"], id="next-step"),
+        lambda i: ["resume", f"--item={i}"], id="next-step"),
 ])
-def test_a_printed_command_round_trips_a_control_bearing_id(build, expected) -> None:
-    command = build(HOSTILE_ID, "ledger")
+def test_a_printed_command_round_trips_a_control_bearing_id(
+        tmp_path, build, expected, item_id, shell) -> None:
+    if shutil.which(shell) is None:
+        pytest.skip(f"{shell} is not installed")
+    command = build(item_id, "ledger")
     assert_no_raw(command, ESC, BEL, RLO, LS, "\n", "\t")
     assert command.startswith("ledger ")
-    assert _bash_args(command) == expected
+    got = _shell_args(shell, command, tmp_path)
+    assert got == [arg.encode("utf-8") for arg in expected(item_id)], (shell, command)
+    assert not (tmp_path / "PWNED").exists(), f"{shell} ran text from the id: {command}"
 
 
 def test_the_card_json_commands_match_the_printed_ones(tmp_path, monkeypatch) -> None:

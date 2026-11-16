@@ -653,13 +653,19 @@ def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
 
 
 def _shell_arg(arg: str) -> str:
-    """``arg`` quoted for a POSIX shell, safe to print. An argument with no
-    code point ``_escaped`` names is ``shlex.quote``d. One that holds such a
-    code point (shlex would leave it raw) is written in bash's ANSI-C
-    ``$'...'`` form: backslash and quote are escaped, LF, CR and TAB are
-    ``\\n``, ``\\r`` and ``\\t``, and every other escaped code point is its
-    UTF-8 bytes as ``\\xHH``. The printed text then holds no control
-    character, and the shell decodes it back to the stored argument."""
+    """``arg`` quoted for a shell, safe to print. An argument with no code
+    point ``_escaped`` names is ``shlex.quote``d. One that holds such a code
+    point (shlex would leave it raw) is spelled ``"$(printf '%b' '...')"``,
+    which bash, zsh, macOS ``/bin/sh`` and dash all decode the same way. In
+    the single-quoted ``%b`` operand a backslash is ``\\\\``, a quote is
+    ``\\0047`` and every escaped code point is its UTF-8 bytes as
+    ``\\0NNN`` (octal), so the printed text holds no control character and
+    no quote that could end the word early, and the operand is one literal
+    word to every shell.
+
+    Known limit: command substitution drops trailing newlines, so an
+    argument that ends in LF comes back without them (no one-word spelling
+    keeps them in all four shells). An argument cannot hold NUL at all."""
     if not any(_escaped(char) for char in arg):
         return shlex.quote(arg)
     out = []
@@ -667,14 +673,12 @@ def _shell_arg(arg: str) -> str:
         if char == "\\":
             out.append("\\\\")
         elif char == "'":
-            out.append("\\'")
-        elif char in _NAMED_ESCAPES:
-            out.append(_NAMED_ESCAPES[char])
+            out.append("\\0047")
         elif _escaped(char):
-            out.extend(f"\\x{byte:02x}" for byte in char.encode("utf-8"))
+            out.extend(f"\\0{byte:03o}" for byte in char.encode("utf-8"))
         else:
             out.append(char)
-    return "$'" + "".join(out) + "'"
+    return "\"$(printf '%b' '" + "".join(out) + "')\""
 
 
 def _command(program: str, args: list[str]) -> str:
