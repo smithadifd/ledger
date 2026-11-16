@@ -21,6 +21,8 @@ five files:
 - `plugins/ledger-hooks/.claude-plugin/plugin.json` — set `version` to
   `"X.Y.Z"`, the same value; the plugin list shows it, and
   `tests/test_plugin_hooks.py` fails when it differs from `__version__`
+- `plugins/ledger-hooks/ledger/` — refresh the bundled copy of `ledger/`
+  (except `ledger/tests/`) so `tests/test_plugin_bin.py` still passes
 - `CHANGELOG.md` — add the dated section at the top of the file
 - `docs/upgrading.md` — name `X.Y.Z` as the current release; when the new
   changelog section has an "Upgrading" paragraph, carry what an upgrader needs

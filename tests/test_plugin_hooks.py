@@ -84,7 +84,7 @@ def rig(tmp_path: Path) -> Rig:
         if not key.startswith(("LEDGER_", "CLAUDE_")) and key != "PYTHONPATH"
     }
     env.update(
-        PATH=f"{bin_dir}:{BASE_PATH}",
+        PATH=f"{bin_dir}:{Path(sys.executable).resolve().parent}:{BASE_PATH}",
         HOME=str(home),
         LEDGER_DB=str(db),
         PYTHONPATH=str(ROOT),
@@ -132,7 +132,8 @@ class Ran:
 def run_hook(rig: Rig, event: str, stdin: str | bytes, *, tool: str | None = None,
              env: dict[str, str | None] | None = None) -> Ran:
     """Run every command hooks.json names for the event; their outputs joined."""
-    run_env = dict(rig.env, CLAUDE_PLUGIN_ROOT=str(PLUGIN))
+    run_env = dict(rig.env)
+    run_env.setdefault("CLAUDE_PLUGIN_ROOT", str(PLUGIN))
     for key, value in (env or {}).items():
         if value is None:
             run_env.pop(key, None)
@@ -184,11 +185,27 @@ def captures(rig: Rig, channel: str) -> list:
         return [e for e in lg.events(kind="utterance.captured") if e.channel == channel]
 
 
+def hooks_only_plugin(tmp: Path) -> Path:
+    """A plugin root with the shims but no ``bin/ledger``, so hooks fall back to PATH."""
+    root = tmp / "hooks-only-plugin"
+    hooks = root / "hooks"
+    hooks.mkdir(parents=True, exist_ok=True)
+    for src in (PLUGIN / "hooks").iterdir():
+        if src.is_file():
+            shutil.copy(src, hooks / src.name)
+    return root
+
+
 def stub_ledger(rig: Rig, body: str) -> None:
-    """Replace the rig's ``ledger`` with a shell script."""
+    """Replace the rig's ``ledger`` with a shell script.
+
+    Points ``CLAUDE_PLUGIN_ROOT`` at a copy of the shims with no ``bin/``, so
+    the hooks fall back to this PATH stub instead of the plugin command.
+    """
     stub = rig.bin_dir / "ledger"
     stub.write_text("#!/bin/sh\n" + body)
     stub.chmod(0o755)
+    rig.env["CLAUDE_PLUGIN_ROOT"] = str(hooks_only_plugin(rig.tmp))
 
 
 def new_item(rig: Rig) -> None:
@@ -338,6 +355,8 @@ def test_t7_with_no_ledger_configured_every_hook_is_silent(rig: Rig, event: str,
     env_file = rig.tmp / "claude-env"
     env_file.write_bytes(b"export KEEP=1\n")
     env = dict(OFF_CASES[case], CLAUDE_ENV_FILE=str(env_file))
+    if case == "no ledger on PATH":
+        env["CLAUDE_PLUGIN_ROOT"] = str(hooks_only_plugin(rig.tmp))
     stdin = {
         "SessionStart": recorded("session_start.json"),
         "UserPromptSubmit": prompt_input(),
@@ -621,8 +640,11 @@ def test_t20_readme_and_known_limits_carry_the_guard_rail_sentence() -> None:
         assert GUARD_SENTENCE in _flat(path), path.name
     readme = _flat(ROOT / "README.md")
     assert "claude plugin install ledger-hooks@ledger-plugins" in readme
+    assert "claude plugin configure ledger-hooks@<marketplace> --values-stdin" in readme
     start = _flat(ROOT / "docs" / "start-here.md")
     assert "claude plugin install ledger-hooks@ledger-plugins" in start
+    assert "claude plugin configure ledger-hooks@<marketplace>" in start
+    assert "--values-stdin" in start
 
 
 # --- P1-P6, T11: the model record ---------------------------------------------
@@ -701,6 +723,8 @@ def test_model_switch_shim_timeout_is_the_same_line(rig: Rig) -> None:
 @pytest.mark.parametrize("case", ["no-ledger", "no-db"])
 def test_model_switch_shim_off(rig: Rig, case: str) -> None:
     env = {"no-ledger": {"PATH": BASE_PATH}, "no-db": {"LEDGER_DB": None}}[case]
+    if case == "no-ledger":
+        env = dict(env, CLAUDE_PLUGIN_ROOT=str(hooks_only_plugin(rig.tmp)))
     assert_quiet(switch_hook(rig, switch_input(7), env=env))
     assert not rig.db.parent.exists()
 
@@ -740,3 +764,158 @@ def test_write_after_switch_sees_new_model(rig: Rig) -> None:
                             env={"LEDGER_SESSION": session})
     assert code == 0, env
     assert env["data"]["event"]["model"] == "model-switched"
+
+
+# --- plugin options and plugin bin ------------------------------------------
+
+
+OPTION_KEYS = ("ledger_db", "ledger_operator", "ledger_harness")
+
+
+def test_plugin_json_declares_the_three_option_keys() -> None:
+    cfg = load(PLUGIN_JSON)["userConfig"]
+    assert set(cfg) == set(OPTION_KEYS)
+    for key in OPTION_KEYS:
+        assert cfg[key]["type"] == "string"
+        assert cfg[key]["title"].strip()
+        assert cfg[key]["description"].strip()
+
+
+def _stamp_stub(rig: Rig) -> Path:
+    stamp = rig.tmp / "ledger-stamp"
+    body = (
+        f'stamp={shlex.quote(str(stamp))}\n'
+        'printf "DB=%s\\nOP=%s\\nHA=%s\\n" "$LEDGER_DB" "$LEDGER_OPERATOR" "$LEDGER_HARNESS" >>"$stamp"\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        '    --hook-env) printf "export LEDGER_SESSION=sid\\n"; exit 0 ;;\n'
+        '    --brief) printf "brief\\n"; exit 0 ;;\n'
+        '  esac\n'
+        'done\n'
+        'exit 0\n'
+    )
+    stub_ledger(rig, body)
+    return stamp
+
+
+def test_each_hook_is_silent_with_no_option_and_no_db(rig: Rig) -> None:
+    env_file = rig.tmp / "claude-env"
+    env_file.write_bytes(b"export KEEP=1\n")
+    before = sorted(p.name for p in rig.tmp.iterdir())
+    for event, stdin, tool in (
+        ("SessionStart", recorded("session_start.json"), None),
+        ("UserPromptSubmit", prompt_input(), None),
+        ("PostToolUse", answered([{"question": QUESTION, "header": "q", "multiSelect": False,
+                                   "options": OPTIONS}], "ship"), "AskUserQuestion"),
+        ("PostModelSwitch", switch_input(), None),
+    ):
+        assert_quiet(run_hook(rig, event, json.dumps(stdin), tool=tool, env={
+            "LEDGER_DB": None,
+            "CLAUDE_ENV_FILE": str(env_file),
+        }))
+    assert not rig.db.exists() and not rig.db.parent.exists()
+    assert env_file.read_bytes() == b"export KEEP=1\n"
+    assert sorted(p.name for p in rig.tmp.iterdir()) == before
+
+
+def test_empty_option_counts_as_unset(rig: Rig) -> None:
+    env_file = rig.tmp / "claude-env"
+    env_file.write_bytes(b"export KEEP=1\n")
+    assert_quiet(session_hook(rig, env={
+        "LEDGER_DB": None,
+        "CLAUDE_PLUGIN_OPTION_LEDGER_DB": "",
+        "CLAUDE_PLUGIN_OPTION_LEDGER_OPERATOR": "op",
+        "CLAUDE_ENV_FILE": str(env_file),
+    }))
+    assert not rig.db.exists() and not rig.db.parent.exists()
+    assert env_file.read_bytes() == b"export KEEP=1\n"
+
+
+def test_options_fill_unset_env_and_session_start_exports_them(rig: Rig) -> None:
+    stamp = _stamp_stub(rig)
+    env_file = rig.tmp / "claude-env"
+    env_file.write_bytes(b"export KEEP=1\n")
+    db = str(rig.tmp / "from options" / "ledger.db")
+    ran = session_hook(rig, env={
+        "LEDGER_DB": None,
+        "LEDGER_OPERATOR": None,
+        "LEDGER_HARNESS": None,
+        "CLAUDE_PLUGIN_OPTION_LEDGER_DB": db,
+        "CLAUDE_PLUGIN_OPTION_LEDGER_OPERATOR": "opt-op",
+        "CLAUDE_PLUGIN_OPTION_LEDGER_HARNESS": "opt-harness",
+        "CLAUDE_ENV_FILE": str(env_file),
+    })
+    assert ran.returncode == 0, ran.stderr
+    text = env_file.read_text(encoding="utf-8")
+    assert text.startswith("export KEEP=1\n")
+    assert "export LEDGER_DB=" in text
+    assert "export LEDGER_OPERATOR=" in text
+    assert "export LEDGER_HARNESS=" in text
+    sourced = subprocess.run(
+        ["/bin/sh", "-c",
+         '. "$1"; printf "%s|%s|%s" "$LEDGER_DB" "$LEDGER_OPERATOR" "$LEDGER_HARNESS"',
+         "sh", str(env_file)],
+        env={"PATH": BASE_PATH}, capture_output=True, text=True, timeout=30,
+    )
+    assert sourced.returncode == 0, sourced.stderr
+    assert sourced.stdout == f"{db}|opt-op|opt-harness"
+    recorded_env = stamp.read_text(encoding="utf-8")
+    assert f"DB={db}\n" in recorded_env
+    assert "OP=opt-op\n" in recorded_env
+    assert "HA=opt-harness\n" in recorded_env
+
+
+def test_already_set_env_wins_over_options(rig: Rig) -> None:
+    stamp = _stamp_stub(rig)
+    env_file = rig.tmp / "claude-env"
+    env_file.write_bytes(b"export KEEP=1\n")
+    keep_db = str(rig.db)
+    ran = session_hook(rig, env={
+        "LEDGER_DB": keep_db,
+        "LEDGER_OPERATOR": "env-op",
+        "LEDGER_HARNESS": "env-harness",
+        "CLAUDE_PLUGIN_OPTION_LEDGER_DB": str(rig.tmp / "other.db"),
+        "CLAUDE_PLUGIN_OPTION_LEDGER_OPERATOR": "opt-op",
+        "CLAUDE_PLUGIN_OPTION_LEDGER_HARNESS": "opt-harness",
+        "CLAUDE_ENV_FILE": str(env_file),
+    })
+    assert ran.returncode == 0, ran.stderr
+    text = env_file.read_text(encoding="utf-8")
+    after = text[len("export KEEP=1\n"):]
+    assert "export LEDGER_DB=" not in after
+    assert "export LEDGER_OPERATOR=" not in after
+    assert "export LEDGER_HARNESS=" not in after
+    recorded_env = stamp.read_text(encoding="utf-8")
+    assert f"DB={keep_db}\n" in recorded_env
+    assert "OP=env-op\n" in recorded_env
+    assert "HA=env-harness\n" in recorded_env
+
+
+def test_prompt_and_picker_and_model_switch_see_option_values(rig: Rig) -> None:
+    stamp = _stamp_stub(rig)
+    db = str(rig.tmp / "opt.db")
+    option_env = {
+        "LEDGER_DB": None,
+        "LEDGER_OPERATOR": None,
+        "LEDGER_HARNESS": None,
+        "CLAUDE_PLUGIN_OPTION_LEDGER_DB": db,
+        "CLAUDE_PLUGIN_OPTION_LEDGER_OPERATOR": "opt-op",
+        "CLAUDE_PLUGIN_OPTION_LEDGER_HARNESS": "opt-harness",
+    }
+    assert_quiet(prompt_hook(rig, prompt_input(), env=option_env))
+    assert_quiet(picker_hook(rig, answered(
+        [{"question": QUESTION, "header": "q", "multiSelect": False, "options": OPTIONS}],
+        "ship"), env=option_env))
+    assert_quiet(switch_hook(rig, switch_input(), env=option_env))
+    recorded_env = stamp.read_text(encoding="utf-8")
+    assert recorded_env.count(f"DB={db}\n") == 3
+    assert recorded_env.count("OP=opt-op\n") == 3
+    assert recorded_env.count("HA=opt-harness\n") == 3
+
+
+def test_hooks_use_plugin_bin_when_path_has_no_ledger(rig: Rig) -> None:
+    rig.db.parent.mkdir()
+    py = str(Path(sys.executable).resolve().parent)
+    ran = session_hook(rig, env={"PATH": f"{py}:{BASE_PATH}"})
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.startswith(BRIEF_START)

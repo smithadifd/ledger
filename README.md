@@ -598,18 +598,29 @@ claude plugin marketplace add smithadifd/ledger
 claude plugin install ledger-hooks@ledger-plugins
 ```
 
-The ledger is on when a `ledger` command is on the `PATH` Claude Code runs
-hooks with and `LEDGER_DB` names a database in Claude Code's environment (set
-it as in [step 2](#2-set-the-environment), in your shell before you start
-Claude Code and in the `env` block of its settings). Otherwise every hook is
-silent: it prints nothing and writes nothing.
+After you install the plugin, `ledger` is on the PATH of a Claude Code
+session that has it enabled (the plugin's `bin/ledger`). That command is for
+the session only; in a terminal, install with pipx as in
+[step 1](#1-install-the-ledger-command).
 
-Each hook runs the first `ledger` on that `PATH`, so a different `ledger`
-earlier on the `PATH` runs instead and receives your prompts and picker
-answers. The plugin takes no absolute path and has no setting for one, so
-`PATH` order is the only control: check that `command -v ledger`, in the
-environment Claude Code starts with, names the ledger you installed
-([KNOWN-LIMITS.md](KNOWN-LIMITS.md)).
+The hooks are silent until a database is set: they print nothing and write
+nothing when `LEDGER_DB` is unset and the `ledger_db` plugin option is unset
+(an empty value counts as unset). Set the three values either the way
+[step 2](#2-set-the-environment) does, in the `env` block of Claude Code's
+settings, or as plugin options:
+
+```sh
+claude plugin configure ledger-hooks@<marketplace> --values-stdin
+```
+
+with a JSON object whose keys are `ledger_db` (absolute path to the database),
+`ledger_operator`, and `ledger_harness` (optional). An already-set `LEDGER_DB`,
+`LEDGER_OPERATOR` or `LEDGER_HARNESS` environment value is kept; a plugin
+option fills only an unset one, so an install that put the values in the
+settings `env` block keeps working unchanged.
+
+Each hook runs the plugin's own `bin/ledger` when that file is executable,
+and otherwise the first `ledger` on `PATH`.
 
 No hook blocks a session. Each exits 0 on every path, within a timeout, and a
 failure prints one short line that never holds your text: the brief's goes

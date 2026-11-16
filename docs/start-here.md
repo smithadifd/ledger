@@ -215,8 +215,16 @@ claude plugin marketplace add smithadifd/ledger
 claude plugin install ledger-hooks@ledger-plugins
 ```
 
-Its hooks do nothing until `ledger` is on Claude Code's `PATH` and `LEDGER_DB`
-is set in the environment Claude Code starts with, which steps 3 and 5 did.
+Its hooks do nothing until a database is named, either as `LEDGER_DB` in the
+environment Claude Code starts with (steps 3 and 5) or as the `ledger_db`
+plugin option. An already-set `LEDGER_DB`, `LEDGER_OPERATOR` or
+`LEDGER_HARNESS` is kept; a plugin option fills only an unset one. Set the
+options with `claude plugin configure ledger-hooks@<marketplace>
+--values-stdin` and a JSON object whose keys are `ledger_db` (absolute path),
+`ledger_operator`, and `ledger_harness` (optional). Inside a Claude Code
+session that has the plugin enabled, `ledger` is on the session path from the
+plugin's `bin/`; pipx (step 3) remains the way to get the command in a
+terminal.
 The brief goes into the model's context; the terminal does not show it. Run
 `ledger resume --brief` to read the same text. The question-picker flow, where
 the ledger records a person's answer to a question, needs an interactive

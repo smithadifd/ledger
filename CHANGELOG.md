@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **The `ledger-hooks` plugin ships the `ledger` command and takes plugin options.** `bin/ledger` runs the bundled CLI inside a Claude Code session that has the plugin enabled (pipx remains the install for a terminal). Three `userConfig` options, `ledger_db`, `ledger_operator` and `ledger_harness`, fill `LEDGER_DB`, `LEDGER_OPERATOR` and `LEDGER_HARNESS` when those environment values are unset. SessionStart exports the values that came from options into the session environment file. With no database option and no `LEDGER_DB`, every hook stays silent.
 - **The install steps say to create the settings file when it does not exist.** The README and `docs/start-here.md` now say that when `~/.claude/settings.json` is missing (and the `~/.claude` folder with it), you create it holding the `env` block shown, which is already a whole valid settings file; an existing file still gets the keys added and its other keys kept.
 
 ## 0.3.1 — 2026-11-15
