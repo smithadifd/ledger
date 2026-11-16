@@ -247,6 +247,49 @@ def test_isolated_plugin_copy_ignores_pythonexecutable_venv_pth(
     assert "usage:" in done.stdout.lower()
 
 
+def test_isolated_plugin_copy_unsets_pythonexecutable_and_pyvenv_launcher(
+    tmp_path: Path,
+) -> None:
+    dest = tmp_path / "installed" / "ledger-hooks"
+    _copy_plugin(dest)
+    marker = tmp_path / "child-env.marker"
+    stub_dir = tmp_path / "stub-bin"
+    stub_dir.mkdir()
+    stub = stub_dir / "python3"
+    stub.write_text(
+        "#!/bin/sh\n"
+        f"marker={str(marker)!r}\n"
+        f"real={sys.executable!r}\n"
+        "printf 'call PYTHONEXECUTABLE=%s __PYVENV_LAUNCHER__=%s\\n' "
+        '"${PYTHONEXECUTABLE-<UNSET>}" "${__PYVENV_LAUNCHER__-<UNSET>}" '
+        '>> "$marker" || exit 1\n'
+        'exec "$real" "$@"\n',
+        encoding="utf-8",
+    )
+    stub.chmod(stub.stat().st_mode | stat.S_IXUSR)
+    env = _clean_env(
+        tmp_path,
+        {
+            "PYTHONEXECUTABLE": "/planted/python",
+            "__PYVENV_LAUNCHER__": "/planted/pyvenv",
+        },
+    )
+    env["PATH"] = str(stub_dir) + os.pathsep + env.get("PATH", "")
+    done = _run_bin(dest, ["--help"], cwd=tmp_path, env=env)
+    assert done.returncode == 0, done.stderr
+    assert marker.is_file(), "stub record missing"
+    try:
+        records = marker.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise AssertionError("stub record unreadable") from exc
+    lines = records.splitlines()
+    assert lines, "stub record empty"
+    expected = "call PYTHONEXECUTABLE=<UNSET> __PYVENV_LAUNCHER__=<UNSET>"
+    assert all(line == expected for line in lines), records
+    assert len(lines) >= 2, records
+    assert "usage:" in done.stdout.lower()
+
+
 def test_isolated_plugin_copy_ignores_venv_on_path(tmp_path: Path) -> None:
     dest = tmp_path / "installed" / "ledger-hooks"
     _copy_plugin(dest)
