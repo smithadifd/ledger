@@ -234,9 +234,13 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   0.2.1, update it after the CLI (the same two steps as section 3.2, with the
   marketplace `ledger-plugins` and the plugin `ledger-hooks@ledger-plugins`):
   0.3.0 adds its PostModelSwitch hook, which needs Claude Code v2.1.251 or
-  later. Add the marketplace with the pinned command,
-  `claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.3.1`:
-  the `#vX.Y.Z` suffix pins the plugin to that release, and an add without it
+  later. Add the marketplace with the pinned command:
+
+  ```sh
+  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.3.1
+  ```
+
+  The `#vX.Y.Z` suffix pins the plugin to that release, and an add without it
   follows main. If you added `ledger-plugins` without the suffix, remove it
   (`claude plugin marketplace remove ledger-plugins`) and add it again with
   the pin. A marketplace added with a pin stays on that tag:
@@ -309,10 +313,10 @@ command not found`, run `pipx ensurepath` and open a new terminal.
 ### 3.2 The skills plugin
 
 From the [skills repository](https://github.com/smithadifd/skills)
-(its changelog's 0.12.0 "Upgrading" steps):
+(its changelog's 0.12.0 "Upgrading" steps), first refresh its marketplace
+with `claude plugin marketplace update skills`, then update the plugin:
 
 ```sh
-claude plugin marketplace update skills
 claude plugin update sdlc@skills
 ```
 

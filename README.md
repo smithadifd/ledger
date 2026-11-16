@@ -285,8 +285,10 @@ touches your database.
 
    ```sh
    claude plugin uninstall ledger-hooks@ledger-plugins
-   claude plugin marketplace remove ledger-plugins
    ```
+
+   Then remove its marketplace with
+   `claude plugin marketplace remove ledger-plugins`.
 
    The skills plugin comes out the way the
    [skills repository](https://github.com/smithadifd/skills) says.
@@ -624,13 +626,9 @@ session only; in a terminal, install with pipx as in
 
 From the next release (on main, not in v0.3.1), the hooks are silent when
 `LEDGER_DB` is unset and the `ledger_db` plugin option is unset, and the three
-values can be set as plugin options instead of in the settings `env` block:
-
-```sh
-claude plugin configure ledger-hooks@<marketplace> --values-stdin
-```
-
-with a JSON object whose keys are `ledger_db` (absolute path to the database),
+values can be set as plugin options instead of in the settings `env` block,
+with `claude plugin configure ledger-hooks@<marketplace> --values-stdin`
+and a JSON object whose keys are `ledger_db` (absolute path to the database),
 `ledger_operator`, and `ledger_harness` (optional).
 From the next release (on main, not in v0.3.1), an already-set `LEDGER_DB`,
 `LEDGER_OPERATOR` or `LEDGER_HARNESS` environment value is kept and a plugin
