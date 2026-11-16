@@ -1,13 +1,14 @@
 # Upgrading across many releases
 
 This page is for a machine whose ledger is 0.1.8 or older, moving to the
-current release, 0.3.1. Four changes in between can stop a machine that works
-today, and 0.2.0, 0.2.1 and 0.3.0 add a few more things to check. Do the checks
-in section 1, install the tag in section 2, run the three upgrade commands in
-section 3, and run the check after each. A machine already on 0.1.22, 0.2.0 or
-0.2.1 has already passed the changes in 1.1 to 1.4 and needs only 1.5. For a
+current release, 0.4.0. Four changes in between can stop a machine that works
+today, and 0.2.0, 0.2.1, 0.3.0 and 0.4.0 add a few more things to check. Do the
+checks in section 1, install the tag in section 2, run the three upgrade
+commands in section 3, and run the check after each. A machine already on
+0.1.22, 0.2.0 or 0.2.1 has already passed the changes in 1.1 to 1.4 and needs
+only 1.5 and 1.6; a machine on 0.3.x needs only 1.6. For a
 later tag, change the tag in the commands and read the
-[CHANGELOG](../CHANGELOG.md) entries after 0.3.1.
+[CHANGELOG](../CHANGELOG.md) entries after 0.4.0.
 
 To see which release you have, run `pipx list`. `ledger --version` only exists
 from 0.1.16; on an older release it fails with `the following arguments are
@@ -225,19 +226,26 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   from `checked_connect`, or used the return of `connect` as a connection, must
   unpack the new shape. `open_ledger` and `open_ledger_readonly` are unchanged.
 - **The `ledger-hooks` plugin (new in 0.2.0, optional).** Installing it is
-  optional and changes nothing until you do. It runs the first `ledger` on the
-  `PATH` Claude Code gives it, so upgrade the `ledger` CLI first. Its manifest
+  optional and changes nothing until you do. Up to 0.3.x its hooks ran the
+  first `ledger` on the `PATH` Claude Code gives it, so the `ledger` CLI had to
+  be upgraded first. From 0.4.0 each hook runs the plugin's own bundled
+  `bin/ledger` when `CLAUDE_PLUGIN_ROOT` is set and `bin/ledger` there is
+  executable, and only otherwise the first `ledger` on `PATH`; with neither,
+  the hook does nothing. Updating the plugin therefore updates the CLI its
+  hooks use, and the pipx `ledger` stays the one you run in a terminal. The
+  bundled command needs Python 3.11 or later on the `PATH` and does not fall
+  back to the pipx command when it cannot find one. Its manifest
   names a `version`, the release number, and Claude Code takes a plugin's
   version from that field: an update replaces your installed copy only when a
   release changes it. (Before the manifest named a version, the plugin
   followed the repository's commits.) If you installed it with 0.2.0 or
-  0.2.1, update it after the CLI (the same two steps as section 3.2, with the
-  marketplace `ledger-plugins` and the plugin `ledger-hooks@ledger-plugins`):
-  0.3.0 adds its PostModelSwitch hook, which needs Claude Code v2.1.251 or
+  0.2.1, update it (the same two steps as section 3.2, with the marketplace
+  `ledger-plugins` and the plugin `ledger-hooks@ledger-plugins`; a marketplace
+  added with a pin needs the re-pin described in 1.6 instead): 0.3.0 adds its PostModelSwitch hook, which needs Claude Code v2.1.251 or
   later. Add the marketplace with the pinned command:
 
   ```sh
-  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.3.1
+  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.4.0
   ```
 
   The `#vX.Y.Z` suffix pins the plugin to that release, and an add without it
@@ -250,9 +258,95 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   explicit `ledger_cli`, a session prints the brief twice, and a separate
   prompt-capture hook records each prompt twice.
 
+### 1.6 What 0.4.0 adds
+
+None of the changes below alters the database schema or needs a migration.
+Each item applies only to a machine that does the thing it names; check the ones
+that fit yours. The [CHANGELOG](../CHANGELOG.md) entry has the detail.
+
+- **The `ledger-hooks` plugin runs its own `ledger` (0.4.0).** This applies if
+  the plugin is installed. From 0.4.0 each hook runs the plugin's bundled
+  `bin/ledger` when `CLAUDE_PLUGIN_ROOT` is set and that file is executable,
+  and otherwise the first `ledger` on the `PATH` Claude Code starts with. Before
+  0.4.0 it was always the `PATH` command. Updating the plugin now updates the
+  CLI its hooks use, while the pipx `ledger` stays the terminal command, so
+  upgrade both. The bundled command needs Python 3.11 or later on the `PATH`
+  and does not fall back to the pipx command when it finds none. A plugin
+  installed from a pinned marketplace stays on its old tag until you re-pin
+  it: `claude plugin marketplace update ledger-plugins` re-fetches the same
+  tag. Remove the plugin and the marketplace, add the marketplace at the new
+  tag, install the plugin, then restart the session:
+
+  ```sh
+  claude plugin uninstall ledger-hooks@ledger-plugins
+  claude plugin marketplace remove ledger-plugins
+  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.4.0
+  claude plugin install ledger-hooks@ledger-plugins
+  ```
+
+  The same plugin also takes the `ledger_db`, `ledger_operator` and
+  `ledger_harness` options from 0.4.0; an already-set environment value wins,
+  so an existing `env` block keeps working unchanged. Prove the re-pin:
+  `claude plugin list` shows `ledger-hooks@ledger-plugins` at version 0.4.0.
+
+- **`backup --to` refuses an existing destination (0.4.0).** Before 0.4.0,
+  `ledger backup --to FILE` replaced whatever file sat at FILE and exited 0.
+  Now a FILE that already exists is refused with `backup target already exists`
+  (exit 3) and left untouched. Fix: give each backup a new file name, or add
+  `--overwrite` to replace the file as before. A script that writes every
+  backup to one fixed path starts failing from its second run. Find the calls,
+  with FOLDER your scripts folder:
+
+  ```sh
+  grep -rn 'backup --to' FOLDER
+  ```
+
+- **New text holding control characters is refused (0.4.0).** A write is
+  refused, exit 3, and nothing is written, when the text of a note
+  (`item.note`), a progress entry (`item.progress`) or a spec body or
+  acceptance (`item.spec`) holds a control character other than line feed and
+  tab, or the line or paragraph separators U+2028 and U+2029, or a
+  bidirectional control (U+202A to U+202E, U+2066 to U+2069); or when an item
+  title or spec title holds any of those or a line feed or tab. The refusal is
+  `display_control_character:<kind>.<field>`, for example
+  `display_control_character:item.note.text` or
+  `display_control_character:item.spec.body_md`. A carriage return adds the
+  hint `U+000D: convert line endings to LF`, so a `ledger spec set
+  --body-file FILE` whose file has Windows (CRLF) line endings is refused.
+  Fix: convert the file to LF line endings (`tr -d '\r' < FILE > NEW`, then
+  pass NEW), and remove the control characters from text a script passes.
+  Rows written before 0.4.0 still verify, export and restore; the item
+  printers now show their control characters as escapes such as `\u001b`.
+  Find the spec calls that read a file:
+
+  ```sh
+  grep -rn 'body-file' FOLDER
+  ```
+
+- **`link --rel pr` checks its target (0.4.0).** The target must be
+  `owner/repo#N`, `#N` or `https://github.com/owner/repo/pull/N`, with N a
+  number that does not start with 0. Anything else is refused with the code
+  `bad_pr_target` (exit 3), and nothing is written; before 0.4.0 any text was
+  accepted. Find the calls:
+
+  ```sh
+  grep -rn 'link .*--rel pr' FOLDER
+  ```
+
+- **A repeated `new --source` prints `exists` (0.4.0).** The second call
+  returns the same item and writes nothing, as before, but its text line
+  starts with `exists` instead of `created`, and `--json` gives `result` as
+  `exists`. The first call still prints `created`. A script that matches
+  `created` to learn the item is there must accept `exists` too. Find the
+  scripts that call `new` with `--source`:
+
+  ```sh
+  grep -rn -e '--source' FOLDER
+  ```
+
 ## 2. Which tag to install
 
-Install `@v0.3.1`. Never pin 0.1.14. It shipped with a descriptor check that
+Install `@v0.4.0`. Never pin 0.1.14. It shipped with a descriptor check that
 compared the whole process's open descriptors before and after each connect, so
 another thread's open in that window, or SQLite reusing a descriptor it already
 held, refused a valid connect (`db_fd_unknown`, and sometimes `db_not_regular`,
@@ -283,16 +377,16 @@ would decide which one runs. Choose one:
   folder that holds that `bin/ledger`:
 
   ```sh
-  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.3.1"
+  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.4.0"
   ```
 
 - Or remove that venv, then run the pipx line below.
 
 Either way, `command -v ledger` then shows one path and `ledger --version`
-prints `ledger 0.3.1`.
+prints `ledger 0.4.0`.
 
 ```sh
-pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.3.1
+pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.4.0
 ```
 
 This is the [README's upgrade command](../README.md#upgrade) with the Python you
@@ -304,7 +398,7 @@ ledger --version
 ledger doctor
 ```
 
-`ledger --version` prints `ledger 0.3.1`. `ledger doctor` opens the database
+`ledger --version` prints `ledger 0.4.0`. `ledger doctor` opens the database
 that `--db` or `LEDGER_DB` names, so it also proves 1.1 and 1.2 on the real
 file: it exits 0 and prints the path, the schema version and the search-index
 state. A refusal from section 1 shows up here. If your shell says `ledger:
@@ -327,7 +421,7 @@ plugin's session-start hook uses.
 
 Prove it: `claude plugin list` shows `sdlc@skills` and its version, which is
 the newest in that repository's `CHANGELOG.md`. With `ledger_cli` set, a new
-session's first lines show `ledger 0.3.1` and the ledger's brief, or one
+session's first lines show `ledger 0.4.0` and the ledger's brief, or one
 `ledger session-start: ...` line naming what failed.
 
 ### 3.3 The ledger mod
@@ -341,4 +435,4 @@ claude plugin update ledger
 Then restart the session. Prove it: `claude plugin list` shows `ledger@mods` and
 its version, which is the newest in that repository's `CHANGELOG.md`, and
 `/ledger` opens its pane in a new session. The pane reads the ledger with
-`--json`; it needs ledger 0.1.5 or newer, so it needs nothing more of 0.3.1.
+`--json`; it needs ledger 0.1.5 or newer, so it needs nothing more of 0.4.0.
