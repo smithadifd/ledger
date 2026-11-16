@@ -7,10 +7,11 @@ root=$(CDPATH= cd -- "$dir/.." && pwd) || {
   printf '%s\n' "ledger: Python 3.11 or later is required" >&2
   exit 1
 }
+unset PYTHONEXECUTABLE __PYVENV_LAUNCHER__
 pick=
 for cand in python3 python3.14 python3.13 python3.12 python3.11 python; do
   command -v "$cand" >/dev/null 2>&1 || continue
-  if "$cand" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
+  if "$cand" -I -S -B -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)' 2>/dev/null; then
     pick=$cand
     break
   fi
@@ -19,6 +20,4 @@ if [ -z "$pick" ]; then
   printf '%s\n' "ledger: Python 3.11 or later is required" >&2
   exit 1
 fi
-PYTHONPATH="$root"
-export PYTHONPATH
-exec "$pick" -P -m ledger "$@"
+exec "$pick" -I -S -B -c 'import runpy, sys; sys.path.insert(0, sys.argv.pop(1)); runpy.run_module("ledger", run_name="__main__", alter_sys=True)' "$root" "$@"
