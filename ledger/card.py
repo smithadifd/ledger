@@ -652,12 +652,37 @@ def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
 # the command that prints the item's events and so recovers it.
 
 
+def _shell_arg(arg: str) -> str:
+    """``arg`` quoted for a POSIX shell, safe to print. An argument with no
+    code point ``_escaped`` names is ``shlex.quote``d. One that holds such a
+    code point (shlex would leave it raw) is written in bash's ANSI-C
+    ``$'...'`` form: backslash and quote are escaped, LF, CR and TAB are
+    ``\\n``, ``\\r`` and ``\\t``, and every other escaped code point is its
+    UTF-8 bytes as ``\\xHH``. The printed text then holds no control
+    character, and the shell decodes it back to the stored argument."""
+    if not any(_escaped(char) for char in arg):
+        return shlex.quote(arg)
+    out = []
+    for char in arg:
+        if char == "\\":
+            out.append("\\\\")
+        elif char == "'":
+            out.append("\\'")
+        elif char in _NAMED_ESCAPES:
+            out.append(_NAMED_ESCAPES[char])
+        elif _escaped(char):
+            out.extend(f"\\x{byte:02x}" for byte in char.encode("utf-8"))
+        else:
+            out.append(char)
+    return "$'" + "".join(out) + "'"
+
+
 def _command(program: str, args: list[str]) -> str:
     """A printed command: ``program`` (already shell-quoted by
-    ``invocation_prefix``) and the shell-quoted ``args``. shlex quotes an id
-    but leaves a control character inside it, so the joined arguments go
-    through ``_one_line``."""
-    return f"{program} {_one_line(shlex.join(args))}"
+    ``invocation_prefix``) and each argument quoted by ``_shell_arg``, so an
+    id holding a control character prints no raw control and a copied
+    command still passes the stored id."""
+    return " ".join([program, *(_shell_arg(arg) for arg in args)])
 
 
 def recover_command(item_id: str, program: str = "ledger") -> str:

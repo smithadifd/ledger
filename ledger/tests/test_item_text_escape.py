@@ -28,7 +28,19 @@ from pathlib import Path
 
 import pytest
 
-from ledger.card import _multi_line, _one_line, format_card, project_card
+from ledger.card import (
+    FOOTER,
+    _multi_line,
+    _one_line,
+    blockers_command,
+    children_command,
+    derive_next_step,
+    duplicates_command,
+    footer_line,
+    format_card,
+    project_card,
+    recover_command,
+)
 from ledger.export import export_events, verify_export
 from ledger.restore import replay_events, restore_export
 from ledger.schema import ValidationError
@@ -603,10 +615,77 @@ def test_an_item_id_with_a_control_prints_escaped_in_header_and_commands(
     assert_no_raw(out, ESC)
     shown = lines(out.rstrip("\n"))
     assert shown[0] == "# " + r"X\u001b[2J"
-    assert r"X\u001b[2J" in shown[-1]
+    assert "$'X\\x1b[2J'" in shown[-1]
+
+
+# An id holding every kind of code point a printed command must carry safely.
+HOSTILE_ID = "X" + ESC + "[2J'q\\" + RLO + LS + "\n" + BEL + "\t y"
+
+
+def _bash_args(command: str) -> list[str]:
+    """The arguments bash passes to ``ledger`` when it runs ``command``."""
+    script = "ledger() { printf '%s\\0' \"$@\"; }\n" + command
+    out = subprocess.run(["bash", "-c", script], capture_output=True, check=True).stdout
+    return out.decode("utf-8").split("\0")[:-1]
+
+
+@pytest.mark.parametrize("build,expected", [
+    pytest.param(recover_command, ["export-item", "--json", "--", HOSTILE_ID], id="recover"),
+    pytest.param(lambda item_id, program: footer_line(item_id, program)[len(FOOTER) + 2:-1],
+                 ["export-item", "--", HOSTILE_ID], id="footer"),
+    pytest.param(children_command, ["query", f"--parent={HOSTILE_ID}", "--all"], id="children"),
+    pytest.param(duplicates_command, ["query", f"--duplicate-of={HOSTILE_ID}", "--all"],
+                 id="duplicates"),
+    pytest.param(blockers_command, ["query", f"--blocks={HOSTILE_ID}", "--open", "--all"],
+                 id="blockers"),
+    pytest.param(
+        lambda item_id, program: derive_next_step(
+            status="open", blockers=(), open_questions=(), owner=None, claim=None,
+            item_id=item_id, program=program,
+        )[len("Resume with: "):],
+        ["resume", f"--item={HOSTILE_ID}"], id="next-step"),
+])
+def test_a_printed_command_round_trips_a_control_bearing_id(build, expected) -> None:
+    command = build(HOSTILE_ID, "ledger")
+    assert_no_raw(command, ESC, BEL, RLO, LS, "\n", "\t")
+    assert command.startswith("ledger ")
+    assert _bash_args(command) == expected
+
+
+def test_the_card_json_commands_match_the_printed_ones(tmp_path, monkeypatch) -> None:
+    db = tmp_path / "ledger.db"
+    with pre_rule(), open_ledger(db) as lg:
+        item(lg, item_id=HOSTILE_ID)
+    out = text_out(monkeypatch, db, "card", "--", HOSTILE_ID)
+    raw, data = json_out(monkeypatch, db, "card", "--", HOSTILE_ID)
+    assert_no_raw(raw, ESC)
+    assert data["footer"] in lines(out)
+    assert_no_raw(data["footer"], ESC, BEL, RLO, LS, "\n", "\t")
+    assert _bash_args(data["footer"][len(FOOTER) + 2:-1])[-1] == HOSTILE_ID
+    assert_no_raw(data["next_step"], ESC, BEL, RLO, LS, "\n", "\t")
+    step = data["next_step"]
+    assert step.startswith("Resume with: ")
+    assert _bash_args(step[len("Resume with: "):])[-2:] == ["resume", f"--item={HOSTILE_ID}"]
 
 
 # --- T11, T11b: spec diff -------------------------------------------------------------
+
+
+def test_spec_diff_shows_a_stored_control_changed_to_its_escape_text(
+        tmp_path, monkeypatch) -> None:
+    db = tmp_path / "ledger.db"
+    with pre_rule(), open_ledger(db) as lg:
+        item(lg)
+        spec(lg, body_md="a" + ESC + "\n")
+        spec(lg, body_md="a" + r"\u001b" + "\n")
+    out = text_out(monkeypatch, db, "spec", "diff", ITEM, "1", "2")
+    assert_no_raw(out, ESC)
+    shown = lines(out)
+    assert "no content change" not in shown
+    body = shown.index("## body_md")
+    assert r"-a\u001b" in shown[body:]
+    assert r"+a\u001b" in shown[body:]
+
 
 DIFF_ID = "D" + OSC
 
@@ -618,7 +697,7 @@ def _diff_item(db) -> None:
         spec(lg, DIFF_ID, title="A\tB", body_md="p" + ESC + "[2J" + RLO + "\nq" + LS + "r\n")
 
 
-def test_spec_diff_escapes_each_value_before_splitting_it(tmp_path, monkeypatch) -> None:
+def test_spec_diff_escapes_each_printed_line(tmp_path, monkeypatch) -> None:
     db = tmp_path / "ledger.db"
     _diff_item(db)
     out = text_out(monkeypatch, db, "spec", "diff", "--", DIFF_ID, "1", "2")

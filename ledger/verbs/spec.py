@@ -254,8 +254,9 @@ def _show_text(data: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
-# How the printed diff escapes each content field before it is split into
-# lines: after escaping, LF is the only line break left.
+# How the printed diff escapes each diff line of a content field. The diff
+# is computed on the stored lines first, so two different stored values never
+# print as "no change".
 _DIFF_ESCAPERS = {
     "title": _one_line,
     "body_md": _multi_line,
@@ -282,31 +283,25 @@ def diff_fields(
 ) -> list[dict[str, Any]]:
     """One entry per content field whose value differs, in field order.
 
-    Which fields changed is decided on the stored values. With ``escape``
-    each value is escaped (``_DIFF_ESCAPERS``) before it is split into diff
-    lines, for the printed diff; an absent field (None) stays absent.
-    Without it the entries keep the stored code points, for ``--json``.
+    Which fields changed, and the diff lines, are computed on the stored
+    values split on LF. With ``escape`` each emitted diff line (headers
+    included) is then escaped (``_DIFF_ESCAPERS``), for the printed diff;
+    without it the lines keep the stored code points, for ``--json``. An
+    absent field (None) has no lines.
     """
     changed = []
     for name in SPEC_CONTENT_FIELDS:
         before, after = old.get(name), new.get(name)
         if before == after:
             continue
-        shown_before, shown_after = before, after
+        diff = list(difflib.unified_diff(
+            _lines(before), _lines(after),
+            fromfile=f"v{old['version']}", tofile=f"v{new['version']}",
+            lineterm="",
+        ))
         if escape:
-            escaper = _DIFF_ESCAPERS[name]
-            shown_before = None if before is None else escaper(before)
-            shown_after = None if after is None else escaper(after)
-        changed.append({
-            "field": name,
-            "from": before,
-            "to": after,
-            "diff": list(difflib.unified_diff(
-                _lines(shown_before), _lines(shown_after),
-                fromfile=f"v{old['version']}", tofile=f"v{new['version']}",
-                lineterm="",
-            )),
-        })
+            diff = [_DIFF_ESCAPERS[name](line) for line in diff]
+        changed.append({"field": name, "from": before, "to": after, "diff": diff})
     return changed
 
 
