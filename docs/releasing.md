@@ -45,8 +45,9 @@ a line that is exactly
 `claude plugin marketplace add https://github.com/smithadifd/ledger.git#v`
 followed by `__version__`, and no other fenced line on those pages holds the
 word `marketplace` (so a `marketplace update` or `marketplace remove` command
-there goes in prose). Prose outside fenced code blocks is not checked. The
-test also fails when, in any tracked Markdown file (`CHANGELOG.md` above its
+there goes in prose). A line anywhere on those pages that holds
+`marketplace add` must be that exact line as well, so an unpinned add in
+prose fails too. The test also fails when, in any tracked Markdown file (`CHANGELOG.md` above its
 first released section), the grep above finds a different number of
 next-release markers than the file has, as when a marker is wrapped across a
 line break. An unpinned add follows main, so a person who
