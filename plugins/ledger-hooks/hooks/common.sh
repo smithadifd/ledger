@@ -40,13 +40,13 @@ ledger_hooks_export_options() {
   envf=$1
   [ -n "$envf" ] || return 0
   if [ -n "$LEDGER_DB_FROM_OPTION" ]; then
-    printf 'export LEDGER_DB=%s\n' "$(ledger_hooks_quote "$LEDGER_DB")" >>"$envf" || return 1
+    { printf 'export LEDGER_DB=%s\n' "$(ledger_hooks_quote "$LEDGER_DB")" >>"$envf"; } 2>/dev/null || return 1
   fi
   if [ -n "$LEDGER_OPERATOR_FROM_OPTION" ]; then
-    printf 'export LEDGER_OPERATOR=%s\n' "$(ledger_hooks_quote "$LEDGER_OPERATOR")" >>"$envf" || return 1
+    { printf 'export LEDGER_OPERATOR=%s\n' "$(ledger_hooks_quote "$LEDGER_OPERATOR")" >>"$envf"; } 2>/dev/null || return 1
   fi
   if [ -n "$LEDGER_HARNESS_FROM_OPTION" ]; then
-    printf 'export LEDGER_HARNESS=%s\n' "$(ledger_hooks_quote "$LEDGER_HARNESS")" >>"$envf" || return 1
+    { printf 'export LEDGER_HARNESS=%s\n' "$(ledger_hooks_quote "$LEDGER_HARNESS")" >>"$envf"; } 2>/dev/null || return 1
   fi
   return 0
 }

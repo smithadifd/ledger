@@ -21,4 +21,4 @@ if [ -z "$pick" ]; then
 fi
 PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
 export PYTHONPATH
-exec "$pick" -m ledger "$@"
+exec "$pick" -P -m ledger "$@"

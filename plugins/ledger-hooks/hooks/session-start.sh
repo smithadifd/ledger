@@ -13,10 +13,13 @@ ledger_hooks_prepare || exit 0
 [ -n "${LEDGER_DB:-}" ] || exit 0
 input=$(cat)
 if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
-  ledger_hooks_export_options "$CLAUDE_ENV_FILE" || exit 0
-  printf '%s\n' "$input" | "$LEDGER_HOOKS_CMD" resume --hook-env 2>/dev/null >>"$CLAUDE_ENV_FILE"
-  rc=$?
-  [ "$rc" -eq 0 ] || printf 'ledger-hooks: session env failed (exit %s)\n' "$rc" >&2
+  if { ledger_hooks_export_options "$CLAUDE_ENV_FILE"; } 2>/dev/null; then
+    { printf '%s\n' "$input" | "$LEDGER_HOOKS_CMD" resume --hook-env 2>/dev/null >>"$CLAUDE_ENV_FILE"; } 2>/dev/null
+    rc=$?
+    [ "$rc" -eq 0 ] || printf 'ledger-hooks: session env failed (exit %s)\n' "$rc" >&2
+  else
+    printf 'ledger-hooks: session env failed\n' >&2
+  fi
 fi
 printf '%s\n' "$input" | LEDGER_HARNESS="${LEDGER_HARNESS:-claude-code}" "$LEDGER_HOOKS_CMD" resume --hook-model >/dev/null 2>&1
 rc=$?

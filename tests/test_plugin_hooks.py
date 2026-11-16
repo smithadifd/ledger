@@ -541,6 +541,22 @@ def test_t26_the_real_cli_refusal_leaves_the_env_file_byte_identical(rig: Rig) -
     assert env_file.read_bytes() == b"export KEEP=1\n"
 
 
+def test_session_start_env_file_directory_still_prints_brief(rig: Rig) -> None:
+    new_item(rig)
+    env_dir = rig.tmp / "claude-env-dir"
+    env_dir.mkdir()
+    ran = session_hook(rig, env={
+        "LEDGER_DB": None,
+        "CLAUDE_PLUGIN_OPTION_LEDGER_DB": str(rig.db),
+        "CLAUDE_ENV_FILE": str(env_dir),
+    })
+    out = ran.stdout + ran.stderr
+    assert ran.returncode == 0
+    assert ran.stdout.startswith(BRIEF_START)
+    assert str(env_dir) not in out
+    assert "ledger-hooks: session env failed" in ran.stderr
+
+
 # --- T19: the manifests -------------------------------------------------------
 
 
