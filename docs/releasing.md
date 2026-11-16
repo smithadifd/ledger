@@ -39,13 +39,18 @@ paths:
   section has an "Upgrading" paragraph, carry what an upgrader needs from it
   into section 1.5
 
-`tests/test_docs_pinned_install.py` fails when the source of any plugin
-marketplace install command in the tracked Markdown files, whatever repository
-it names, is anything other than exactly
-`https://github.com/smithadifd/ledger.git#v` followed by `__version__`, and when
-a next-release marker is wrapped across a line break where the grep above
-cannot find it. An unpinned add follows main, so a person who ran it would get
-plugin changes that no release has shipped.
+`tests/test_docs_pinned_install.py` fails unless each of `README.md`,
+`docs/start-here.md` and `docs/upgrading.md` has, inside a fenced code block,
+a line that is exactly
+`claude plugin marketplace add https://github.com/smithadifd/ledger.git#v`
+followed by `__version__`, and no other fenced line on those pages holds the
+word `marketplace` (so a `marketplace update` or `marketplace remove` command
+there goes in prose). Prose outside fenced code blocks is not checked. The
+test also fails when, in any tracked Markdown file (`CHANGELOG.md` above its
+first released section), the grep above finds a different number of
+next-release markers than the file has, as when a marker is wrapped across a
+line break. An unpinned add follows main, so a person who
+ran it would get plugin changes that no release has shipped.
 
 The pull requests for v0.1.21 and v0.1.22 changed only `pyproject.toml`,
 `ledger/__init__.py` and `CHANGELOG.md`.
