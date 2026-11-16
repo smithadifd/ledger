@@ -273,7 +273,7 @@ def test_a_pointer_from_the_sidecar_prints_escaped(tmp_path, name) -> None:
     db = tmp_path / "ledger.db"
     with open_ledger(db) as lg:
         item(lg)
-        entry = {"ref": "docs/a.md", "note": "a note", name: V}
+        entry = {"ref": "notes/a.md", "note": "a note", name: V}
         shown = format_card(project_card(lg, ITEM, pointers=lambda _item: [entry]))
     assert_no_raw(shown, ESC)
     assert V_SHOWN in shown
