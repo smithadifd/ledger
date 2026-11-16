@@ -25,6 +25,19 @@ python3 --version
 It must print 3.11 or later. The ledger needs nothing else from Python: it
 has no runtime dependencies.
 
+If it prints an older version, such as 3.9, install a newer Python first.
+On a Mac without [Homebrew](https://brew.sh/), use the macOS installer from
+https://www.python.org/downloads/macos/. Open a new terminal afterwards and
+check the version the installer put in place, naming its minor version (here
+3.12; use the one you installed):
+
+```sh
+python3.12 --version
+```
+
+It must print 3.11 or later. Where this page then says `python3.12`, use the
+command that printed it.
+
 ## 2. pipx
 
 [pipx](https://pipx.pypa.io/) installs a command-line program into an
@@ -51,6 +64,9 @@ again. From then on pipx keeps each program it installs in a folder of its own
 https://pipx.pypa.io/stable/how-to/install-pipx.html. Do not use a bare
 `pip install` for this: current macOS and Homebrew Python refuse it
 (PEP 668, `externally-managed-environment`).
+
+If you cannot get pipx, skip it: step 3 shows a second way to install the
+ledger, into a virtual environment made with the Python from step 1.
 
 ## 3. Install the ledger at a tag
 
@@ -80,6 +96,29 @@ says `ledger: command not found`, run `pipx ensurepath` and open a new
 terminal. To move to a newer tag later, see
 [Upgrade](../README.md#upgrade); it takes one command and nothing else.
 From 0.1.8 or older, read [Upgrading across many releases](upgrading.md) first.
+
+With no pipx, install into a virtual environment made with the Python from
+step 1 (the tag is the one printed above; `python3.12` is the command that
+printed 3.11 or later):
+
+```sh
+mkdir -p ~/ledger-venv
+cd ~/ledger-venv
+python3.12 -m venv .venv
+.venv/bin/python -m pip install git+https://github.com/smithadifd/ledger@vX.Y.Z
+.venv/bin/ledger --version
+```
+
+The command is then `~/ledger-venv/.venv/bin/ledger`. Either type that full
+path wherever this page says `ledger`, or put the folder on your `PATH` with
+this line in your shell profile and open a new terminal:
+
+```sh
+export PATH="$HOME/ledger-venv/.venv/bin:$PATH"
+```
+
+The hooks in step 9 run the first `ledger` on the `PATH` Claude Code starts
+with, so for them the folder must be on that `PATH`.
 
 ## 4. Decide where the database lives
 
@@ -142,8 +181,7 @@ already a whole valid settings file. Write the database path in full; `echo
 Leave `LEDGER_HARNESS` out of the settings: the plugin's session-start hook
 (step 9) sets it to `claude-code` when it is unset. A session started from a
 shell that exports `LEDGER_HARNESS=cli` inherits that value instead, so run
-`unset LEDGER_HARNESS` before you start Claude Code, or put
-`LEDGER_HARNESS=cli` in front of the commands you type. Reads such as `doctor`
+`unset LEDGER_HARNESS` before you start Claude Code. Reads such as `doctor`
 and `verify` do not need `LEDGER_HARNESS`.
 
 ## 6. Make the first write
@@ -158,6 +196,18 @@ ledger new --type ticket --title "My first item" --id first-1
 
 It prints one line that starts with `created` and names `first-1`. Run it
 only once: a second run with the same id is refused.
+
+With the `ledger-hooks` plugin from step 9 installed, a write can come
+before this one. When `LEDGER_DB` names a file that does not exist, the
+first prompt you submit in a Claude Code session is passed by the
+UserPromptSubmit hook to `ledger capture --kind prompt`, which opens the
+database for writing: it creates the file and the folders above it, applies
+every migration and stores the prompt as the first event. The question
+picker's capture (`ledger capture --kind picker`) does the same. A prompt
+the capture skips (a harness frame, an injected prefix, an opted-out folder,
+or `capture_prompts` set to `false`) creates nothing, and neither does the
+session-start hook. If you want your own first item to be the first event,
+make this write before you start a session with the plugin.
 
 ## 7. Claim the database for its system
 
