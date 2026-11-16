@@ -5,9 +5,19 @@ Never copies the live database file. The copy is written at a unique
 ``.<name>.*.partial`` name beside the destination, checked with ``PRAGMA
 integrity_check``, and renamed only when the check returns ``ok`` and the
 source path still names the file the copy was read from.
+
+A destination that already exists is refused unless the caller passes
+``overwrite=True`` (the CLI's ``--overwrite``), the same rule ``restore``
+applies to its target. Without ``overwrite`` the copy is published only
+with a hard link, which fails atomically when the name is taken, so a file
+that appears while the copy runs is never replaced. A filesystem that cannot
+make the hard link refuses the backup instead: nothing is published, the
+destination is left exactly as it was, and the caller passes
+``overwrite=True`` to publish there by rename.
 """
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import stat
@@ -174,8 +184,88 @@ def _refuse_live_destination(source_path: Path, dest_path: Path) -> None:
         ) from exc
 
 
-def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
-    """Snapshot ``db_path`` into ``dest`` via the online backup API."""
+def _refuse_existing_target(dest_path: Path) -> None:
+    """Refuse a backup destination that any file already has.
+
+    Decided by file identity, as ``restore`` decides its own target: a
+    spelling the volume reads as an existing file's name refuses, and a name
+    that cannot be read refuses too.
+    """
+    try:
+        occupied = file_identity(dest_path) is not None
+    except OSError as exc:
+        raise LedgerError(
+            f"backup target cannot be checked: {dest_path} ({exc})"
+        ) from exc
+    if occupied:
+        raise LedgerError(
+            f"backup target already exists: {dest_path} "
+            f"(pass --overwrite to replace it)"
+        )
+
+
+# Why a filesystem cannot make the hard link that publishes a backup without
+# replacing: no permission to link (EPERM, as on some network and FAT-family
+# volumes), links not supported there (ENOTSUP, which is EOPNOTSUPP on some
+# platforms), a destination on another device (EXDEV) or a file at its link
+# limit (EMLINK). Any other error is a real failure and propagates.
+_LINK_UNSUPPORTED = frozenset(
+    {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}
+)
+
+
+def _taken_error(dest_path: Path) -> LedgerError:
+    return LedgerError(
+        f"backup target already exists: {dest_path} "
+        f"(pass --overwrite to replace it)"
+    )
+
+
+def _cannot_publish_error(dest_path: Path) -> LedgerError:
+    return LedgerError(
+        f"backup target filesystem cannot publish without replacing: {dest_path} "
+        f"(hard links are not supported there; pass --overwrite to publish by rename)"
+    )
+
+
+def _publish_without_replacing(partial: Path, dest_path: Path) -> None:
+    """Move ``partial`` to ``dest_path`` unless a file has that name by then.
+
+    The only way to publish here is a hard link, which raises
+    ``FileExistsError`` atomically when the name is taken, so a file that
+    appears at any moment before the link, however late, is refused and left
+    as it was; the partial is unlinked once the link holds. A filesystem that
+    cannot make the link (see ``_LINK_UNSUPPORTED``) refuses the backup with
+    ``backup target filesystem cannot publish without replacing``. There is
+    no other way to publish without replacing, so nothing is written at
+    ``dest_path``: an absent name stays absent and a file there is left byte
+    for byte as it was. On either refusal the caller removes the partial.
+    """
+    try:
+        os.link(partial, dest_path)
+    except FileExistsError as exc:
+        raise _taken_error(dest_path) from exc
+    except OSError as exc:
+        if exc.errno not in _LINK_UNSUPPORTED:
+            raise
+        raise _cannot_publish_error(dest_path) from exc
+    partial.unlink(missing_ok=True)
+
+
+def backup_db(
+    db_path: Path | str, dest: Path | str, *, overwrite: bool = False
+) -> BackupResult:
+    """Snapshot ``db_path`` into ``dest`` via the online backup API.
+
+    A ``dest`` that already exists is refused (``backup target already
+    exists``) and left untouched, unless ``overwrite`` is true. The check
+    runs before the copy starts and again, atomically, when the copy is
+    published by hard link (see ``_publish_without_replacing``). On a
+    filesystem that cannot make the hard link the backup is refused
+    (``backup target filesystem cannot publish without replacing``) and
+    ``dest`` is left as it was; there, ``overwrite`` publishes by rename. The
+    live database and its side files are refused either way.
+    """
     source_path = resolve_db_path(db_path)
     dest_path = resolve_db_path(dest)
     # Before the source precheck, which refuses a hard-linked live file for
@@ -186,6 +276,8 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
     # A file published on a name SQLite treats as a side file is removed by
     # a later last closer.
     refuse_side_file_name(dest_path, "backup")
+    if not overwrite:
+        _refuse_existing_target(dest_path)
     # A backup of a newer schema would later be read by this same older code.
     _refuse_newer_schema_before_connect(source_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -229,8 +321,15 @@ def backup_db(db_path: Path | str, dest: Path | str) -> BackupResult:
             more = f" (+{len(lines) - 1} more)" if len(lines) > 1 else ""
             raise LedgerError(f"backup failed integrity_check: {lines[0]}{more}")
         _refuse_newer_schema_in_copy(partial)
-        partial.replace(dest_path)
+        if overwrite:
+            partial.replace(dest_path)
+        else:
+            # The copy can take long: publish so that a file that took the
+            # name meanwhile is not replaced either.
+            _publish_without_replacing(partial, dest_path)
     except BaseException:
+        # Every refusal and error removes this backup's own partial and
+        # nothing else: the destination is never touched here.
         partial.unlink(missing_ok=True)
         raise
     return BackupResult(path=dest_path, integrity="ok")

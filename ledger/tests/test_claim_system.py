@@ -1006,7 +1006,7 @@ def test_a_backup_onto_the_path_after_the_busy_checkpoint_is_refused(
     seen = outcome_reads(monkeypatch)
     with a_reader_holding(db) as release:
         started = settling_checkpoints(
-            monkeypatch, release, before=lambda lg: backup_db(source, db)
+            monkeypatch, release, before=lambda lg: backup_db(source, db, overwrite=True)
         )
         code, payload, err = claim(monkeypatch, db, "work")
     assert code == EXIT_REFUSED, (payload, err)
