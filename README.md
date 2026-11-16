@@ -119,8 +119,9 @@ the environment names the database, the hooks need the `ledger` command and
 1. [Install the `ledger` command](#1-install-the-ledger-command) at a release
    tag.
 2. [Set the environment](#2-set-the-environment): `LEDGER_DB`,
-   `LEDGER_OPERATOR` and, for writes you type yourself, `LEDGER_HARNESS`, in
-   your shell and in the `env` block of Claude Code's settings.
+   `LEDGER_OPERATOR` and `LEDGER_HARNESS` (`cli`) in your shell, and
+   `LEDGER_DB` and `LEDGER_OPERATOR` in the `env` block of Claude Code's
+   settings.
 3. Install the `ledger-hooks` plugin
    ([Claude Code plugin](#claude-code-plugin)).
 4. Install the skills plugin and run its setup step, which pins its
@@ -130,7 +131,14 @@ the environment names the database, the hooks need the `ledger` command and
 
 The first write, which creates the database, comes after step 2 and before the
 self-check: `ledger doctor` fails with `database does not exist` until a write
-has made the file ([Quick start](#quick-start)). For the same walk with each
+has made the file ([Quick start](#quick-start)). With the `ledger-hooks`
+plugin installed and `LEDGER_DB` naming a file that does not exist, the first
+prompt you submit in a Claude Code session can be that write: the
+UserPromptSubmit hook passes it to `ledger capture --kind prompt`, which
+opens the database for writing, so it creates the file and the folders above
+it, applies every migration and stores the prompt as the first event (the
+question picker's capture does the same; a prompt the capture skips, and the
+session-start hook, create nothing). For the same walk with each
 step checked before the next, follow [docs/start-here.md](docs/start-here.md).
 
 ### 1. Install the ledger command
@@ -179,6 +187,19 @@ ledger --version
 The repository's [tags page](https://github.com/smithadifd/ledger/tags) lists
 every tag. Without `@vX.Y.Z`, pipx installs the default branch.
 
+With no pipx, install the same tag into a virtual environment made with a
+Python 3.11 or newer (here `python3.12`), and run the command from that
+environment's `bin` folder, by its full path or with that folder on your
+`PATH`:
+
+```sh
+mkdir -p ~/ledger-venv
+cd ~/ledger-venv
+python3.12 -m venv .venv
+.venv/bin/python -m pip install git+https://github.com/smithadifd/ledger@vX.Y.Z
+.venv/bin/ledger --version
+```
+
 To work on the ledger itself, install from a clone into a virtual
 environment:
 
@@ -198,15 +219,15 @@ clone with nothing installed, `python3 -m ledger <verb>` is the same as
 ### 2. Set the environment
 
 The ledger has no default database path and takes its settings from the
-environment. Set the same values in two places: your shell, for the commands
-you type, and the `env` block of Claude Code's settings, for the sessions it
-starts.
+environment. Set the values in two places: your shell, for the commands you
+type, and the `env` block of Claude Code's settings, for the sessions it
+starts. `LEDGER_HARNESS` goes in the shell only (see the table).
 
 | Variable | Set it to | Where |
 |----------|-----------|-------|
 | `LEDGER_DB` | an absolute path, `~/.local/share/ledger/<system>.db`, with a short name of your own for `<system>` (a relative path resolves against whatever folder a session starts in) | shell and Claude Code settings |
 | `LEDGER_OPERATOR` | your name: the person the writes are made for | shell and Claude Code settings |
-| `LEDGER_HARNESS` | `cli`: what is writing, which every write you type needs | shell; optional in Claude Code settings, where the plugin's session-start hook sets `claude-code` when it is unset |
+| `LEDGER_HARNESS` | `cli`: what is writing, which every write you type needs | shell; in Claude Code settings it is optional and best left out, because the plugin's session-start hook sets `claude-code` when it is unset |
 
 In your shell, put these lines in your profile (for zsh, `~/.zshrc`) so every
 new terminal has them; the shell expands `~` to an absolute path. The first
@@ -238,8 +259,7 @@ is already a whole valid settings file. Write the database path in full;
 
 A Claude Code session started from a shell that exports `LEDGER_HARNESS=cli`
 inherits it, and its writes then say `cli` rather than `claude-code`: run
-`unset LEDGER_HARNESS` before you start it, or leave the line out of your
-profile and put `LEDGER_HARNESS=cli` in front of the commands you type.
+`unset LEDGER_HARNESS` before you start it.
 
 Steps 3 and 4 are the plugin and the skills:
 [Claude Code plugin](#claude-code-plugin) and
@@ -616,7 +636,7 @@ The hooks and the `ledger` command they run read `LEDGER_DB` and
 `LEDGER_OPERATOR` from the environment Claude Code starts with, so set them
 the way [step 2](#2-set-the-environment) does, in the `env` block of Claude
 Code's settings. The hooks supply `LEDGER_HARNESS` themselves: they pass
-`claude-code` when it is unset, so it can stay out of that block.
+`claude-code` when it is unset, so it is best left out of that block.
 
 From the next release (on main, not in v0.3.1), the plugin's `bin/ledger` puts
 `ledger` on the PATH of a Claude Code session that has the plugin enabled.
