@@ -65,7 +65,10 @@ def run(args, ctx: Context) -> Result:
     lg = open_db(ctx, write=True)
     try:
 
+        created = False
+
         def precondition(conn) -> None:
+            nonlocal created
             existing = [row["item_id"] for row in conn.execute("SELECT item_id FROM v_items")]
             if item_id in existing:
                 raise CliError(
@@ -73,6 +76,7 @@ def run(args, ctx: Context) -> Result:
                     code="conflict",
                     exit_code=EXIT_REFUSED,
                 )
+            created = True
 
         def prior_event():
             return next(
@@ -110,9 +114,10 @@ def run(args, ctx: Context) -> Result:
                 event = settle(prior)
     finally:
         lg.close()
+    verb = "created" if created else "exists"
     return Result(
-        data={"item_id": item_id, "event": event_dict(event)},
-        text=f"created\t{item_id}\tevent={event.id}\t{args.type}\t{args.title}",
+        data={"item_id": item_id, "event": event_dict(event), "result": verb},
+        text=f"{verb}\t{item_id}\tevent={event.id}\t{args.type}\t{args.title}",
     )
 
 

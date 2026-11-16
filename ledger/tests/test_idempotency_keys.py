@@ -166,7 +166,7 @@ def test_note_without_key_writes_each_time(monkeypatch, db: str) -> None:
 
 
 def test_link_retry_with_same_key_writes_once(monkeypatch, db: str) -> None:
-    argv = ["link", "it-a", "--rel", "pr", "--target", "pr-1", "--idempotency-key", "l-1"]
+    argv = ["link", "it-a", "--rel", "pr", "--target", "org/repo#1", "--idempotency-key", "l-1"]
     code, first, err = _run(monkeypatch, db, *argv)
     assert code == 0, err
     before = _count(db)
@@ -178,13 +178,13 @@ def test_link_retry_with_same_key_writes_once(monkeypatch, db: str) -> None:
 
 def test_link_same_key_different_target_conflicts(monkeypatch, db: str) -> None:
     code, _first, err = _run(
-        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "pr-1",
+        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "org/repo#1",
         "--idempotency-key", "l-1",
     )
     assert code == 0, err
     before = _count(db)
     code, out, _err = _run(
-        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "pr-2",
+        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "org/repo#2",
         "--idempotency-key", "l-1",
     )
     assert code == EXIT_REFUSED
@@ -195,7 +195,7 @@ def test_link_same_key_different_target_conflicts(monkeypatch, db: str) -> None:
 def test_link_without_key_writes_each_time(monkeypatch, db: str) -> None:
     before = _count(db)
     for _ in range(2):
-        code, _out, err = _run(monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "pr-1")
+        code, _out, err = _run(monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "org/repo#1")
         assert code == 0, err
     assert _count(db) == before + 2
 
@@ -297,7 +297,7 @@ def _status(db: str, item_id: str) -> str:
 
 def test_plain_link_then_duplicate_of_same_key_conflicts(monkeypatch, db: str) -> None:
     code, _out, err = _run(
-        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "pr-1",
+        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "org/repo#1",
         "--idempotency-key", "k-1",
     )
     assert code == 0, err
@@ -331,7 +331,7 @@ def test_duplicate_of_then_plain_link_same_key_conflicts(monkeypatch, db: str) -
     assert code == 0, err
     before = _count(db)
     code, out, _err = _run(
-        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "pr-1",
+        monkeypatch, db, "link", "it-a", "--rel", "pr", "--target", "org/repo#1",
         "--idempotency-key", "k-1",
     )
     assert code == EXIT_REFUSED

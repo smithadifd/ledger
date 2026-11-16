@@ -14,6 +14,10 @@ the write transaction. The latest ``item.spec`` event is the current spec;
 kind, so ``ledger append`` and ``append-many`` refuse it and no version can
 skip the N+1 and content-hash rules. A merge class is one of MC-0 to MC-4.
 
+``spec set`` is the verb's only write and needs ``LEDGER_HARNESS``; ``show``
+and ``diff`` are reads and do not, so the verb is not ``writes`` and
+``spec set`` checks for itself, as ``doc add`` does.
+
 ``spec set --expect-revision ID`` is the compare-and-set ``append``,
 ``state``, ``note`` and ``append-many`` take, parsed by the same code: inside
 the write transaction, after the not-found check and before the unchanged
@@ -40,6 +44,7 @@ from ledger.schema import (
 from ledger.store import Event, Ledger, _check_expected_revision, canonical_dumps
 from ledger.verbs import (
     EXIT_NOT_FOUND,
+    EXIT_REFUSED,
     CliError,
     Context,
     Result,
@@ -270,6 +275,16 @@ def diff_fields(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[dict[str
 
 
 def _run_set(args, ctx: Context) -> Result:
+    # The verb's one write: it needs the writer identity, refused exactly as
+    # the CLI refuses a write verb without it. show and diff are reads, so
+    # the verb is not ``writes`` and this action checks for itself.
+    if not ctx.harness:
+        raise CliError(
+            "LEDGER_HARNESS is required for writes; set it, e.g. "
+            "LEDGER_HARNESS=claude-code",
+            code="missing_harness",
+            exit_code=EXIT_REFUSED,
+        )
     _refuse_flags(args, ("version",), "set")
     if args.versions:
         raise UsageError("spec set takes no versions")
@@ -401,5 +416,5 @@ VERB = Verb(
     help="set, show or diff an item's spec (versioned ticket content)",
     add_arguments=add_arguments,
     run=run,
-    writes=True,
+    writes=False,
 )

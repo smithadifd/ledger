@@ -883,7 +883,8 @@ def _prepare(action: str, tmp_path: Path, monkeypatch) -> tuple[Path, list[str],
 
 def test_the_probe_covers_every_database_writing_action() -> None:
     cli_writers = {name for name, verb in discover_verbs().items() if verb.writes}
-    assert set(WRITE_ACTIONS) == cli_writers | {"doc", "restore"}
+    # ``doc`` and ``spec`` are read verbs with one write action each.
+    assert set(WRITE_ACTIONS) == cli_writers | {"doc", "restore", "spec"}
 
 
 @pytest.mark.parametrize("action", WRITE_ACTIONS)
