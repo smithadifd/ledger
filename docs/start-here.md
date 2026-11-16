@@ -261,36 +261,33 @@ your prompts and question-picker answers, install the ledger's plugin from
 Claude Code:
 
 ```sh
-claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.3.1
+claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.4.0
 claude plugin install ledger-hooks@ledger-plugins
 ```
 
-The `#v0.3.1` suffix pins the plugin to that release. An add without the
+The `#v0.4.0` suffix pins the plugin to that release. An add without the
 suffix follows the repository's main branch, which can carry plugin changes
 that no release has shipped. After a later release, put that release's tag
-where `v0.3.1` is.
+where `v0.4.0` is.
 
-With v0.3.1, the version this page pins, the hooks and the `ledger` command
+With v0.4.0, the version this page pins, the hooks and the `ledger` command
 they run read `LEDGER_DB` and `LEDGER_OPERATOR` from the environment Claude
 Code starts with: the `env` block of its settings (step 5). The hooks supply
 `LEDGER_HARNESS` themselves (`claude-code` when it is unset), which is why
 step 5 leaves it out of that block. The hooks do nothing until `LEDGER_DB` is
-set there. They run the first `ledger` on the `PATH` Claude Code starts with,
-which is the pipx command from step 3, and `ledger` in a terminal comes from
-pipx too; v0.3.1 ships no command of its own.
+set there or the `ledger_db` plugin option names a database.
 
-From the next release (on main, not in v0.3.1), a database can also be named
-as the `ledger_db` plugin option.
-From the next release (on main, not in v0.3.1), an already-set `LEDGER_DB`,
-`LEDGER_OPERATOR` or `LEDGER_HARNESS` is kept, and a plugin option fills only
-an unset one.
-From the next release (on main, not in v0.3.1), the options are set with
+A database can also be named as the `ledger_db` plugin option. An already-set
+`LEDGER_DB`, `LEDGER_OPERATOR` or `LEDGER_HARNESS` is kept, and a plugin
+option fills only an unset one. The options are set with
 `claude plugin configure ledger-hooks@<marketplace> --values-stdin` and a JSON
 object whose keys are `ledger_db` (absolute path), `ledger_operator`, and
 `ledger_harness` (optional).
-From the next release (on main, not in v0.3.1), inside a Claude Code session
-that has the plugin enabled, `ledger` is on the session path from the plugin's
-`bin/`; pipx (step 3) remains the way to get the command in a terminal.
+
+Inside a Claude Code session that has the plugin enabled, `ledger` is on the
+session path from the plugin's `bin/`, and each hook runs it; otherwise a hook
+runs the first `ledger` on the `PATH` Claude Code starts with. Pipx (step 3)
+remains the way to get the command in a terminal.
 
 The brief goes into the model's context; the terminal does not show it. Run
 `ledger resume --brief` to read the same text. The question-picker flow, where
