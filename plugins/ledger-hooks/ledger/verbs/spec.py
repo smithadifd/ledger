@@ -34,6 +34,7 @@ import re
 from pathlib import Path
 from typing import Any, Mapping
 
+from ledger.card import _multi_line, _one_line
 from ledger.schema import (
     SPEC_CONTENT_FIELDS,
     SPEC_KIND,
@@ -236,41 +237,71 @@ def _spec_data(item_id: str, event: Event) -> dict[str, Any]:
 
 
 def _show_text(data: Mapping[str, Any]) -> str:
+    # Stored text is printed through the escapers, so no control sequence it
+    # holds reaches the terminal: one-line fields through _one_line, the
+    # body and acceptance through _multi_line (their lines and tabs kept).
     lines = [
-        f"spec v{data['version']}\t{data['item_id']}\tevent={data['event_id']}",
-        f"title: {data['title']}",
+        f"spec v{data['version']}\t{_one_line(data['item_id'])}\tevent={data['event_id']}",
+        f"title: {_one_line(data['title'])}",
     ]
     for name in ("size", "merge_class") + PROVENANCE_FIELDS:
         if data.get(name) is not None:
-            lines.append(f"{name}: {data[name]}")
+            lines.append(f"{name}: {_one_line(data[name])}")
     lines.append(f"content_hash: {data['content_hash']}")
     if data.get("acceptance") is not None:
-        lines.extend(["", "## Acceptance", data["acceptance"]])
-    lines.extend(["", "## Body", data["body_md"]])
+        lines.extend(["", "## Acceptance", _multi_line(data["acceptance"])])
+    lines.extend(["", "## Body", _multi_line(data["body_md"])])
     return "\n".join(lines)
 
 
+# How the printed diff escapes each diff line of a content field. The diff
+# is computed on the stored lines first, so two different stored values never
+# print as "no change".
+_DIFF_ESCAPERS = {
+    "title": _one_line,
+    "body_md": _multi_line,
+    "acceptance": _multi_line,
+    "size": _one_line,
+    "merge_class": _one_line,
+}
+
+
 def _lines(value: Any) -> list[str]:
-    return [] if value is None else str(value).splitlines()
+    """The value's lines, split on LF only, so U+2028, U+2029, NEL and the
+    other characters ``str.splitlines`` also breaks on stay inside their
+    line. A final LF ends the last line and adds no empty one."""
+    if value is None:
+        return []
+    lines = str(value).split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
 
 
-def diff_fields(old: Mapping[str, Any], new: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """One entry per content field whose value differs, in field order."""
+def diff_fields(
+    old: Mapping[str, Any], new: Mapping[str, Any], *, escape: bool = False
+) -> list[dict[str, Any]]:
+    """One entry per content field whose value differs, in field order.
+
+    Which fields changed, and the diff lines, are computed on the stored
+    values split on LF. With ``escape`` each emitted diff line (headers
+    included) is then escaped (``_DIFF_ESCAPERS``), for the printed diff;
+    without it the lines keep the stored code points, for ``--json``. An
+    absent field (None) has no lines.
+    """
     changed = []
     for name in SPEC_CONTENT_FIELDS:
         before, after = old.get(name), new.get(name)
         if before == after:
             continue
-        changed.append({
-            "field": name,
-            "from": before,
-            "to": after,
-            "diff": list(difflib.unified_diff(
-                _lines(before), _lines(after),
-                fromfile=f"v{old['version']}", tofile=f"v{new['version']}",
-                lineterm="",
-            )),
-        })
+        diff = list(difflib.unified_diff(
+            _lines(before), _lines(after),
+            fromfile=f"v{old['version']}", tofile=f"v{new['version']}",
+            lineterm="",
+        ))
+        if escape:
+            diff = [_DIFF_ESCAPERS[name](line) for line in diff]
+        changed.append({"field": name, "from": before, "to": after, "diff": diff})
     return changed
 
 
@@ -295,7 +326,7 @@ def _run_set(args, ctx: Context) -> Result:
     body = args.body
     if args.body_file is not None:
         try:
-            body = Path(args.body_file).read_text(encoding="utf-8")
+            body = Path(args.body_file).read_bytes().decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             raise UsageError(f"--body-file: cannot read {args.body_file}: {exc}") from exc
     if not body:
@@ -385,11 +416,15 @@ def _run_diff(args, ctx: Context) -> Result:
             )
         old = _by_version(specs, args.item, previous)
     changed = diff_fields(old.payload, new.payload)
-    head = f"spec diff {args.item} v{old.payload['version']} → v{new.payload['version']}"
+    shown = diff_fields(old.payload, new.payload, escape=True)
+    head = (
+        f"spec diff {_one_line(args.item)} "
+        f"v{old.payload['version']} → v{new.payload['version']}"
+    )
     lines = [head]
-    if not changed:
+    if not shown:
         lines.append("no content change")
-    for entry in changed:
+    for entry in shown:
         lines.extend(["", f"## {entry['field']}", *entry["diff"]])
     return Result(
         data={
