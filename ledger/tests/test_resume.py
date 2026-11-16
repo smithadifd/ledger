@@ -716,9 +716,13 @@ def _hostile_db(tmp_path: Path, monkeypatch, field: str, text: str) -> str:
         point = "p" + text
     elif field == "item":
         item = "i" + text
-    code, _out, err = invoke(
-        monkeypatch, ["--db", db, "new", f"--id={item}", "--type", "ticket", "--title", title]
-    )
+    # A title holding a control or separator is refused at write now; it is
+    # stored as it was before that rule, and resume must still print it safely.
+    with monkeypatch.context() as patch:
+        patch.setattr("ledger.store.refuse_display_control_characters", lambda kind, payload: None)
+        code, _out, err = invoke(
+            monkeypatch, ["--db", db, "new", f"--id={item}", "--type", "ticket", "--title", title]
+        )
     assert code == 0, err
     _stop(monkeypatch, db, item, point)
     return db

@@ -24,6 +24,7 @@ from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping
 
 from ledger import __version__
+from ledger.card import _one_line
 from ledger.store import Event, Ledger, open_ledger
 
 # The one line `ledger --version` prints and `ledger resume --brief` prints first.
@@ -280,8 +281,13 @@ def item_dict(row: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def format_items(items: list[Mapping[str, Any]]) -> str:
+    """One line per item: id, type, status and title, TAB-separated. Each
+    column is escaped, so a TAB, a line break or a control sequence in a
+    title can neither add a column nor reach the terminal."""
     return "\n".join(
-        f"{it['item_id']}\t{it['type']}\t{it['status']}\t{it['title']}" for it in items
+        f"{_one_line(it['item_id'])}\t{_one_line(it['type'])}\t"
+        f"{_one_line(it['status'])}\t{_one_line(it['title'])}"
+        for it in items
     )
 
 

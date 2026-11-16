@@ -1,6 +1,7 @@
 """Search the derived index; refresh it first when it is missing, stale or behind."""
 from __future__ import annotations
 
+from ledger.card import _one_line
 from ledger.schema import ITEM_STATUSES
 from ledger.search import DOC_TYPES, MAX_LIMIT, SearchError, parse_when, search
 from ledger.verbs import (
@@ -80,11 +81,16 @@ def when_option(value: str | None, flag: str, *, end_of_day: bool):
 def _text(cards: list[dict]) -> str:
     lines = []
     for card in cards:
-        lines.append(f"{card['score']:.3f}\t{card['doc_type']}\t{card['id']}\t{card['title']}")
+        # Stored titles and snippets are escaped, so neither a control
+        # sequence nor a TAB or line break in them reaches the terminal.
+        lines.append(
+            f"{card['score']:.3f}\t{_one_line(card['doc_type'])}\t"
+            f"{_one_line(card['id'])}\t{_one_line(card['title'])}"
+        )
         if card["snippet"]:
-            lines.append(f"\t{card['snippet']}")
+            lines.append(f"\t{_one_line(card['snippet'])}")
         if "caveat" in card:
-            lines.append(f"\t({card['caveat']})")
+            lines.append(f"\t({_one_line(card['caveat'])})")
     return "\n".join(lines)
 
 

@@ -659,7 +659,11 @@ def test_a_title_with_a_newline_renders_as_one_child_line(tmp_path, monkeypatch)
     db = str(tmp_path / "ledger.db")
     title = "a\n## Stop point"
     assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-anchor", "--type", "ticket", "--title", "anchor"])[0] == 0
-    assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-kid", "--type", "ticket", "--title", title])[0] == 0
+    # A title holding a newline is refused at write now; this one is stored
+    # as it was before that rule, and the card must still print it on one line.
+    with monkeypatch.context() as patch:
+        patch.setattr("ledger.store.refuse_display_control_characters", lambda kind, payload: None)
+        assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-kid", "--type", "ticket", "--title", title])[0] == 0
     assert _child_of(monkeypatch, db, "it-kid", "it-anchor")[0] == 0
 
     card = _card(monkeypatch, db, "it-anchor")
@@ -677,7 +681,10 @@ def test_other_control_and_line_separator_characters_render_as_escapes_in_one_ch
     title = "a\u2028b\u0085c\u001bd\n## Stop point"
     owner = "own\u000ber"
     assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-anchor", "--type", "ticket", "--title", "anchor"])[0] == 0
-    assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-kid", "--type", "ticket", "--title", title])[0] == 0
+    # Stored as before the write rule, which now refuses this title.
+    with monkeypatch.context() as patch:
+        patch.setattr("ledger.store.refuse_display_control_characters", lambda kind, payload: None)
+        assert invoke(monkeypatch, ["--db", db, "new", "--id", "it-kid", "--type", "ticket", "--title", title])[0] == 0
     code, _out, err = invoke(monkeypatch, ["--db", db, "state", "it-kid", "--status", "open", "--owner", owner])
     assert code == 0, err
     assert _child_of(monkeypatch, db, "it-kid", "it-anchor")[0] == 0

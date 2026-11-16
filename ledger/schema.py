@@ -669,11 +669,17 @@ def is_ephemeral(kind: str) -> bool:
 
 
 class ValidationError(ValueError):
-    """Unknown kind, unknown key, or a payload that fails its schema."""
+    """Unknown kind, unknown key, or a payload that fails its schema.
 
-    def __init__(self, reason: str):
+    ``reason`` is always exactly the refusal name. A ``hint`` (advice for the
+    person, such as how to fix the input) only adds to the message:
+    ``str(exc)`` reads ``<reason>: <hint>``.
+    """
+
+    def __init__(self, reason: str, *, hint: str | None = None):
         self.reason = reason
-        super().__init__(reason)
+        self.hint = hint
+        super().__init__(reason if hint is None else f"{reason}: {hint}")
 
 
 def _fail(reason: str) -> None:
@@ -685,6 +691,13 @@ def _fail(reason: str) -> None:
 # reason for every class the rule refuses, so a caller compares one string;
 # ``<field>`` names the payload field (``question_id``, ``options[1].label``).
 ASK_CONTROL_CHARACTER = "ask_control_character"
+
+# The refusal a write gets when item text the item printers show (card, spec
+# show and diff, export-item, context, search, the item listings) holds a
+# code point that can drive a terminal: ``display_control_character:<kind>.<field>``,
+# for example ``display_control_character:item.spec.body_md``. The reason
+# never carries the character itself.
+DISPLAY_CONTROL_CHARACTER = "display_control_character"
 
 # Text a picker displays, per kind, as (field, is the question body). Only
 # the question body may hold a newline (a long question can run to several
@@ -984,17 +997,71 @@ def display_control_character(
     return None
 
 
+# The bidirectional embedding, override and isolate controls.
+_BIDI_CONTROL_CODE_POINTS = frozenset((*range(0x202A, 0x202F), *range(0x2066, 0x206A)))
+# Refused in multi-line item text: every Cc except TAB and LF (so CR, ESC,
+# BEL, NUL, DEL, NEL and the C1 CSI are in it), the Unicode line and
+# paragraph separators, and the bidirectional controls.
+_MULTI_LINE_REFUSED = frozenset((
+    *range(0x00, 0x09),
+    *range(0x0B, 0x20),
+    *range(0x7F, 0xA0),
+    0x2028,
+    0x2029,
+    *_BIDI_CONTROL_CODE_POINTS,
+))
+# Refused in one-line item text: the multi-line set plus TAB and LF.
+_ONE_LINE_REFUSED = _MULTI_LINE_REFUSED | {0x09, 0x0A}
+
+# Item text the item printers show, per kind, as (field, is one line).
+# Only these code-point rules apply: the ask rule's NFC, blank, edge
+# whitespace and invisible classes exist so a one-line picker answer has one
+# spelling to bind an election to, and this text binds nothing. It is prose:
+# Markdown ends in a newline and indents with tabs.
+_ITEM_TEXT: dict[str, tuple[tuple[str, bool], ...]] = {
+    "item.created": (("title", True),),
+    "item.note": (("text", False),),
+    "item.progress": (("text", False),),
+    SPEC_KIND: (("title", True), ("body_md", False), ("acceptance", False)),
+}
+
+
+def item_text_control_character(
+        kind: str, payload: Mapping[str, Any]) -> tuple[str, str] | None:
+    """``(field, code point)`` of the first refused code point in the item
+    text ``_ITEM_TEXT`` names for ``kind``, else None. A value that is not a
+    string is skipped: the schema owns its type."""
+    for name, one_line in _ITEM_TEXT.get(kind, ()):
+        value = payload.get(name)
+        if not isinstance(value, str):
+            continue
+        refused = _ONE_LINE_REFUSED if one_line else _MULTI_LINE_REFUSED
+        for char in value:
+            if ord(char) in refused:
+                return name, f"U+{ord(char):04X}"
+    return None
+
+
 def refuse_display_control_characters(kind: str, payload: Mapping[str, Any]) -> None:
     """Write-time rule: refuse an ask or election whose displayed text breaks
     ``display_text_problem`` (a control, format, separator, invisible or
     blank code point, text that is not NFC, and the rest), always with
-    ``ask_control_character:<field>``. Not part of ``validate_payload``:
-    verify, export and restore re-validate rows written before this rule,
-    and those must still read; ``render_ask_display`` makes such an ask
-    unpickable instead."""
+    ``ask_control_character:<field>``; then refuse item text that holds a
+    code point ``item_text_control_character`` names, with
+    ``display_control_character:<kind>.<field>`` (a carriage return adds the
+    advice to convert line endings to LF to the message, never to the
+    reason). Not part of ``validate_payload``: verify, export and restore
+    re-validate rows written before this rule, and those must still read;
+    ``render_ask_display`` makes such an ask unpickable instead, and the item
+    printers escape such text."""
     hit = display_control_character(kind, payload)
     if hit is not None:
         _fail(f"{ASK_CONTROL_CHARACTER}:{hit[0]}")
+    found = item_text_control_character(kind, payload)
+    if found is not None:
+        name, code_point = found
+        hint = f"{code_point}: convert line endings to LF" if code_point == "U+000D" else None
+        raise ValidationError(f"{DISPLAY_CONTROL_CHARACTER}:{kind}.{name}", hint=hint)
 
 
 def known_kinds() -> tuple[str, ...]:

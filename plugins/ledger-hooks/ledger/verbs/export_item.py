@@ -29,6 +29,7 @@ import json
 
 from typing import Any
 
+from ledger.card import _multi_line, _one_line
 from ledger.export import TicketSourceNamesNoFile, item_export_counted, item_ticket_text
 from ledger.schema import SPEC_MERGE_CLASSES, SPEC_SIZES
 from ledger.store import Event
@@ -94,16 +95,22 @@ def _spec_view(item_id: str, event: Event) -> dict[str, Any]:
     }
 
 
-def _spec_text(spec: dict[str, Any]) -> str:
-    lines = [f"spec: v{spec['version']}", f"title: {spec['title']}"]
+def _spec_text(spec: dict[str, Any], *, escape: bool = False) -> str:
+    """The spec as ticket text. With ``escape`` (the printed text) the title
+    goes through ``_one_line`` and the body and acceptance through
+    ``_multi_line``, so no control sequence they hold reaches the terminal;
+    without it (``data.ticket``) the text is the stored text."""
+    one = _one_line if escape else str
+    multi = _multi_line if escape else str
+    lines = [f"spec: v{spec['version']}", f"title: {one(spec['title'])}"]
     for name in ("size", "merge_class"):
         if spec[name] is not None:
-            lines.append(f"{name}: {spec[name]}")
+            lines.append(f"{name}: {one(spec[name])}")
     # The recorded text keeps its trailing newlines in ``spec`` (JSON); the
     # printed sections are separated by one blank line and end in one newline.
-    lines.extend(["", "## Body", spec["body_md"].rstrip("\n")])
+    lines.extend(["", "## Body", multi(spec["body_md"].rstrip("\n"))])
     if spec["acceptance"] is not None:
-        lines.extend(["", "## Acceptance", spec["acceptance"].rstrip("\n")])
+        lines.extend(["", "## Acceptance", multi(spec["acceptance"].rstrip("\n"))])
     return "\n".join(lines) + "\n"
 
 
@@ -123,16 +130,18 @@ def run(args, ctx: Context) -> Result:
                         str(exc), code="not_found", exit_code=EXIT_NOT_FOUND,
                     ) from None
                 spec = _spec_view(args.item, event)
-                text = _spec_text(spec)
                 return Result(
-                    data={"item_id": args.item, "ticket": text, "spec": spec},
-                    text=text,
+                    data={"item_id": args.item, "ticket": _spec_text(spec), "spec": spec},
+                    text=_spec_text(spec, escape=True),
                 )
             except ValueError as exc:
                 raise CliError(
                     str(exc), code="not_found", exit_code=EXIT_NOT_FOUND,
                 ) from None
-            return Result(data={"item_id": args.item, "ticket": text}, text=text)
+            # The section comes from a committed repository file, content
+            # that arrives from outside: the printed text is escaped (its
+            # lines and tabs kept); data.ticket keeps the section as read.
+            return Result(data={"item_id": args.item, "ticket": text}, text=_multi_line(text))
         records, completeness = item_export_counted(lg, args.item)
     finally:
         lg.close()

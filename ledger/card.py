@@ -402,7 +402,7 @@ def derive_next_step(
     if status == "blocked":
         return "Clear blockers."
     return claimed or (
-        f"Resume with: {program} {shlex.join(['resume', f'--item={item_id}'])}".rstrip()
+        f"Resume with: {_command(program, ['resume', f'--item={item_id}'])}".rstrip()
     )
 
 
@@ -592,6 +592,43 @@ def item_spec_moved(lg: Ledger, item_id: str) -> str | None:
     )
 
 
+_NAMED_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+# The bidirectional embedding, override and isolate controls (U+202A-U+202E,
+# U+2066-U+2069): they reorder what a terminal shows, so both escapers write
+# them as visible escapes, as they do the control characters.
+_BIDI_CONTROLS = frozenset(chr(code) for code in (*range(0x202A, 0x202F), *range(0x2066, 0x206A)))
+
+
+def _escaped(char: str) -> bool:
+    """True for a code point no printer writes raw: a control character
+    (Cc), a line or paragraph separator, or a bidirectional control."""
+    return unicodedata.category(char) in ("Cc", "Zl", "Zp") or char in _BIDI_CONTROLS
+
+
+def _one_line(value: Any) -> str:
+    """The value as text that cannot end its line or reach the terminal as a
+    control sequence: LF, CR and TAB become ``\\n``, ``\\r`` and ``\\t``, and
+    every other control character, the Unicode line and paragraph separators
+    and the bidirectional controls become ``\\uXXXX``. No escape is
+    whitespace, so escaping never adds a word."""
+    out = []
+    for char in str(value):
+        if char in _NAMED_ESCAPES:
+            out.append(_NAMED_ESCAPES[char])
+        elif _escaped(char):
+            out.append(f"\\u{ord(char):04x}")
+        else:
+            out.append(char)
+    return "".join(out)
+
+
+def _multi_line(value: Any) -> str:
+    """Multi-line text (a spec body, acceptance, a ticket section) with its
+    lines and indentation kept: LF and TAB stay, and every other code point
+    ``_one_line`` escapes gets the same visible escape (CR as ``\\r``)."""
+    return "".join(char if char in "\n\t" else _one_line(char) for char in str(value))
+
+
 def _dash(value: str | None) -> str:
     return value if value else "-"
 
@@ -603,8 +640,8 @@ def _fmt_list(lines: list[str]) -> str:
 def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
     lines = [
         (
-            f"- event={row['event_id']} quote_ref={row['quote_ref']}: "
-            f"{row['question']} -> {row['chosen']}"
+            f"- event={row['event_id']} quote_ref={_one_line(row['quote_ref'])}: "
+            f"{_one_line(row['question'])} -> {_one_line(row['chosen'])}"
         )
         for row in rows
     ]
@@ -615,16 +652,24 @@ def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
 # the command that prints the item's events and so recovers it.
 
 
+def _command(program: str, args: list[str]) -> str:
+    """A printed command: ``program`` (already shell-quoted by
+    ``invocation_prefix``) and the shell-quoted ``args``. shlex quotes an id
+    but leaves a control character inside it, so the joined arguments go
+    through ``_one_line``."""
+    return f"{program} {_one_line(shlex.join(args))}"
+
+
 def recover_command(item_id: str, program: str = "ledger") -> str:
     """The command that prints every event the card was cut from."""
     # Flags first, then ``--``: an id with a leading hyphen or shell
     # metacharacters stays one safe token in a copied command.
-    return f"{program} {shlex.join(['export-item', '--json', '--', item_id])}"
+    return _command(program, ['export-item', '--json', '--', item_id])
 
 
 def footer_line(item_id: str, program: str = "ledger") -> str:
     """The card's last line: a projection, with what is authoritative."""
-    return f"{FOOTER} ({program} {shlex.join(['export-item', '--', item_id])})"
+    return f"{FOOTER} ({_command(program, ['export-item', '--', item_id])})"
 
 
 def _row_marker(count: int, command: str) -> str:
@@ -640,19 +685,19 @@ def _cut_count(count: int, item_id: str, program: str = "ledger") -> str:
 def children_command(item_id: str, program: str = "ledger") -> str:
     """The command that prints every child ``item_id`` has when it runs."""
     # The --flag=value form keeps an id with a leading hyphen one argument.
-    return f"{program} {shlex.join(['query', f'--parent={item_id}', '--all'])}"
+    return _command(program, ['query', f'--parent={item_id}', '--all'])
 
 
 def duplicates_command(item_id: str, program: str = "ledger") -> str:
     """The command that prints every item linked to ``item_id`` as its duplicate."""
-    return f"{program} {shlex.join(['query', f'--duplicate-of={item_id}', '--all'])}"
+    return _command(program, ['query', f'--duplicate-of={item_id}', '--all'])
 
 
 def blockers_command(item_id: str, program: str = "ledger") -> str:
     """The command that prints every item with a blocks link to ``item_id``
     that is not closed: the blockers the card counts (closed ones are left
     out of the card)."""
-    return f"{program} {shlex.join(['query', f'--blocks={item_id}', '--open', '--all'])}"
+    return _command(program, ['query', f'--blocks={item_id}', '--open', '--all'])
 
 
 # The command that prints a section's rows held by other items' events.
@@ -712,12 +757,14 @@ def _option_lines(
         label = str(option.get("label") or "").strip()
         description = str(option.get("description") or "").strip()
         if description:
-            description = _shown(row, f"options.{index}.description", description, item_id, program)
+            description = _shown(
+                row, f"options.{index}.description", _one_line(description), item_id, program
+            )
         letter = chr(ord("A") + index) if index < 26 else str(index + 1)
         # An option pick already labels its options with letters.
         if len(label) == 1 and "A" <= label <= "Z":
             letter, label = label, ""
-        text = " — ".join(part for part in (label, description) if part)
+        text = " — ".join(part for part in (_one_line(label), description) if part)
         lines.append(f"    {letter}) {text}" if text else f"    {letter})")
     return lines
 
@@ -746,46 +793,30 @@ def _fmt_questions(
     _rendered(order, "ask")
     lines: list[str] = []
     for row in rows:
-        lines.append(f"- event={row['asked_event_id']}: {row['question']}")
+        lines.append(f"- event={row['asked_event_id']}: {_one_line(row['question'])}")
         if row.get("ask"):
-            lines.append(f"  ask: {_shown(row, 'ask', row['ask'], item_id, program)}")
+            lines.append(f"  ask: {_shown(row, 'ask', _one_line(row['ask']), item_id, program)}")
         if row.get("options") and not row.get("default_only"):
             lines.append("  options:")
             lines.extend(_option_lines(row, item_id, program))
         for name in ASK_FIELDS:
             value = row.get(name)
             if value:
-                lines.append(f"  {name}: {_shown(row, name, value, item_id, program)}")
+                lines.append(f"  {name}: {_shown(row, name, _one_line(value), item_id, program)}")
     return _fmt_list(lines)
 
 
 def _fmt_links(rows: tuple[dict[str, Any], ...]) -> str:
     lines = [
-        f"- {row['rel']}: {row['target']} (event={row['event_id']})" for row in rows
+        f"- {_one_line(row['rel'])}: {_one_line(row['target'])} (event={row['event_id']})"
+        for row in rows
     ]
     return _fmt_list(lines)
 
 
 def _fmt_notes(rows: tuple[dict[str, Any], ...]) -> str:
-    lines = [f"- event={row['event_id']}: {row['text']}" for row in rows]
+    lines = [f"- event={row['event_id']}: {_one_line(row['text'])}" for row in rows]
     return _fmt_list(lines)
-
-
-_NAMED_ESCAPES = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
-
-
-def _one_line(value: Any) -> str:
-    """The value as text that cannot end its line: every control character,
-    and the Unicode line and paragraph separators, becomes a visible escape."""
-    out = []
-    for char in str(value):
-        if char in _NAMED_ESCAPES:
-            out.append(_NAMED_ESCAPES[char])
-        elif unicodedata.category(char) in ("Cc", "Zl", "Zp"):
-            out.append(f"\\u{ord(char):04x}")
-        else:
-            out.append(char)
-    return "".join(out)
 
 
 def _fmt_children(rows: tuple[dict[str, Any], ...]) -> str:
@@ -815,41 +846,43 @@ def _children_block(card: Card, order: list[str]) -> list[str]:
 
 
 def _fmt_blockers(blockers: tuple[str, ...]) -> str:
-    return _fmt_list([f"- {item}" for item in blockers])
+    return _fmt_list([f"- {_one_line(item)}" for item in blockers])
 
 
 def _fmt_records(rows: tuple[dict[str, Any], ...]) -> str:
     lines: list[str] = []
     for row in rows:
-        standing = row["standing"]
-        if standing == "superseded" and row.get("superseded_by"):
+        standing = _one_line(row["standing"])
+        if row["standing"] == "superseded" and row.get("superseded_by"):
             standing += f" (by event {row['superseded_by']})"
         elif row.get("source_event_id"):
             standing += f" (source event {row['source_event_id']})"
-        who = f"{row['who']} ({row['who_kind']}"
+        who = f"{_one_line(row['who'])} ({_one_line(row['who_kind'])}"
         if row.get("relayed_by"):
-            who += f", relayed by {row['relayed_by']}"
+            who += f", relayed by {_one_line(row['relayed_by'])}"
         who += ")"
         lines.append(
-            f"- event={row['event_id']} {standing}: {who} [{row['phase']}] "
-            f"\"{row['verbatim']}\""
+            f"- event={row['event_id']} {standing}: {who} [{_one_line(row['phase'])}] "
+            f"\"{_one_line(row['verbatim'])}\""
         )
-        lines.append(f"  effect: {row['effect']}")
-        tags = ", ".join(f"{tag['type']}:{tag['id']}" for tag in row["tags"])
+        lines.append(f"  effect: {_one_line(row['effect'])}")
+        tags = ", ".join(
+            f"{_one_line(tag['type'])}:{_one_line(tag['id'])}" for tag in row["tags"]
+        )
         lines.append(f"  tags: {tags}")
         if row.get("evidence"):
-            lines.append(f"  evidence: {row['evidence']}")
+            lines.append(f"  evidence: {_one_line(row['evidence'])}")
         if row.get("result"):
-            lines.append(f"  result: {row['result']}")
+            lines.append(f"  result: {_one_line(row['result'])}")
     return _fmt_list(lines)
 
 
 def _fmt_tried(rows: tuple[dict[str, Any], ...]) -> str:
     lines = []
     for row in rows:
-        line = f"- event={row['event_id']}: {row['what']}"
+        line = f"- event={row['event_id']}: {_one_line(row['what'])}"
         if row.get("outcome"):
-            line += f" -> {row['outcome']}"
+            line += f" -> {_one_line(row['outcome'])}"
         lines.append(line)
     return _fmt_list(lines)
 
@@ -859,8 +892,11 @@ def _fmt_reviews(
 ) -> str:
     lines: list[str] = []
     for row in rows:
-        lines.append(f"- event={row['event_id']} round {row['round']}: {row['verdict']}")
-        lines.extend(f"  finding: {finding}" for finding in row["findings"])
+        lines.append(
+            f"- event={row['event_id']} round {_one_line(row['round'])}: "
+            f"{_one_line(row['verdict'])}"
+        )
+        lines.extend(f"  finding: {_one_line(finding)}" for finding in row["findings"])
         if row.get("findings_cut"):
             lines.append(
                 f"  {_cut_count(row['findings_cut'], item_id, program)} findings; "
@@ -871,16 +907,19 @@ def _fmt_reviews(
 
 def _fmt_stop(rows: tuple[dict[str, Any], ...]) -> str:
     return _fmt_list(
-        [f"event={row['event_id']} [{row['phase']}]: {row['point']}" for row in rows]
+        [
+            f"event={row['event_id']} [{_one_line(row['phase'])}]: {_one_line(row['point'])}"
+            for row in rows
+        ]
     )
 
 
 def _fmt_pointers(rows: tuple[dict[str, Any], ...]) -> str:
     lines = []
     for row in rows:
-        line = f"- {row['ref']}"
+        line = f"- {_one_line(row['ref'])}"
         if row.get("note"):
-            line += f": {row['note']}"
+            line += f": {_one_line(row['note'])}"
         lines.append(line)
     return _fmt_list(lines)
 
@@ -1042,14 +1081,14 @@ def _render_card(card: Card, order: list[str]) -> str:
     if card.source_omitted > 0:
         source = f"{source} {_cut_count(card.source_omitted, card.item_id, card.program)}"
     parts = [
-        f"# {card.item_id}",
+        f"# {_one_line(card.item_id)}",
         f"revision: {card.revision_id} {card.revision_hash}",
         f"source_event_ids: {source}",
-        f"type: {card.type}",
-        f"title: {_with_inline_marker(card.title, card, 'title', order)}",
-        f"status: {card.status}",
-        f"owner: {_with_inline_marker(_dash(card.owner), card, 'owner', order)}",
-        f"claim: {_with_inline_marker(_dash(card.claim), card, 'claim', order)}",
+        f"type: {_one_line(card.type)}",
+        f"title: {_with_inline_marker(_one_line(card.title), card, 'title', order)}",
+        f"status: {_one_line(card.status)}",
+        f"owner: {_with_inline_marker(_one_line(_dash(card.owner)), card, 'owner', order)}",
+        f"claim: {_with_inline_marker(_one_line(_dash(card.claim)), card, 'claim', order)}",
         f"spec {_dash(None if card.spec_version is None else f'v{card.spec_version}')}",
     ]
     moved = spec_moved_line(
@@ -1071,7 +1110,7 @@ def _render_card(card: Card, order: list[str]) -> str:
         ),
         "",
         "## Next step",
-        _with_inline_marker(card.next_step, card, "next_step", order),
+        _with_inline_marker(_one_line(card.next_step), card, "next_step", order),
         "",
         "## Links",
         _with_marker(_fmt_links(card.links), card, "links", order),

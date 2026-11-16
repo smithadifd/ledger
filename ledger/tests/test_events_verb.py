@@ -395,8 +395,13 @@ BOUNDARIES = ("\u2028", "\u2029", "\x85", "\x0c", "\x0b", "\x1c", "\x1d", "\x1e"
 
 
 def boundary_ledger(db: Path, ch: str) -> Path:
-    """Two events: one whose payload holds ``ch``, one whose actor holds it."""
-    with open_ledger(db) as lg:
+    """Two events: one whose payload holds ``ch``, one whose actor holds it.
+
+    The note is stored as it was before the write rule that now refuses a
+    control or separator in note text: ``events`` must still print such a row
+    on one line."""
+    with open_ledger(db) as lg, pytest.MonkeyPatch.context() as patch:
+        patch.setattr("ledger.store.refuse_display_control_characters", lambda kind, payload: None)
         lg.append(
             kind="item.note",
             item_id="it-1",

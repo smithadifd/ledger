@@ -73,7 +73,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from ledger.card import word_count
+from ledger.card import _one_line, word_count
 from ledger.schema import SPEC_KIND, TAG_TYPES
 from ledger.store import Event, Ledger
 from ledger.verbs import (
@@ -183,7 +183,10 @@ def _spec_lines(spec: Event | None) -> tuple[str, ...]:
         text = payload.get(field)
         if not text:
             continue
-        body = [line.rstrip() for line in str(text).splitlines()]
+        # Split on LF only: U+2028, U+2029, NEL and the other characters
+        # splitlines() also breaks on stay inside their line, where fit()
+        # escapes them.
+        body = [line.rstrip() for line in str(text).split("\n")]
         while body and not body[0]:
             body.pop(0)
         while body and not body[-1]:
@@ -426,7 +429,11 @@ def fit(pack: Pack, budget: int) -> tuple[str, dict[str, Any]]:
         if section.entries is not None:
             row["entries"] = [] if collapsed else [dict(e) for e in section.entries]
         shown.append(row)
-    text = "\n\n".join("\n".join(block) for block in blocks) + "\n"
+    # Each line is escaped as it joins the text: whitespace was normalized
+    # above (a TAB can print as a space), and every control, separator and
+    # bidirectional control left becomes a visible escape. Escaping adds no
+    # word, so the budget computed above still holds.
+    text = "\n\n".join("\n".join(_one_line(line) for line in block) for block in blocks) + "\n"
     data = {
         "item_id": pack.item_id,
         "type": pack.type,

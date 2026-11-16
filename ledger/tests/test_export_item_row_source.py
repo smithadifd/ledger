@@ -230,7 +230,11 @@ def test_only_invalid_notes_is_refused_by_name(tmp_path, repo):
 def test_near_miss_note_text_is_not_an_also_at_note(tmp_path, repo, template):
     root, sha = repo
     db = tmp_path / "ledger.db"
-    _item(db, "rw-near", "row:SL1", (template.format(sha=sha),))
+    # Stored as before the write rule, which now refuses a control character
+    # in a note: such a note is still never an also-at note.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("ledger.store.refuse_display_control_characters", lambda kind, payload: None)
+        _item(db, "rw-near", "row:SL1", (template.format(sha=sha),))
 
     assert _refusal(db, root, "rw-near").startswith(f"{REFUSAL}: ")
 
@@ -489,7 +493,11 @@ def test_a_note_in_neither_form_is_skipped_for_an_earlier_anchor(tmp_path, repo)
 def test_near_miss_anchor_note_is_not_an_also_at_note(tmp_path, repo, text):
     root, _sha = repo
     db = tmp_path / "ledger.db"
-    _anchor_item(db, "an-near", text)
+    # Stored as before the write rule, which now refuses a control character
+    # in a note: such a note is still never an also-at note.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("ledger.store.refuse_display_control_characters", lambda kind, payload: None)
+        _anchor_item(db, "an-near", text)
 
     assert _refusal(db, root, "an-near").startswith(f"{REFUSAL}: ")
 
