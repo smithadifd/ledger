@@ -24,22 +24,27 @@ paths:
   `tests/test_plugin_hooks.py` fails when it is neither `__version__` nor that
   next `-dev` version
 - `README.md` and `docs/start-here.md` — set the `#vX.Y.Z` pin in every
-  `claude plugin marketplace add` command to `vX.Y.Z`, and remove the "from the
-  next release (on main, not in vX.Y.Z)" markers from the sentences about
-  features this release ships (the plugin's `bin/ledger`, the plugin options),
-  so the pinned install is described as having them; find every marker with
+  plugin install command (its source is
+  `https://github.com/smithadifd/ledger.git#vX.Y.Z`) to `vX.Y.Z`, and remove
+  the "from the next release (on main, not in vX.Y.Z)" markers from the
+  sentences about features this release ships (the plugin's `bin/ledger`, the
+  plugin options), so the pinned install is described as having them; find
+  every marker with
   `grep -rniE "from the next release \(on main" README.md docs CHANGELOG.md`
 - `plugins/ledger-hooks/ledger/` — refresh the bundled copy of `ledger/`
   (except `ledger/tests/`) so `tests/test_plugin_bin.py` still passes
 - `CHANGELOG.md` — add the dated section at the top of the file
 - `docs/upgrading.md` — name `X.Y.Z` as the current release, set the
-  `#vX.Y.Z` pin in its `claude plugin marketplace add` command, and when the
-  new changelog section has an "Upgrading" paragraph, carry what an upgrader
-  needs from it into section 1.5
+  `#vX.Y.Z` pin in its plugin install command, and when the new changelog
+  section has an "Upgrading" paragraph, carry what an upgrader needs from it
+  into section 1.5
 
-`tests/test_docs_pinned_install.py` fails when an install command in the
-tracked Markdown files is unpinned, or pins a tag other than `v` followed by
-`__version__`. An unpinned add follows main, so a person who ran it would get
+`tests/test_docs_pinned_install.py` fails when the source of any plugin
+marketplace install command in the tracked Markdown files, whatever repository
+it names, is anything other than exactly
+`https://github.com/smithadifd/ledger.git#v` followed by `__version__`, and when
+a next-release marker is wrapped across a line break where the grep above
+cannot find it. An unpinned add follows main, so a person who ran it would get
 plugin changes that no release has shipped.
 
 The pull requests for v0.1.21 and v0.1.22 changed only `pyproject.toml`,

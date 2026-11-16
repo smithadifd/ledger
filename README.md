@@ -610,10 +610,11 @@ a terminal comes from pipx too.
 
 The hooks are silent until a database is set: with v0.3.1 they print nothing
 and write nothing when `LEDGER_DB` is unset (an empty value counts as unset).
-The hooks and the `ledger` command they run read `LEDGER_DB`,
-`LEDGER_OPERATOR` and `LEDGER_HARNESS` from the environment Claude Code starts
-with, so set them the way [step 2](#2-set-the-environment) does, in the `env`
-block of Claude Code's settings.
+The hooks and the `ledger` command they run read `LEDGER_DB` and
+`LEDGER_OPERATOR` from the environment Claude Code starts with, so set them
+the way [step 2](#2-set-the-environment) does, in the `env` block of Claude
+Code's settings. The hooks supply `LEDGER_HARNESS` themselves: they pass
+`claude-code` when it is unset, so it can stay out of that block.
 
 From the next release (on main, not in v0.3.1), the plugin's `bin/ledger` puts
 `ledger` on the PATH of a Claude Code session that has the plugin enabled.
@@ -630,11 +631,11 @@ claude plugin configure ledger-hooks@<marketplace> --values-stdin
 ```
 
 with a JSON object whose keys are `ledger_db` (absolute path to the database),
-`ledger_operator`, and `ledger_harness` (optional). From the next release (on
-main, not in v0.3.1), an already-set `LEDGER_DB`, `LEDGER_OPERATOR` or
-`LEDGER_HARNESS` environment value is kept and a plugin option fills only an
-unset one, so an install that put the values in the settings `env` block keeps
-working unchanged.
+`ledger_operator`, and `ledger_harness` (optional).
+From the next release (on main, not in v0.3.1), an already-set `LEDGER_DB`,
+`LEDGER_OPERATOR` or `LEDGER_HARNESS` environment value is kept and a plugin
+option fills only an unset one, so an install that put the values in the
+settings `env` block keeps working unchanged.
 
 From the next release (on main, not in v0.3.1), each hook runs the plugin's
 own `bin/ledger` when that file is executable, and otherwise the first
