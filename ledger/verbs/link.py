@@ -21,6 +21,7 @@ move leaves. The checks and the append share one write transaction.
 from __future__ import annotations
 
 import argparse
+import re
 
 from ledger.schema import LINK_RELS
 from ledger.store import IdempotencyConflict, current_anchors
@@ -102,6 +103,23 @@ def _target(args) -> str:
     if len(named) != 1:
         raise UsageError(USAGE)
     return named[0]
+
+
+_PR_TARGET = re.compile(
+    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*"
+    r"|#[1-9][0-9]*"
+    r"|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*"
+)
+
+
+def _require_pr_target(target: str) -> None:
+    if _PR_TARGET.fullmatch(target):
+        return
+    raise CliError(
+        "pr target must be owner/repo#N, #N, or https://github.com/owner/repo/pull/N",
+        code="bad_pr_target",
+        exit_code=EXIT_REFUSED,
+    )
 
 
 def _closed_as_duplicate(lg, item_id: str) -> bool:
@@ -301,6 +319,8 @@ def _child_of_result(child: str, anchor: str, event, verb: str) -> Result:
 
 def run(args, ctx: Context) -> Result:
     args.target = _target(args)
+    if args.rel == "pr":
+        _require_pr_target(args.target)
     if getattr(args, "move", False) and args.rel != CHILD_OF:
         raise UsageError(f"--move is accepted only with --rel {CHILD_OF}")
     if args.rel == DUPLICATE_OF:
