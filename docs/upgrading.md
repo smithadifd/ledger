@@ -2,10 +2,11 @@
 
 This page is for a machine whose ledger is 0.1.8 or older, moving to the
 current release, 0.4.0. Four changes in between can stop a machine that works
-today, and 0.2.0, 0.2.1 and 0.3.0 add a few more things to check. Do the checks
-in section 1, install the tag in section 2, run the three upgrade commands in
-section 3, and run the check after each. A machine already on 0.1.22, 0.2.0 or
-0.2.1 has already passed the changes in 1.1 to 1.4 and needs only 1.5. For a
+today, and 0.2.0, 0.2.1, 0.3.0 and 0.4.0 add a few more things to check. Do the
+checks in section 1, install the tag in section 2, run the three upgrade
+commands in section 3, and run the check after each. A machine already on
+0.1.22, 0.2.0 or 0.2.1 has already passed the changes in 1.1 to 1.4 and needs
+only 1.5 and 1.6; a machine on 0.3.x needs only 1.6. For a
 later tag, change the tag in the commands and read the
 [CHANGELOG](../CHANGELOG.md) entries after 0.4.0.
 
@@ -249,6 +250,67 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   new tag. If the skills plugin's session-start hook is also installed with an
   explicit `ledger_cli`, a session prints the brief twice, and a separate
   prompt-capture hook records each prompt twice.
+
+### 1.6 What 0.4.0 adds
+
+None of the changes below alters the database schema or needs a migration.
+Each item applies only to a machine that does the thing it names; check the ones
+that fit yours. The [CHANGELOG](../CHANGELOG.md) entry has the detail.
+
+- **`backup --to` refuses an existing destination (0.4.0).** Before 0.4.0,
+  `ledger backup --to FILE` replaced whatever file sat at FILE and exited 0.
+  Now a FILE that already exists is refused with `backup target already exists`
+  (exit 3) and left untouched. Fix: give each backup a new file name, or add
+  `--overwrite` to replace the file as before. A script that writes every
+  backup to one fixed path starts failing from its second run. Find the calls,
+  with FOLDER your scripts folder:
+
+  ```sh
+  grep -rn 'backup --to' FOLDER
+  ```
+
+- **New text holding control characters is refused (0.4.0).** A write is
+  refused, exit 3, and nothing is written, when the text of a note
+  (`item.note`), a progress entry (`item.progress`) or a spec body or
+  acceptance (`item.spec`) holds a control character other than line feed and
+  tab, or the line or paragraph separators U+2028 and U+2029, or a
+  bidirectional control (U+202A to U+202E, U+2066 to U+2069); or when an item
+  title or spec title holds any of those or a line feed or tab. The refusal is
+  `display_control_character:<kind>.<field>`, for example
+  `display_control_character:item.note.text` or
+  `display_control_character:item.spec.body_md`. A carriage return adds the
+  hint `U+000D: convert line endings to LF`, so a `ledger spec set
+  --body-file FILE` whose file has Windows (CRLF) line endings is refused.
+  Fix: convert the file to LF line endings (`tr -d '\r' < FILE > NEW`, then
+  pass NEW), and remove the control characters from text a script passes.
+  Rows written before 0.4.0 still verify, export and restore; the item
+  printers now show their control characters as escapes such as `\u001b`.
+  Find the spec calls that read a file:
+
+  ```sh
+  grep -rn 'body-file' FOLDER
+  ```
+
+- **`link --rel pr` checks its target (0.4.0).** The target must be
+  `owner/repo#N`, `#N` or `https://github.com/owner/repo/pull/N`, with N a
+  number that does not start with 0. Anything else is refused with the code
+  `bad_pr_target` (exit 3), and nothing is written; before 0.4.0 any text was
+  accepted. Find the calls:
+
+  ```sh
+  grep -rn 'link .*--rel pr' FOLDER
+  ```
+
+- **A repeated `new --source` prints `exists` (0.4.0).** The second call
+  returns the same item and writes nothing, as before, but its text line
+  starts with `exists` instead of `created`, and `--json` gives `result` as
+  `exists`. The first call still prints `created`. A script that matches
+  `created` to learn the item is there must accept `exists` too. Find the
+  scripts that call `new` with `--source`:
+
+  ```sh
+  grep -rn -e '--source' FOLDER
+  ```
 
 ## 2. Which tag to install
 
