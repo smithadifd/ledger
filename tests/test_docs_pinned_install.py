@@ -5,57 +5,30 @@ and main can carry plugin changes (its hooks, ``bin/ledger``, its options) that
 no release has shipped. A person who copies the install command from an install
 page must get the released tag's plugin.
 
-What this test asserts, and nothing more. On each install page (``README.md``,
-``docs/start-here.md``, ``docs/upgrading.md``), among the lines inside its
-fenced code blocks (``` or ~~~ fences, a fence inside a blockquote or a list
-item included):
+What this test checks, line by line, on ``README.md``, ``docs/start-here.md``,
+``docs/upgrading.md`` and ``CHANGELOG.md`` above its first released-version
+heading:
 
-- at least one line is exactly
+- every line that names a marketplace add carries the exact pinned command
 
       claude plugin marketplace add https://github.com/smithadifd/ledger.git#vX.Y.Z
 
-  with ``X.Y.Z`` the current release, ``__version__``, compared character for
-  character with no trimming (only the fence's own container prefix and
-  indentation are taken off each line first); and
-- every fenced line that holds the word ``marketplace`` is that exact line.
+  with ``X.Y.Z`` the current release, ``__version__``; and
+- each of the three install pages shows that command on at least one line.
 
-So a pinned command split across two lines fails, and so do an unpinned add, a
-branch, another tag, a flag, trailing words, and any other ``marketplace``
-command (``update``, ``remove``); a page that needs one of those shows it in
-prose instead. Before looking for the word, a fenced line that ends in a
-backslash is joined to the next one, as the shell joins it, and quote
-characters and backslashes are dropped, so ``market"place"``, ``market\\place``
-and a word split by a continued line count as ``marketplace``; the comparison
-ignores letter case.
+Each line is normalized first: inline backticks and quote characters are
+dropped, each run of whitespace (tabs included) becomes one space, and letter
+case is ignored. A line names an add when its words hold ``marketplace`` and,
+later on the same line, ``add``; a line that names only another marketplace verb
+(``update``, ``remove``) is not an add. The pinned command may be followed by
+more text on its line, but not by more of a tag or version (``-dev``, ``.1``,
+another digit), so a longer tag does not pass for this one.
 
-Container prefix. A fence can open inside a blockquote or a list item, and
-GitHub renders it as code there. Before looking for a fence, a line loses its
-container prefix: any run of optional spaces, blockquote markers (``>`` with an
-optional space) and list markers (``-``, ``*``, ``+``, or digits then ``.`` or
-``)``, each followed by a space), in any order. If what is left opens a fence,
-the line opens one. Each line inside it loses the same number of blockquote
-markers and then up to the same width of list-marker and indentation columns.
-A line that lacks the fence's blockquote markers is still read as inside the
-fence, which runs to a closing line that does carry them, or to the end of the
-page: a prefix that cannot be matched fails closed. That is stricter than
-Markdown, where such a line ends the quote.
-
-Backstop, independent of finding any fence. Every line on these pages, fenced
-or not, that holds ``marketplace add`` (the word ``add`` ends there, so
-"marketplace added" is prose) must, once its container prefix and its inline
-backticks are taken off, be exactly the pinned command. So an unpinned add in
-prose, in a list item, in an indented block, or on a fence's own opening line
-fails, and the test names its line.
-
-Not checked: prose that holds no ``marketplace add``, such as one that
-mentions ``marketplace update`` (a pinned line in prose does not stand in for
-the fenced one, though); any page other than the three install pages; and a
-command spelled through shell expansion (a variable, a glob, command
-substitution), or ``marketplace`` and ``add`` split across prose lines. This is
-not a shell or Markdown parser: it holds the documented lines to one exact
-text. ``CHANGELOG.md`` is no longer scanned for install commands: its entries
-are prose with no fenced command, so the exact-line rule has nothing to hold
-there.
+Not checked: whether the command renders as a code block (a pinned command in
+prose passes), and an add command split across lines. The test reads lines of
+text; it does not parse Markdown or the shell, so a fence, a list item or a
+blockquote makes no difference to it, and a command spelled through shell
+expansion (a variable, a glob, command substitution) is not seen.
 
 The release step in ``docs/releasing.md`` finds the "from the next release (on
 main, ...)" markers with a line-based ``grep``. A marker wrapped across a line
@@ -78,325 +51,234 @@ from ledger import __version__
 ROOT = Path(__file__).resolve().parents[1]
 INSTALL_PAGES = ("README.md", "docs/start-here.md", "docs/upgrading.md")
 
-# The one documented install line, compared as a whole string.
+# The one documented install command.
 PINNED_SOURCE = f"https://github.com/smithadifd/ledger.git#v{__version__}"
 PINNED_COMMAND = f"claude plugin marketplace add {PINNED_SOURCE}"
-# One container marker at the start of a line: a blockquote `>` (and the one
-# space that may follow it), or a list marker (a bullet, or digits and `.` or
-# `)`, and the spaces after it), each with any indentation before it.
-CONTAINER = re.compile(
-    r"(?P<quote>[ \t]*>[ \t]?)|(?P<list>[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]+)"
-)
-# One blockquote marker, read off a line inside a blockquoted fence.
-QUOTE = re.compile(r"[ \t]*>[ \t]?")
-# A fence opens with three or more backticks or tildes, after the container
-# prefix and any indentation.
-OPENING = re.compile(r"(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})")
-# The install verb the backstop looks for; `add` ends the word.
-MARKETPLACE_ADD = re.compile(r"marketplace add\b")
+MISSING = f"no line shows `{PINNED_COMMAND}`"
 RELEASED_HEADING = re.compile(r"^## \d+\.\d+\.\d+", re.MULTILINE)
 # A "from the next release (on main" marker, wherever its words wrap.
 MARKER = re.compile(r"from\s+the\s+next\s+release\s+\(on\s+main", re.IGNORECASE)
 
 
-def split_container(line: str) -> tuple[int, int, str]:
-    """A line's container prefix: (blockquote markers, list columns, the rest).
+def normalize(line: str) -> str:
+    """A line as both checks read it.
 
-    The prefix is any run of optional spaces, `>` markers and list markers, in
-    any order. `list columns` is the width of the list markers and their
-    indentation, which is how far a list item's own lines are indented.
+    Inline backticks and single and double quote characters are dropped, each
+    run of whitespace becomes one space, and case is folded.
     """
-    depth = lead = pos = 0
-    while True:
-        marker = CONTAINER.match(line, pos)
-        if not marker:
-            return depth, lead, line[pos:]
-        if marker.group("quote") is not None:
-            depth += 1
-            lead = 0  # indentation before a quote marker is read with the marker
-        else:
-            lead += marker.end() - marker.start()
-        pos = marker.end()
+    bare = re.sub(r"[`'\"]", "", line)
+    bare = re.sub(r"\s+", " ", bare)
+    return bare.strip().casefold()
 
 
-def fenced_commands(text: str) -> list[tuple[int, str]]:
-    """Each line inside the page's fenced code blocks: (line number, text).
+PIN = normalize(PINNED_COMMAND)
+# The pin, not followed by more of a tag or version: `-dev`, `/`, a letter or
+# digit, or a dot and another one. A sentence's final dot is fine.
+SHOWS_PIN = re.compile(re.escape(PIN) + r"(?![\w/-]|\.\w)")
 
-    A fence opens on a line whose container prefix (blockquote and list
-    markers) is followed by three backticks or tildes. From each line inside it
-    the same number of `>` markers, then up to the same width of list-marker
-    and indentation columns, are removed. A line that ends in a backslash
-    continues onto the next fenced line, as in the shell; the joined text keeps
-    the backslash and the line break, so it is never equal to a one-line
-    command. A fence is closed only by a line that carries all of its `>`
-    markers; a line that lacks them stays inside the fence, so a fence that is
-    never closed runs to the end of the page.
-    """
-    found: list[tuple[int, str]] = []
-    # (character, length, blockquote depth, columns to strip)
-    fence: tuple[str, int, int, int] | None = None
-    pending: tuple[int, str] | None = None
+
+def shows_pin(normalized: str) -> bool:
+    return SHOWS_PIN.search(normalized) is not None
+
+
+def names_add(normalized: str) -> bool:
+    """Whether the word `marketplace` is followed, later on the line, by `add`."""
+    words = normalized.split(" ")
+    if "marketplace" not in words:
+        return False
+    return "add" in words[words.index("marketplace") + 1 :]
+
+
+def unpinned_adds(text: str) -> list[str]:
+    """Check 1: each line that names an add without the pin, as `number: line`."""
+    found = []
     for number, line in enumerate(text.splitlines(), 1):
-        if fence is not None:
-            char, length, depth, lead = fence
-            rest, matched = line, True
-            for _ in range(depth):
-                marker = QUOTE.match(rest)
-                if not marker:
-                    matched = False
-                    break
-                rest = rest[marker.end():]
-            stripped = rest.strip()
-            if matched and stripped and set(stripped) == {char} and len(stripped) >= length:
-                if pending:
-                    found.append(pending)
-                    pending = None
-                fence = None
-                continue
-            body = rest[min(lead, len(rest) - len(rest.lstrip(" \t"))):]
-            pending = (pending[0], pending[1] + "\n" + body) if pending else (number, body)
-            if not body.endswith("\\"):
-                found.append(pending)
-                pending = None
-            continue
-        depth, lead, rest = split_container(line)
-        opened = OPENING.match(rest)
-        if opened:
-            mark = opened.group("fence")
-            fence = (mark[0], len(mark), depth, lead + len(opened.group("indent")))
-    if pending:
-        found.append(pending)
+        normalized = normalize(line)
+        if names_add(normalized) and not shows_pin(normalized):
+            found.append(f"{number}: {line}")
     return found
 
 
-def is_pinned(command: str) -> bool:
-    return command == PINNED_COMMAND
-
-
-def names_marketplace(command: str) -> bool:
-    """Whether the shell would read the word `marketplace` in this text."""
-    joined = command.replace("\\\n", "")
-    bare = re.sub(r"[\"'\\]", "", joined)
-    return "marketplace" in bare.casefold()
-
-
 def install_problems(text: str) -> list[str]:
-    """What keeps a page from meeting the pin rule."""
-    commands = fenced_commands(text)
-    found: dict[int, str] = {}
-    covered: set[int] = set()
-    for number, command in commands:
-        covered.update(range(number, number + command.count("\n") + 1))
-        if names_marketplace(command) and not is_pinned(command):
-            found[number] = command
-    # The backstop: a line the fence reading did not cover that holds
-    # `marketplace add` is the pinned command once its prefix and backticks go.
-    for number, line in enumerate(text.splitlines(), 1):
-        if number in covered:
-            continue
-        _depth, _lead, rest = split_container(line)
-        bare = rest.replace("`", "").lstrip(" \t")
-        if MARKETPLACE_ADD.search(bare) and not is_pinned(bare):
-            found[number] = line
-    problems = [f"{number}: {command}" for number, command in sorted(found.items())]
-    if not any(is_pinned(command) for _number, command in commands):
-        problems.insert(0, f"no fenced line is exactly `{PINNED_COMMAND}`")
+    """Checks 1 and 2 for one install page."""
+    problems = unpinned_adds(text)
+    if not any(shows_pin(normalize(line)) for line in text.splitlines()):
+        problems.insert(0, MISSING)
     return problems
 
 
-def fence(*lines: str, indent: str = "") -> str:
-    body = "".join(f"{indent}{line}\n" for line in lines)
-    return f"Install it:\n\n{indent}```sh\n{body}{indent}```\n\nThen go on.\n"
+def above_first_release(text: str) -> str:
+    """A changelog's Unreleased text: what precedes its first released heading."""
+    released = RELEASED_HEADING.search(text)
+    return text[: released.start()] if released else text
 
 
-def test_each_install_page_carries_exactly_the_pinned_command() -> None:
+def with_pin(*lines: str) -> str:
+    """A page of these lines, then the pinned command on its own line."""
+    return "\n".join(lines) + f"\n\n{PINNED_COMMAND}\n"
+
+
+def test_each_install_page_pins_every_add_and_shows_the_pin() -> None:
     for rel in INSTALL_PAGES:
         problems = install_problems((ROOT / rel).read_text(encoding="utf-8"))
         assert not problems, f"{rel}:\n" + "\n".join(problems)
 
 
-def test_the_exact_pinned_line_passes() -> None:
+def test_the_changelog_unreleased_section_pins_every_add() -> None:
+    text = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert RELEASED_HEADING.search(text), "CHANGELOG.md has no released-version heading"
+    problems = unpinned_adds(above_first_release(text))
+    assert not problems, "CHANGELOG.md:\n" + "\n".join(problems)
+
+
+def test_changelog_history_below_the_first_release_is_not_checked() -> None:
+    history = "# Changelog\n\n## Unreleased\n\nText.\n\n## 0.1.0 - 2026-01-01\n\n"
+    unpinned = "Install it with `claude plugin marketplace add smithadifd/ledger`."
+    assert unpinned_adds(above_first_release(history + unpinned + "\n")) == []
+    above = "# Changelog\n\n## Unreleased\n\n" + unpinned + "\n\n## 0.1.0 - 2026-01-01\n"
+    assert unpinned_adds(above_first_release(above)) == ["5: " + unpinned]
+
+
+def test_the_pin_is_v_plus_the_package_version() -> None:
+    assert PINNED_SOURCE.rsplit("#", 1) == [
+        "https://github.com/smithadifd/ledger.git",
+        "v" + __version__,
+    ]
+    assert PINNED_COMMAND == f"claude plugin marketplace add {PINNED_SOURCE}"
+
+
+def test_the_pinned_command_passes_wherever_it_sits() -> None:
     install = "claude plugin install ledger-hooks@ledger-plugins"
-    assert install_problems(fence(PINNED_COMMAND, install)) == []
-    assert install_problems(fence(PINNED_COMMAND, install, indent="   ")) == []
-    assert install_problems(f"~~~sh\n{PINNED_COMMAND}\n~~~\n") == []
-    assert fenced_commands(fence(PINNED_COMMAND, install, indent="   ")) == [
-        (4, PINNED_COMMAND),
-        (5, install),
-    ]
-
-
-def test_a_space_padded_pinned_line_fails() -> None:
-    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
-    for padded in (f" {PINNED_COMMAND}", f"{PINNED_COMMAND} ", f"  {PINNED_COMMAND}  "):
-        assert install_problems(fence(PINNED_COMMAND, padded)) == [f"5: {padded}"], padded
-        assert install_problems(fence(padded)) == [missing, f"4: {padded}"], padded
-        assert install_problems(f"````\n{padded}\n````\n") == [missing, f"2: {padded}"], padded
-    # Only the fence's own indentation is taken off, so padding beyond it fails.
-    assert install_problems(fence(f" {PINNED_COMMAND}", indent="  ")) == [
-        missing,
-        f"4:  {PINNED_COMMAND}",
-    ]
-
-
-def test_the_pinned_line_in_a_blockquoted_fence_passes() -> None:
-    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
-    # The pinned line passes in a blockquoted fence, with and without the
-    # space after each marker, nested, and with the fence indented in the quote.
-    for lines in (
-        ("> ```sh", f"> {PINNED_COMMAND}", "> ```"),
-        ("```sh", f"{PINNED_COMMAND}", "```"),
-        (">```sh", f">{PINNED_COMMAND}", ">```"),
-        ("> > ```sh", f"> > {PINNED_COMMAND}", "> > ```"),
-        ("> ~~~", f"> {PINNED_COMMAND}", "> ~~~"),
-        (">   ```sh", f">   {PINNED_COMMAND}", ">   ```"),
+    for page in (
+        f"{PINNED_COMMAND}\n",
+        f"```sh\n{PINNED_COMMAND}\n{install}\n```\n",
+        f"~~~sh\n{PINNED_COMMAND}\n~~~\n",
+        f"   {PINNED_COMMAND}\n",
+        f"Run `{PINNED_COMMAND}` first.\n",
+        f"Run {PINNED_COMMAND}.\n",
+        f"- {PINNED_COMMAND}\n",
+        f"1. `{PINNED_COMMAND}`\n",
+        f"- ```sh\n  {PINNED_COMMAND}\n  ```\n",
+        f"> {PINNED_COMMAND}\n",
+        f"> ```sh\n> {PINNED_COMMAND}\n> ```\n",
+        f"> - `{PINNED_COMMAND}`\n",
+        f"{PINNED_COMMAND} # pinned\n",
     ):
-        assert install_problems("\n".join(lines) + "\n") == [], lines
-    assert fenced_commands(f"> ```sh\n> {PINNED_COMMAND}\n>\n> ```\n") == [
-        (2, PINNED_COMMAND),
-        (3, ""),
-    ]
-    # A space-padded pinned line fails in a blockquote as it does outside one.
-    padded = f"> ```sh\n>  {PINNED_COMMAND}\n> ```\n"
-    assert install_problems(padded) == [missing, f"2:  {PINNED_COMMAND}"]
+        assert install_problems(page) == [], page
 
 
-def test_an_unpinned_command_in_a_blockquoted_fence_fails() -> None:
-    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
-    unpinned = "claude plugin marketplace add smithadifd/ledger"
-    # An unpinned command in a blockquoted fence fails, alone and beside the exact line.
-    for opener, prefix, closer in (
-        ("> ```sh", "> ", "> ```"),
-        (">```sh", ">", ">```"),
-        ("> > ```sh", "> > ", "> > ```"),
-        ("> ~~~", "> ", "> ~~~"),
-    ):
-        quoted = f"{opener}\n{prefix}{unpinned}\n{closer}\n"
-        assert install_problems(quoted) == [missing, f"2: {unpinned}"], opener
-        assert install_problems(fence(PINNED_COMMAND) + quoted) == [f"9: {unpinned}"], opener
-        both = f"{opener}\n{prefix}{PINNED_COMMAND}\n{prefix}{unpinned}\n{closer}\n"
-        assert install_problems(both) == [f"3: {unpinned}"], opener
+def test_two_spaces_between_marketplace_and_add() -> None:
+    unpinned = "claude plugin marketplace  add smithadifd/ledger"
+    assert install_problems(with_pin(unpinned)) == [f"1: {unpinned}"]
+    # Whitespace runs collapse, so the pinned command passes with extra spaces too.
+    spaced = f"claude  plugin marketplace   add {PINNED_SOURCE}"
+    assert install_problems(f"{spaced}\n") == []
 
 
-def test_a_line_without_the_blockquote_markers_stays_inside_the_fence() -> None:
-    # A line that lacks the quote's markers does not end the fence: the prefix
-    # cannot be matched, so the test fails closed and reads it as fenced.
-    page = f"> ```sh\n> {PINNED_COMMAND}\nclaude plugin marketplace add x\n"
-    assert install_problems(page) == ["3: claude plugin marketplace add x"]
-    # A fence-looking line without the markers does not close it either.
-    page = f"> ```sh\n> {PINNED_COMMAND}\n```sh\nclaude plugin marketplace add x\n```\n"
-    assert install_problems(page) == ["4: claude plugin marketplace add x"]
-    # A nested quote that loses one marker keeps the inner fence open.
-    page = f"> > ```sh\n> > {PINNED_COMMAND}\n> claude plugin marketplace add x\n"
-    assert install_problems(page) == ["3: claude plugin marketplace add x"]
-    # Lines of a list item's fence that sit less deep than its content stay fenced.
-    unpinned = "claude plugin marketplace add x"
-    page = f"> - ```sh\n>   {PINNED_COMMAND}\n{unpinned}\n>   ```\n"
-    assert install_problems(page) == [f"3: {unpinned}"]
-    page = f"- ```sh\n  {PINNED_COMMAND}\n{unpinned}\n  ```\n"
-    assert install_problems(page) == [f"3: {unpinned}"]
+def test_a_tab_between_marketplace_and_add() -> None:
+    unpinned = "claude plugin marketplace\tadd smithadifd/ledger"
+    assert install_problems(with_pin(unpinned)) == [f"1: {unpinned}"]
+    tabbed = f"claude plugin marketplace\tadd\t{PINNED_SOURCE}"
+    assert install_problems(f"{tabbed}\n") == []
 
 
-# Each case: the opening line, what starts each line inside, the closing line.
-LIST_FENCES = (
-    ("- ```sh", "  ", "  ```"),
-    ("* ```sh", "  ", "  ```"),
-    ("+ ```sh", "  ", "  ```"),
-    ("-   ```sh", "    ", "    ```"),
-    ("  - ```sh", "    ", "    ```"),
-    ("- ~~~", "  ", "  ~~~"),
-    ("- - ```sh", "    ", "    ```"),
-)
-ORDERED_FENCES = (
-    ("1. ```sh", "   ", "   ```"),
-    ("12. ```sh", "    ", "    ```"),
-    ("2) ```sh", "   ", "   ```"),
-    ("1. - ```sh", "     ", "     ```"),
-)
-QUOTED_LIST_FENCES = (
-    ("> - ```sh", ">   ", ">   ```"),
-    ("> * ```sh", ">   ", ">   ```"),
-    ("> 1. ```sh", ">    ", ">    ```"),
-    ("> > - ```sh", "> >   ", "> >   ```"),
-    ("- > ```sh", "  > ", "  > ```"),
-)
-
-
-def assert_unpinned_fails_in(cases: tuple[tuple[str, str, str], ...]) -> None:
-    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
-    unpinned = "claude plugin marketplace add smithadifd/ledger"
-    for opener, prefix, closer in cases:
-        alone = f"{opener}\n{prefix}{unpinned}\n{closer}\n"
-        assert install_problems(alone) == [missing, f"2: {unpinned}"], opener
-        both = f"{opener}\n{prefix}{PINNED_COMMAND}\n{prefix}{unpinned}\n{closer}\n"
-        assert install_problems(both) == [f"3: {unpinned}"], opener
-        assert install_problems(fence(PINNED_COMMAND) + alone) == [f"9: {unpinned}"], opener
-
-
-def test_an_unpinned_command_in_a_list_item_fence_fails() -> None:
-    assert_unpinned_fails_in(LIST_FENCES)
-
-
-def test_an_unpinned_command_in_an_ordered_list_fence_fails() -> None:
-    assert_unpinned_fails_in(ORDERED_FENCES)
-
-
-def test_an_unpinned_command_in_a_blockquoted_list_item_fence_fails() -> None:
-    assert_unpinned_fails_in(QUOTED_LIST_FENCES)
-
-
-def test_the_pinned_line_in_a_list_item_fence_passes() -> None:
-    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
-    install = "claude plugin install ledger-hooks@ledger-plugins"
-    for opener, prefix, closer in LIST_FENCES + ORDERED_FENCES + QUOTED_LIST_FENCES:
-        page = f"{opener}\n{prefix}{PINNED_COMMAND}\n{prefix}{install}\n{closer}\n"
-        assert install_problems(page) == [], opener
-        assert fenced_commands(page) == [(2, PINNED_COMMAND), (3, install)], opener
-        # Padding beyond the list item's own indentation still fails.
-        padded = f"{opener}\n{prefix} {PINNED_COMMAND}\n{closer}\n"
-        assert install_problems(padded) == [missing, f"2:  {PINNED_COMMAND}"], opener
-
-
-def test_a_pinned_command_split_after_marketplace_fails() -> None:
-    # The command split after `marketplace`, with and without the shell's
-    # line continuation; alone on the page and beside the exact line.
-    # A continued line is reported as one command, from its first line.
-    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
-    for split, flagged in (
-        (
-            ("claude plugin marketplace \\", f"  add {PINNED_SOURCE}"),
-            f"claude plugin marketplace \\\n  add {PINNED_SOURCE}",
-        ),
-        (
-            ("claude plugin marketplace add \\", f"  {PINNED_SOURCE}"),
-            f"claude plugin marketplace add \\\n  {PINNED_SOURCE}",
-        ),
-        (("claude plugin marketplace", f"add {PINNED_SOURCE}"), "claude plugin marketplace"),
-    ):
-        assert install_problems(fence(*split)) == [missing, f"4: {flagged}"], split
-        assert install_problems(fence(PINNED_COMMAND, *split)) == [f"5: {flagged}"], split
-
-
-def test_a_continued_fenced_command_is_reported_once() -> None:
-    # The backstop does not report again a line the fence reading already holds.
-    page = fence(PINNED_COMMAND, "claude plugin \\", "marketplace add x")
-    assert install_problems(page) == ["5: claude plugin \\\nmarketplace add x"]
-
-
-def test_a_shell_joined_spelling_of_marketplace_fails() -> None:
-    for line in (
+def test_quotes_around_add_or_marketplace() -> None:
+    for unpinned in (
+        "claude plugin marketplace 'add' smithadifd/ledger",
+        'claude plugin marketplace "add" smithadifd/ledger',
         'claude plugin market"place" add smithadifd/ledger',
-        "claude plugin market'place' add smithadifd/ledger",
-        "claude plugin market\\place add smithadifd/ledger",
         "claude plugin 'marketplace' add smithadifd/ledger",
-        "claude plugin Marketplace add smithadifd/ledger",
+        "claude plugin marketplace '' add smithadifd/ledger",
     ):
-        assert install_problems(fence(PINNED_COMMAND, line)) == [f"5: {line}"], line
-    # A word split by a continued line is one word to the shell.
-    split = ("claude plugin market\\", "place add smithadifd/ledger")
-    assert install_problems(fence(PINNED_COMMAND, *split)) == [
-        "5: claude plugin market\\\nplace add smithadifd/ledger"
-    ]
+        assert install_problems(with_pin(unpinned)) == [f"1: {unpinned}"], unpinned
+    # Quote characters are dropped, so a quoted pinned command passes.
+    for quoted in (
+        f"claude plugin marketplace 'add' {PINNED_SOURCE}",
+        f'claude plugin marketplace "add" {PINNED_SOURCE}',
+    ):
+        assert install_problems(f"{quoted}\n") == [], quoted
+
+
+def test_marketplace_add_in_any_letter_case() -> None:
+    for unpinned in (
+        "claude plugin Marketplace Add smithadifd/ledger",
+        "CLAUDE PLUGIN MARKETPLACE ADD smithadifd/ledger",
+    ):
+        assert install_problems(with_pin(unpinned)) == [f"1: {unpinned}"], unpinned
+
+
+def test_an_unpinned_add_fails_wherever_it_sits() -> None:
+    # The rule reads one line at a time, so no container makes a line safe.
+    unpinned = "claude plugin marketplace add smithadifd/ledger"
+    for line in (
+        unpinned,
+        f"Run `{unpinned}` to follow main.",
+        f"    {unpinned}",
+        f"```sh {unpinned}",
+        f"- {unpinned}",
+        f"* Run `{unpinned}`",
+        f"1. `{unpinned}`",
+        f"> {unpinned}",
+        f"> > {unpinned}",
+        f"> - {unpinned}",
+        f"- > {unpinned}",
+    ):
+        assert install_problems(with_pin(line)) == [f"1: {line}"], line
+    for opener, prefix, closer in (
+        ("```sh", "", "```"),
+        ("~~~", "", "~~~"),
+        ("- ```sh", "  ", "  ```"),
+        ("1. ```sh", "   ", "   ```"),
+        ("> ```sh", "> ", "> ```"),
+        ("> - ```sh", ">   ", ">   ```"),
+    ):
+        page = f"{opener}\n{prefix}{unpinned}\n{closer}\n\n{PINNED_COMMAND}\n"
+        assert install_problems(page) == [f"2: {prefix}{unpinned}"], opener
+
+
+def test_an_unpinned_add_inside_a_list_item_fence_fails() -> None:
+    unpinned = "claude plugin marketplace add smithadifd/ledger"
+    page = f"- Install:\n\n  ```sh\n  {PINNED_COMMAND}\n  {unpinned}\n  ```\n"
+    assert install_problems(page) == [f"5:   {unpinned}"]
+    page = f"- ```sh\n  {unpinned}\n  ```\n\n{PINNED_COMMAND}\n"
+    assert install_problems(page) == [f"2:   {unpinned}"]
+
+
+def test_an_unpinned_add_beside_a_pinned_one_fails() -> None:
+    unpinned = "claude plugin marketplace add smithadifd/ledger"
+    page = f"{PINNED_COMMAND}\n{unpinned}\n"
+    assert install_problems(page) == [f"2: {unpinned}"]
+
+
+def test_the_pinned_command_in_a_list_item_and_a_blockquote_passes() -> None:
+    for page in (
+        f"- Install it with `{PINNED_COMMAND}`.\n",
+        f"- {PINNED_COMMAND}\n  - {PINNED_COMMAND}\n",
+        f"> Install it with `{PINNED_COMMAND}`.\n",
+        f"> {PINNED_COMMAND}\n> > {PINNED_COMMAND}\n",
+    ):
+        assert install_problems(page) == [], page
+
+
+def test_a_page_with_no_pinned_line_fails() -> None:
+    assert install_problems("Intro.\n\nNo install command here.\n") == [MISSING]
+    assert install_problems("") == [MISSING]
+    only_update = "Run `claude plugin marketplace update ledger-plugins`.\n"
+    assert install_problems(only_update) == [MISSING]
+    unpinned = "claude plugin marketplace add smithadifd/ledger"
+    assert install_problems(f"{unpinned}\n") == [MISSING, f"1: {unpinned}"]
+
+
+def test_marketplace_prose_that_is_not_an_add_passes() -> None:
+    prose = (
+        "Run `claude plugin marketplace update ledger-plugins` to refresh it.\n"
+        "Remove it with `claude plugin marketplace remove ledger-plugins`.\n"
+        "A marketplace added with a pin stays on that tag.\n"
+        "The marketplace addition is described below.\n"
+        "Add the marketplace with the pinned command:\n"
+        "Configure it with `claude plugin configure ledger-hooks@<marketplace> --values-stdin`.\n"
+    )
+    assert install_problems(prose + f"\n{PINNED_COMMAND}\n") == []
 
 
 def test_each_near_miss_fails() -> None:
@@ -412,101 +294,33 @@ def test_each_near_miss_fails() -> None:
         f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#{v}",
         f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#v{v}.0",
         f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#v{v}.1",
-        f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#v{v.rsplit('.', 1)[0]}",
+        f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#v{v}0",
         f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#v{v}-dev",
-        f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#v{v} extra",
-        f"claude plugin marketplace add {PINNED_SOURCE} # pinned",
+        f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#v{v}/x",
+        f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#v{v.rsplit('.', 1)[0]}",
         f"claude plugin marketplace add --scope user {PINNED_SOURCE}",
+        f"claude plugin marketplace --scope user add {PINNED_SOURCE}",
         f"claude plugin marketplace add git@github.com:smithadifd/ledger.git#v{v}",
         f"claude plugin marketplace add http://github.com/smithadifd/ledger.git#v{v}",
-        f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#V{v}",
         f"claude plugin marketplace add https://github.com/smithadifd/ledger/#v{v}",
-        f"claude plugin marketplace add https://github.com/smithadifd/ledger.git/#v{v}",
         f"claude plugin marketplace add https://www.github.com/smithadifd/ledger.git#v{v}",
         f"claude plugin marketplace add https://gitlab.com/smithadifd/ledger.git#v{v}",
-        f"claude plugin marketplace add https://github.com/Smithadifd/ledger.git#v{v}",
-        f"claude plugin marketplace add https://github.com/SMITHADIFD/LEDGER.git#v{v}",
         f"claude plugin marketplace add https://github.com/smithadifd/%6cedger.git#v{v}",
-        "claude plugin marketplace add Smithadifd/Ledger",
         "claude plugin marketplace add smithadifd/skills",
         f"claude plugin marketplace add https://github.com/example/other.git#v{v}",
-        f"claude  plugin marketplace add {PINNED_SOURCE}",
-        f"claude plugin marketplace add\t{PINNED_SOURCE}",
         f"marketplace add {PINNED_SOURCE}",
-        f"/plugin marketplace add {PINNED_SOURCE}",
-        f"sudo claude plugin marketplace add {PINNED_SOURCE}",
         "claude plugin marketplace add",
-        "claude plugin marketplace update ledger-plugins",
-        "claude plugin marketplace remove ledger-plugins",
-        "claude plugin configure ledger-hooks@<marketplace> --values-stdin",
     ]
     for line in near_misses:
-        assert install_problems(fence(PINNED_COMMAND, line)) == [f"5: {line}"], line
-        alone = install_problems(fence(line))
-        assert alone == [f"no fenced line is exactly `{PINNED_COMMAND}`", f"4: {line}"], line
+        assert install_problems(with_pin(line)) == [f"1: {line}"], line
+        assert install_problems(f"{line}\n") == [MISSING, f"1: {line}"], line
 
 
-def test_prose_that_holds_no_marketplace_add_is_not_checked() -> None:
-    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
-    prose = (
-        "Run `claude plugin marketplace update ledger-plugins` to refresh it.\n"
-        "Remove it with `claude plugin marketplace remove ledger-plugins`.\n"
-        "A marketplace added with a pin stays on that tag.\n"
-        "The marketplace addition is described below.\n"
-    )
-    assert install_problems(prose + fence(PINNED_COMMAND)) == []
-    # A pinned line in prose does not stand in for the fenced line.
-    assert install_problems(prose + f"`{PINNED_COMMAND}`\n") == [missing]
-
-
-def test_an_unpinned_add_in_prose_fails_through_the_backstop() -> None:
-    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
-    unpinned = "claude plugin marketplace add smithadifd/ledger"
-    for line in (
-        unpinned,
-        f"Run `{unpinned}` to follow main.",
-        f"- Run {unpinned}",
-        f"1. `{unpinned}`",
-        f"> `{unpinned}`",
-        f"> - {unpinned}",
-        f"    {unpinned}",
-        f"Or `{PINNED_COMMAND}` inline.",
-        f"{PINNED_COMMAND} # pinned",
-        f"{PINNED_COMMAND} ",
-        f"- {PINNED_COMMAND} extra",
-    ):
-        assert install_problems(f"{line}\n" + fence(PINNED_COMMAND)) == [f"1: {line}"], line
-        assert install_problems(f"{line}\n") == [missing, f"1: {line}"], line
-    # Indented code that is not fenced is held to the backstop too.
-    assert install_problems("Text.\n\n    claude plugin marketplace add x\n") == [
-        missing,
-        "3:     claude plugin marketplace add x",
-    ]
-    # So is a fence's own opening line, where an info string can carry a command.
-    page = f"```sh {unpinned}\n{PINNED_COMMAND}\n```\n"
-    assert install_problems(page) == [f"1: ```sh {unpinned}"]
-
-
-def test_a_pinned_line_in_prose_passes_the_backstop() -> None:
-    for line in (
-        PINNED_COMMAND,
-        f"`{PINNED_COMMAND}`",
-        f"- {PINNED_COMMAND}",
-        f"1. `{PINNED_COMMAND}`",
-        f"> {PINNED_COMMAND}",
-        f"> - `{PINNED_COMMAND}`",
-    ):
-        assert install_problems(f"{line}\n" + fence(PINNED_COMMAND)) == [], line
-
-
-def test_a_fence_that_is_never_closed_runs_to_the_end() -> None:
-    page = f"```sh\n{PINNED_COMMAND}\n```\n\nText.\n\n```sh\nclaude plugin marketplace add x\n"
-    assert install_problems(page) == ["8: claude plugin marketplace add x"]
-    # A shorter or different closing mark does not close the fence.
-    page = f"````sh\n{PINNED_COMMAND}\n```\nclaude plugin marketplace add x\n````\n"
-    assert install_problems(page) == ["4: claude plugin marketplace add x"]
-    page = f"~~~\n{PINNED_COMMAND}\n```\nclaude plugin marketplace add x\n~~~\n"
-    assert install_problems(page) == ["4: claude plugin marketplace add x"]
+def test_a_split_add_is_not_checked() -> None:
+    # Documented limit: the rule reads one line at a time, so `marketplace`
+    # and `add` on different lines are not seen.
+    page = with_pin("claude plugin marketplace", "add smithadifd/ledger")
+    assert install_problems(page) == []
 
 
 def tracked_markdown() -> list[str]:

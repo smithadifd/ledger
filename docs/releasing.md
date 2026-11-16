@@ -39,15 +39,14 @@ paths:
   section has an "Upgrading" paragraph, carry what an upgrader needs from it
   into section 1.5
 
-`tests/test_docs_pinned_install.py` fails unless each of `README.md`,
-`docs/start-here.md` and `docs/upgrading.md` has, inside a fenced code block,
-a line that is exactly
-`claude plugin marketplace add https://github.com/smithadifd/ledger.git#v`
-followed by `__version__`, and no other fenced line on those pages holds the
-word `marketplace` (so a `marketplace update` or `marketplace remove` command
-there goes in prose). A line anywhere on those pages that holds
-`marketplace add` must be that exact line as well, so an unpinned add in
-prose fails too. The test also fails when, in any tracked Markdown file (`CHANGELOG.md` above its
+`tests/test_docs_pinned_install.py` fails unless every line on `README.md`,
+`docs/start-here.md` and `docs/upgrading.md` (and in `CHANGELOG.md` above its
+first released section) that names a marketplace add carries the exact pinned
+command `claude plugin marketplace add https://github.com/smithadifd/ledger.git#v`
+followed by `__version__`, and each of those three install pages shows that
+command on at least one line. Known limits: a pinned command that renders as
+prose rather than as a code block still passes, and an add command split
+across lines is not checked. The test also fails when, in any tracked Markdown file (`CHANGELOG.md` above its
 first released section), the grep above finds a different number of
 next-release markers than the file has, as when a marker is wrapped across a
 line break. An unpinned add follows main, so a person who
