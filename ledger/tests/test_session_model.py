@@ -1065,8 +1065,9 @@ def test_every_writer_verb_is_covered() -> None:
     from ledger.verbs import discover_verbs
 
     writers = {name for name, verb in discover_verbs().items() if verb.writes}
-    # doc writes only through ``doc add``; restore has its own case below.
-    assert writers | {"doc", "restore"} == set(WRITER_VERBS) | {"restore"}
+    # doc and spec write only through ``doc add`` and ``spec set``, which check
+    # LEDGER_HARNESS themselves; restore has its own case below.
+    assert writers | {"doc", "restore", "spec"} == set(WRITER_VERBS) | {"restore"}
 
 
 ENV_READ = re.compile(r"""(_env|environ\.get|environ|getenv)\s*[(\[]\s*["']LEDGER_MODEL["']""")

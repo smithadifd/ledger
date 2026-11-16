@@ -81,10 +81,10 @@ def test_link_positional_target_takes_an_explicit_rel(tmp_path, monkeypatch):
     db = _db(tmp_path)
     _seed(monkeypatch, db)
 
-    code, _out, err = invoke(monkeypatch, ["--db", db, "link", ITEM, "--rel", "pr", "123"])
+    code, _out, err = invoke(monkeypatch, ["--db", db, "link", ITEM, "--rel", "pr", "org/repo#123"])
 
     assert code == 0, err
-    assert _events(db)[-1] == ("item.linked", {"rel": "pr", "target": "123"})
+    assert _events(db)[-1] == ("item.linked", {"rel": "pr", "target": "org/repo#123"})
 
 
 @pytest.mark.parametrize(
