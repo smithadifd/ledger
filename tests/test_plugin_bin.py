@@ -98,6 +98,70 @@ def test_isolated_plugin_copy_ignores_cwd_ledger_package(tmp_path: Path) -> None
     assert "usage:" in done.stdout.lower()
 
 
+def test_isolated_plugin_copy_ignores_inherited_pythonpath_sqlite3(
+    tmp_path: Path,
+) -> None:
+    dest = tmp_path / "installed" / "ledger-hooks"
+    _copy_plugin(dest)
+    poison = tmp_path / "poison-sqlite3"
+    poison.mkdir()
+    marker = "PLANTED_PYTHONPATH_SQLITE3"
+    (poison / "sqlite3.py").write_text(f"print({marker!r})\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env.update(
+        HOME=str(home),
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(poison),
+    )
+    done = subprocess.run(
+        [str(dest / "bin" / "ledger"), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert done.returncode == 0, done.stderr
+    assert marker not in done.stdout
+    assert marker not in done.stderr
+    assert "usage:" in done.stdout.lower()
+
+
+def test_isolated_plugin_copy_ignores_inherited_pythonpath_ledger(
+    tmp_path: Path,
+) -> None:
+    dest = tmp_path / "installed" / "ledger-hooks"
+    _copy_plugin(dest)
+    poison = tmp_path / "poison-ledger"
+    planted = poison / "ledger"
+    planted.mkdir(parents=True)
+    marker = "PLANTED_PYTHONPATH_LEDGER"
+    (planted / "__init__.py").write_text("", encoding="utf-8")
+    (planted / "__main__.py").write_text(f"print({marker!r})\n", encoding="utf-8")
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {key: value for key, value in os.environ.items() if key != "PYTHONPATH"}
+    env.update(
+        HOME=str(home),
+        PYTHONDONTWRITEBYTECODE="1",
+        PYTHONPATH=str(poison),
+    )
+    done = subprocess.run(
+        [str(dest / "bin" / "ledger"), "--help"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=tmp_path,
+        env=env,
+    )
+    assert done.returncode == 0, done.stderr
+    assert marker not in done.stdout
+    assert marker not in done.stderr
+    assert "usage:" in done.stdout.lower()
+
+
 def test_bin_ledger_without_python_prints_one_stderr_line(tmp_path: Path) -> None:
     dest = tmp_path / "plugin"
     _copy_plugin(dest)

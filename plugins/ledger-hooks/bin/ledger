@@ -19,6 +19,6 @@ if [ -z "$pick" ]; then
   printf '%s\n' "ledger: Python 3.11 or later is required" >&2
   exit 1
 fi
-PYTHONPATH="$root${PYTHONPATH:+:$PYTHONPATH}"
+PYTHONPATH="$root"
 export PYTHONPATH
 exec "$pick" -P -m ledger "$@"
