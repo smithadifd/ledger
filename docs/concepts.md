@@ -436,7 +436,9 @@ runs `PRAGMA integrity_check`, and renames it to FILE only when the check passes
 and the source path still names the file the copy was read from. FILE must not
 exist, before the copy or when it is published (a hard link, which refuses
 atomically), unless `--overwrite` is given (`restore` refuses an existing
-target the same way). Two backups to the same
+target the same way). On a filesystem that cannot make hard links the backup
+is refused and FILE is left as it was; `--overwrite` publishes there by
+rename. Two backups to the same
 FILE each write their own copy; without `--overwrite` the one that renames
 last is refused, and with it the last one wins. A
 backup killed mid-run (by a signal or a power loss) leaves its hidden partial

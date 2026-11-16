@@ -955,10 +955,12 @@ already has (a text file, an older backup) is refused with `backup target
 already exists` (exit 3) and the file is left byte for byte as it was. The
 check runs before the copy, and the copy is then published with a hard link,
 which fails if the name is taken at that instant, so a file that takes the
-name while the copy runs is not replaced either. On a filesystem that refuses
-hard links the backup claims the name with an exclusive create, which fails
-the same way when the name is taken, and renames the copy over its own claim.
-Pass
+name while the copy runs is not replaced either. On a filesystem that cannot
+make the hard link (no permission to link, links not supported, another
+device, or the link limit reached) the backup is refused with `backup target
+filesystem cannot publish without replacing` (exit 3): nothing is published,
+an absent FILE stays absent and an existing one is left as it was; pass
+`--overwrite` there to publish by rename. Pass
 `--overwrite` to replace the file on purpose; a scheduled backup that reuses
 one name needs it. `--overwrite` does not lift the other refusals: the live
 database, its `-wal`, `-shm` and `-journal` files, and any name ending in one

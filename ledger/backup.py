@@ -8,11 +8,12 @@ source path still names the file the copy was read from.
 
 A destination that already exists is refused unless the caller passes
 ``overwrite=True`` (the CLI's ``--overwrite``), the same rule ``restore``
-applies to its target. Without ``overwrite`` the copy is published with a
-hard link, which fails atomically when the name is taken, so a file that
-appears while the copy runs is never replaced. A filesystem that refuses hard
-links falls back to claiming the name with an exclusive create, which fails
-atomically too, and then renaming the copy over that placeholder of its own.
+applies to its target. Without ``overwrite`` the copy is published only
+with a hard link, which fails atomically when the name is taken, so a file
+that appears while the copy runs is never replaced. A filesystem that cannot
+make the hard link refuses the backup instead: nothing is published, the
+destination is left exactly as it was, and the caller passes
+``overwrite=True`` to publish there by rename.
 """
 from __future__ import annotations
 
@@ -220,49 +221,25 @@ def _taken_error(dest_path: Path) -> LedgerError:
     )
 
 
-def _publish_by_claim(partial: Path, dest_path: Path) -> None:
-    """Publish ``partial`` on a filesystem without hard links, still without replacing.
-
-    The name is claimed first with an exclusive create (``O_CREAT | O_EXCL``),
-    which fails atomically with ``FileExistsError`` when any file has the
-    name, a dangling symbolic link included, so a file another process puts
-    there at any moment before the claim is refused and left as it was. The
-    copy is then renamed over the empty placeholder this call created. If
-    the rename fails, the placeholder is removed, but only while the name
-    still has the placeholder's identity: a file that is not ours is never
-    removed.
-    """
-    try:
-        fd = os.open(dest_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError as exc:
-        raise _taken_error(dest_path) from exc
-    try:
-        placeholder = os.fstat(fd)
-    finally:
-        os.close(fd)
-    claimed = (placeholder.st_dev, placeholder.st_ino)
-    try:
-        partial.replace(dest_path)
-    except BaseException:
-        try:
-            if file_identity(dest_path) == claimed:
-                os.unlink(dest_path)
-        except OSError:
-            # Its identity cannot be read, so it cannot be shown to be ours.
-            pass
-        raise
+def _cannot_publish_error(dest_path: Path) -> LedgerError:
+    return LedgerError(
+        f"backup target filesystem cannot publish without replacing: {dest_path} "
+        f"(hard links are not supported there; pass --overwrite to publish by rename)"
+    )
 
 
 def _publish_without_replacing(partial: Path, dest_path: Path) -> None:
     """Move ``partial`` to ``dest_path`` unless a file has that name by then.
 
-    A hard link raises ``FileExistsError`` atomically when the name is taken,
-    so a file that appears at any moment before the link, however late, is
-    refused and left as it was; the partial is unlinked once the link holds.
-    On a filesystem that refuses hard links (see ``_LINK_UNSUPPORTED``) the
-    name is claimed by an exclusive create and the copy renamed over the
-    claim (``_publish_by_claim``), which refuses a file that appears at any
-    moment before the claim the same way.
+    The only way to publish here is a hard link, which raises
+    ``FileExistsError`` atomically when the name is taken, so a file that
+    appears at any moment before the link, however late, is refused and left
+    as it was; the partial is unlinked once the link holds. A filesystem that
+    cannot make the link (see ``_LINK_UNSUPPORTED``) refuses the backup with
+    ``backup target filesystem cannot publish without replacing``. There is
+    no other way to publish without replacing, so nothing is written at
+    ``dest_path``: an absent name stays absent and a file there is left byte
+    for byte as it was. On either refusal the caller removes the partial.
     """
     try:
         os.link(partial, dest_path)
@@ -271,8 +248,7 @@ def _publish_without_replacing(partial: Path, dest_path: Path) -> None:
     except OSError as exc:
         if exc.errno not in _LINK_UNSUPPORTED:
             raise
-        _publish_by_claim(partial, dest_path)
-        return
+        raise _cannot_publish_error(dest_path) from exc
     partial.unlink(missing_ok=True)
 
 
@@ -284,9 +260,11 @@ def backup_db(
     A ``dest`` that already exists is refused (``backup target already
     exists``) and left untouched, unless ``overwrite`` is true. The check
     runs before the copy starts and again, atomically, when the copy is
-    published (a hard link, with an exclusive-create claim on a filesystem
-    without hard links; see ``_publish_without_replacing``). The live
-    database and its side files are refused either way.
+    published by hard link (see ``_publish_without_replacing``). On a
+    filesystem that cannot make the hard link the backup is refused
+    (``backup target filesystem cannot publish without replacing``) and
+    ``dest`` is left as it was; there, ``overwrite`` publishes by rename. The
+    live database and its side files are refused either way.
     """
     source_path = resolve_db_path(db_path)
     dest_path = resolve_db_path(dest)
@@ -350,6 +328,8 @@ def backup_db(
             # name meanwhile is not replaced either.
             _publish_without_replacing(partial, dest_path)
     except BaseException:
+        # Every refusal and error removes this backup's own partial and
+        # nothing else: the destination is never touched here.
         partial.unlink(missing_ok=True)
         raise
     return BackupResult(path=dest_path, integrity="ok")

@@ -291,39 +291,112 @@ def test_a_published_backup_has_one_name_and_the_partial_is_gone(
     assert _no_partial(tmp_path)
 
 
-@pytest.mark.parametrize(
-    "code",
-    sorted({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}),
+LINK_UNSUPPORTED = sorted(
+    {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}
 )
-def test_a_filesystem_without_hard_links_still_publishes_an_absent_target(
+CANNOT_PUBLISH = "backup target filesystem cannot publish without replacing"
+
+
+def _names(folder: Path) -> list[str]:
+    return sorted(os.listdir(folder))
+
+
+@pytest.mark.parametrize("code", LINK_UNSUPPORTED)
+def test_without_hard_links_an_absent_target_is_refused_and_stays_absent(
     tmp_path: Path, monkeypatch, code: int
 ) -> None:
     live = _ledger_with(tmp_path / "ledger.db", ITEM)
     dest = tmp_path / "copy.db"
     monkeypatch.setattr(os, "link", _link_unsupported(code))
-    assert backup_db(live, dest).integrity == "ok"
-    assert _items(dest) == [ITEM]
-    assert _no_partial(tmp_path)
+    with pytest.raises(LedgerError, match=CANNOT_PUBLISH) as info:
+        backup_db(live, dest)
+    assert str(dest) in str(info.value)
+    assert "pass --overwrite to publish by rename" in str(info.value)
+    assert not os.path.lexists(dest)
+    # No partial and no file of this backup's at the name.
+    assert _names(tmp_path) == ["ledger.db"]
 
 
-def test_without_hard_links_a_file_present_at_the_publish_is_still_refused(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize("code", LINK_UNSUPPORTED)
+def test_without_hard_links_a_present_target_is_refused_and_left_byte_identical(
+    tmp_path: Path, monkeypatch, code: int
 ) -> None:
+    # The file takes the name while the copy runs, after the early check.
     live = _ledger_with(tmp_path / "ledger.db", ITEM)
     dest = tmp_path / "copy.db"
     real_integrity = backup_module.integrity_check
+    seen: dict[str, os.stat_result] = {}
 
     def check_then_appear(partial: Path) -> str:
         verdict = real_integrity(partial)
         dest.write_bytes(NOT_A_DB)
+        seen["before"] = os.lstat(dest)
         return verdict
 
     monkeypatch.setattr(backup_module, "integrity_check", check_then_appear)
+    monkeypatch.setattr(os, "link", _link_unsupported(code))
+    with pytest.raises(LedgerError, match=CANNOT_PUBLISH):
+        backup_db(live, dest)
+    after = os.lstat(dest)
+    before = seen["before"]
+    assert (after.st_ino, after.st_size, after.st_mtime_ns, after.st_nlink) == (
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_nlink,
+    )
+    assert dest.read_bytes() == NOT_A_DB
+    assert _names(tmp_path) == ["copy.db", "ledger.db"]
+
+
+@pytest.mark.parametrize("present", [False, True], ids=["absent", "present"])
+@pytest.mark.parametrize("code", LINK_UNSUPPORTED)
+def test_without_hard_links_overwrite_publishes_a_valid_database_by_rename(
+    tmp_path: Path, monkeypatch, code: int, present: bool
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    if present:
+        _ledger_with(dest, OTHER)
+    monkeypatch.setattr(os, "link", _link_unsupported(code))
+    assert backup_db(live, dest, overwrite=True).integrity == "ok"
+    assert dest.read_bytes()[:16] == SQLITE_MAGIC
+    assert integrity_check(dest) == "ok"
+    assert _items(dest) == [ITEM]
+    assert os.lstat(dest).st_nlink == 1
+    assert _names(tmp_path) == ["copy.db", "ledger.db"]
+
+
+def test_cli_backup_without_hard_links_refuses_with_exit_3(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
     monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
+    code, out, err = _cli(monkeypatch, live, "backup", "--to", str(dest))
+    assert code == EXIT_REFUSED, err
+    assert CANNOT_PUBLISH in err
+    assert "--overwrite" in err
+    assert len(err.strip().splitlines()) == 1
+    assert "integrity=ok" not in out
+    assert not os.path.lexists(dest)
+    assert _no_partial(tmp_path)
+
+
+def test_a_link_that_finds_the_name_taken_still_refuses_as_already_exists(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+
+    def taken(_src, dst, *_args, **_kwargs):
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(dst))
+
+    monkeypatch.setattr(os, "link", taken)
     with pytest.raises(LedgerError, match="backup target already exists"):
         backup_db(live, dest)
-    assert dest.read_bytes() == NOT_A_DB
-    assert _no_partial(tmp_path)
+    assert not os.path.lexists(dest)
+    assert _names(tmp_path) == ["ledger.db"]
 
 
 def test_another_link_failure_is_not_taken_for_missing_hard_link_support(
@@ -335,85 +408,6 @@ def test_another_link_failure_is_not_taken_for_missing_hard_link_support(
     with pytest.raises(OSError) as info:
         backup_db(live, dest)
     assert info.value.errno == errno.EIO
+    assert not isinstance(info.value, LedgerError)
     assert not dest.exists()
-    assert _no_partial(tmp_path)
-
-
-def _names(folder: Path) -> list[str]:
-    return sorted(os.listdir(folder))
-
-
-def test_without_hard_links_a_file_that_appears_just_before_the_claim_is_not_replaced(
-    tmp_path: Path, monkeypatch
-) -> None:
-    # The name is free at the early check and when the publish starts; the
-    # file takes it in the instant before the exclusive create.
-    live = _ledger_with(tmp_path / "ledger.db", ITEM)
-    dest = tmp_path / "copy.db"
-    real_open = os.open
-
-    def appear_then_open(path, flags, *args, **kwargs):
-        if Path(path) == dest:
-            dest.write_bytes(NOT_A_DB)
-        return real_open(path, flags, *args, **kwargs)
-
-    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
-    monkeypatch.setattr(os, "open", appear_then_open)
-    with pytest.raises(LedgerError, match="backup target already exists"):
-        backup_db(live, dest)
-    assert dest.read_bytes() == NOT_A_DB
-    assert _names(tmp_path) == ["copy.db", "ledger.db"]
-
-
-def test_without_hard_links_an_absent_target_leaves_no_placeholder_or_partial(
-    tmp_path: Path, monkeypatch
-) -> None:
-    live = _ledger_with(tmp_path / "ledger.db", ITEM)
-    dest = tmp_path / "copy.db"
-    monkeypatch.setattr(os, "link", _link_unsupported(errno.EXDEV))
-    assert backup_db(live, dest).integrity == "ok"
-    assert _names(tmp_path) == ["copy.db", "ledger.db"]
-    assert dest.read_bytes()[:16] == SQLITE_MAGIC
-    assert integrity_check(dest) == "ok"
-    assert _items(dest) == [ITEM]
-    assert os.lstat(dest).st_nlink == 1
-
-
-def test_without_hard_links_a_failed_rename_removes_the_placeholder(
-    tmp_path: Path, monkeypatch
-) -> None:
-    live = _ledger_with(tmp_path / "ledger.db", ITEM)
-    dest = tmp_path / "copy.db"
-    seen: list[bool] = []
-
-    def failing_replace(_src, dst, *_args, **_kwargs):
-        seen.append(Path(dst).exists())
-        raise OSError(errno.EIO, os.strerror(errno.EIO))
-
-    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
-    monkeypatch.setattr(os, "replace", failing_replace)
-    with pytest.raises(OSError) as info:
-        backup_db(live, dest)
-    assert info.value.errno == errno.EIO
-    assert seen == [True], "the claim was not in place when the rename ran"
-    assert _names(tmp_path) == ["ledger.db"]
-
-
-def test_without_hard_links_a_failed_rename_never_removes_a_file_that_is_not_ours(
-    tmp_path: Path, monkeypatch
-) -> None:
-    live = _ledger_with(tmp_path / "ledger.db", ITEM)
-    dest = tmp_path / "copy.db"
-
-    def swap_then_fail(_src, dst, *_args, **_kwargs):
-        # Another process replaces our placeholder, then the rename fails.
-        os.unlink(dst)
-        Path(dst).write_bytes(NOT_A_DB)
-        raise OSError(errno.EIO, os.strerror(errno.EIO))
-
-    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
-    monkeypatch.setattr(os, "replace", swap_then_fail)
-    with pytest.raises(OSError):
-        backup_db(live, dest)
-    assert dest.read_bytes() == NOT_A_DB
     assert _no_partial(tmp_path)
