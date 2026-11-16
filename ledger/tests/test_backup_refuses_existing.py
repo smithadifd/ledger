@@ -220,24 +220,20 @@ def test_a_late_overwrite_still_replaces_a_file_that_took_the_name(
     assert _items(dest) == [ITEM]
 
 
-def test_a_name_that_cannot_be_read_late_is_refused(
+def test_a_name_that_cannot_be_read_is_refused_before_the_copy(
     tmp_path: Path, monkeypatch
 ) -> None:
     live = _ledger_with(tmp_path / "ledger.db", ITEM)
     dest = tmp_path / "copy.db"
-    real_integrity = backup_module.integrity_check
-    # The look at the name is the fallback for a filesystem without hard links.
-    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
 
     def unreadable(_path: Path):
         raise PermissionError("denied")
 
-    def check_then_break_lstat(partial: Path) -> str:
-        verdict = real_integrity(partial)
-        monkeypatch.setattr(backup_module, "file_identity", unreadable)
-        return verdict
-
-    monkeypatch.setattr(backup_module, "integrity_check", check_then_break_lstat)
+    # The live-database guard reads the same name and refuses it on its own
+    # (see test_backup_dest_identity); take it out so the existing-target
+    # check is the one that reads.
+    monkeypatch.setattr(backup_module, "_refuse_live_destination", lambda *_a: None)
+    monkeypatch.setattr(backup_module, "file_identity", unreadable)
     with pytest.raises(LedgerError, match="backup target cannot be checked"):
         backup_db(live, dest)
     assert not dest.exists()
@@ -340,4 +336,84 @@ def test_another_link_failure_is_not_taken_for_missing_hard_link_support(
         backup_db(live, dest)
     assert info.value.errno == errno.EIO
     assert not dest.exists()
+    assert _no_partial(tmp_path)
+
+
+def _names(folder: Path) -> list[str]:
+    return sorted(os.listdir(folder))
+
+
+def test_without_hard_links_a_file_that_appears_just_before_the_claim_is_not_replaced(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The name is free at the early check and when the publish starts; the
+    # file takes it in the instant before the exclusive create.
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    real_open = os.open
+
+    def appear_then_open(path, flags, *args, **kwargs):
+        if Path(path) == dest:
+            dest.write_bytes(NOT_A_DB)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
+    monkeypatch.setattr(os, "open", appear_then_open)
+    with pytest.raises(LedgerError, match="backup target already exists"):
+        backup_db(live, dest)
+    assert dest.read_bytes() == NOT_A_DB
+    assert _names(tmp_path) == ["copy.db", "ledger.db"]
+
+
+def test_without_hard_links_an_absent_target_leaves_no_placeholder_or_partial(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    monkeypatch.setattr(os, "link", _link_unsupported(errno.EXDEV))
+    assert backup_db(live, dest).integrity == "ok"
+    assert _names(tmp_path) == ["copy.db", "ledger.db"]
+    assert dest.read_bytes()[:16] == SQLITE_MAGIC
+    assert integrity_check(dest) == "ok"
+    assert _items(dest) == [ITEM]
+    assert os.lstat(dest).st_nlink == 1
+
+
+def test_without_hard_links_a_failed_rename_removes_the_placeholder(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    seen: list[bool] = []
+
+    def failing_replace(_src, dst, *_args, **_kwargs):
+        seen.append(Path(dst).exists())
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError) as info:
+        backup_db(live, dest)
+    assert info.value.errno == errno.EIO
+    assert seen == [True], "the claim was not in place when the rename ran"
+    assert _names(tmp_path) == ["ledger.db"]
+
+
+def test_without_hard_links_a_failed_rename_never_removes_a_file_that_is_not_ours(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+
+    def swap_then_fail(_src, dst, *_args, **_kwargs):
+        # Another process replaces our placeholder, then the rename fails.
+        os.unlink(dst)
+        Path(dst).write_bytes(NOT_A_DB)
+        raise OSError(errno.EIO, os.strerror(errno.EIO))
+
+    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
+    monkeypatch.setattr(os, "replace", swap_then_fail)
+    with pytest.raises(OSError):
+        backup_db(live, dest)
+    assert dest.read_bytes() == NOT_A_DB
     assert _no_partial(tmp_path)

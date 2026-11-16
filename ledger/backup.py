@@ -11,8 +11,8 @@ A destination that already exists is refused unless the caller passes
 applies to its target. Without ``overwrite`` the copy is published with a
 hard link, which fails atomically when the name is taken, so a file that
 appears while the copy runs is never replaced. A filesystem that refuses hard
-links falls back to a second look at the name followed by a rename, which
-leaves a window of an instant between the look and the rename.
+links falls back to claiming the name with an exclusive create, which fails
+atomically too, and then renaming the copy over that placeholder of its own.
 """
 from __future__ import annotations
 
@@ -213,29 +213,65 @@ _LINK_UNSUPPORTED = frozenset(
 )
 
 
+def _taken_error(dest_path: Path) -> LedgerError:
+    return LedgerError(
+        f"backup target already exists: {dest_path} "
+        f"(pass --overwrite to replace it)"
+    )
+
+
+def _publish_by_claim(partial: Path, dest_path: Path) -> None:
+    """Publish ``partial`` on a filesystem without hard links, still without replacing.
+
+    The name is claimed first with an exclusive create (``O_CREAT | O_EXCL``),
+    which fails atomically with ``FileExistsError`` when any file has the
+    name, a dangling symbolic link included, so a file another process puts
+    there at any moment before the claim is refused and left as it was. The
+    copy is then renamed over the empty placeholder this call created. If
+    the rename fails, the placeholder is removed, but only while the name
+    still has the placeholder's identity: a file that is not ours is never
+    removed.
+    """
+    try:
+        fd = os.open(dest_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError as exc:
+        raise _taken_error(dest_path) from exc
+    try:
+        placeholder = os.fstat(fd)
+    finally:
+        os.close(fd)
+    claimed = (placeholder.st_dev, placeholder.st_ino)
+    try:
+        partial.replace(dest_path)
+    except BaseException:
+        try:
+            if file_identity(dest_path) == claimed:
+                os.unlink(dest_path)
+        except OSError:
+            # Its identity cannot be read, so it cannot be shown to be ours.
+            pass
+        raise
+
+
 def _publish_without_replacing(partial: Path, dest_path: Path) -> None:
     """Move ``partial`` to ``dest_path`` unless a file has that name by then.
 
     A hard link raises ``FileExistsError`` atomically when the name is taken,
     so a file that appears at any moment before the link, however late, is
     refused and left as it was; the partial is unlinked once the link holds.
-    On a filesystem that refuses hard links (see ``_LINK_UNSUPPORTED``) this
-    falls back to looking at the name again and then renaming: a file that
-    takes the name between that look and the rename is replaced, a window of
-    an instant that only a filesystem without hard links has.
+    On a filesystem that refuses hard links (see ``_LINK_UNSUPPORTED``) the
+    name is claimed by an exclusive create and the copy renamed over the
+    claim (``_publish_by_claim``), which refuses a file that appears at any
+    moment before the claim the same way.
     """
     try:
         os.link(partial, dest_path)
     except FileExistsError as exc:
-        raise LedgerError(
-            f"backup target already exists: {dest_path} "
-            f"(pass --overwrite to replace it)"
-        ) from exc
+        raise _taken_error(dest_path) from exc
     except OSError as exc:
         if exc.errno not in _LINK_UNSUPPORTED:
             raise
-        _refuse_existing_target(dest_path)
-        partial.replace(dest_path)
+        _publish_by_claim(partial, dest_path)
         return
     partial.unlink(missing_ok=True)
 
@@ -248,7 +284,7 @@ def backup_db(
     A ``dest`` that already exists is refused (``backup target already
     exists``) and left untouched, unless ``overwrite`` is true. The check
     runs before the copy starts and again, atomically, when the copy is
-    published (a hard link, with a look-then-rename fallback on a filesystem
+    published (a hard link, with an exclusive-create claim on a filesystem
     without hard links; see ``_publish_without_replacing``). The live
     database and its side files are refused either way.
     """
