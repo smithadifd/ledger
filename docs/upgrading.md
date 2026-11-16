@@ -226,15 +226,22 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   from `checked_connect`, or used the return of `connect` as a connection, must
   unpack the new shape. `open_ledger` and `open_ledger_readonly` are unchanged.
 - **The `ledger-hooks` plugin (new in 0.2.0, optional).** Installing it is
-  optional and changes nothing until you do. It runs the first `ledger` on the
-  `PATH` Claude Code gives it, so upgrade the `ledger` CLI first. Its manifest
+  optional and changes nothing until you do. Up to 0.3.x its hooks ran the
+  first `ledger` on the `PATH` Claude Code gives it, so the `ledger` CLI had to
+  be upgraded first. From 0.4.0 each hook runs the plugin's own bundled
+  `bin/ledger` when `CLAUDE_PLUGIN_ROOT` is set and `bin/ledger` there is
+  executable, and only otherwise the first `ledger` on `PATH`; with neither,
+  the hook does nothing. Updating the plugin therefore updates the CLI its
+  hooks use, and the pipx `ledger` stays the one you run in a terminal. The
+  bundled command needs Python 3.11 or later on the `PATH` and does not fall
+  back to the pipx command when it cannot find one. Its manifest
   names a `version`, the release number, and Claude Code takes a plugin's
   version from that field: an update replaces your installed copy only when a
   release changes it. (Before the manifest named a version, the plugin
   followed the repository's commits.) If you installed it with 0.2.0 or
-  0.2.1, update it after the CLI (the same two steps as section 3.2, with the
-  marketplace `ledger-plugins` and the plugin `ledger-hooks@ledger-plugins`):
-  0.3.0 adds its PostModelSwitch hook, which needs Claude Code v2.1.251 or
+  0.2.1, update it (the same two steps as section 3.2, with the marketplace
+  `ledger-plugins` and the plugin `ledger-hooks@ledger-plugins`; a marketplace
+  added with a pin needs the re-pin described in 1.6 instead): 0.3.0 adds its PostModelSwitch hook, which needs Claude Code v2.1.251 or
   later. Add the marketplace with the pinned command:
 
   ```sh
@@ -256,6 +263,31 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
 None of the changes below alters the database schema or needs a migration.
 Each item applies only to a machine that does the thing it names; check the ones
 that fit yours. The [CHANGELOG](../CHANGELOG.md) entry has the detail.
+
+- **The `ledger-hooks` plugin runs its own `ledger` (0.4.0).** This applies if
+  the plugin is installed. From 0.4.0 each hook runs the plugin's bundled
+  `bin/ledger` when `CLAUDE_PLUGIN_ROOT` is set and that file is executable,
+  and otherwise the first `ledger` on the `PATH` Claude Code starts with. Before
+  0.4.0 it was always the `PATH` command. Updating the plugin now updates the
+  CLI its hooks use, while the pipx `ledger` stays the terminal command, so
+  upgrade both. The bundled command needs Python 3.11 or later on the `PATH`
+  and does not fall back to the pipx command when it finds none. A plugin
+  installed from a pinned marketplace stays on its old tag until you re-pin
+  it: `claude plugin marketplace update ledger-plugins` re-fetches the same
+  tag. Remove the plugin and the marketplace, add the marketplace at the new
+  tag, install the plugin, then restart the session:
+
+  ```sh
+  claude plugin uninstall ledger-hooks@ledger-plugins
+  claude plugin marketplace remove ledger-plugins
+  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.4.0
+  claude plugin install ledger-hooks@ledger-plugins
+  ```
+
+  The same plugin also takes the `ledger_db`, `ledger_operator` and
+  `ledger_harness` options from 0.4.0; an already-set environment value wins,
+  so an existing `env` block keeps working unchanged. Prove the re-pin:
+  `claude plugin list` shows `ledger-hooks@ledger-plugins` at version 0.4.0.
 
 - **`backup --to` refuses an existing destination (0.4.0).** Before 0.4.0,
   `ledger backup --to FILE` replaced whatever file sat at FILE and exited 0.

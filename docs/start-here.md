@@ -117,8 +117,10 @@ this line in your shell profile and open a new terminal:
 export PATH="$HOME/ledger-venv/.venv/bin:$PATH"
 ```
 
-The hooks in step 9 run the first `ledger` on the `PATH` Claude Code starts
-with, so for them the folder must be on that `PATH`.
+The hooks in step 9, from the v0.4.0 pin, run the plugin's own bundled
+`bin/ledger`, so they do not need this folder on the `PATH` Claude Code starts
+with. They run the first `ledger` on that `PATH` only when the bundled file is
+missing or not executable, and in that case this folder must be on it.
 
 ## 4. Decide where the database lives
 

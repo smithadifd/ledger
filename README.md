@@ -653,8 +653,11 @@ put the values in the settings `env` block keeps working unchanged.
 No hook blocks a session. Each exits 0 on every path, within a timeout, and a
 failure prints one short line that never holds your text: the brief's goes
 into the session, the captures' to Claude Code's debug log. The hooks are
-shims of a few lines; every rule lives in the CLI, so an older plugin works
-with a newer ledger. `capture --kind prompt` skips harness frames (task
+shims of a few lines; every rule lives in the CLI. From v0.4.0 the hooks run the
+ledger bundled with the plugin, so updating the plugin updates the CLI its
+hooks use; the pipx `ledger` is the terminal command, and a hook falls back to
+the first `ledger` on `PATH` only when the bundled `bin/ledger` is not
+executable. `capture --kind prompt` skips harness frames (task
 notifications, cross-session and agent messages, system reminders, subagent
 hand-backs) and stores a prompt over 64 KiB as a pointer, and
 `"capture_prompts": false` in `config.json` turns prompt capture off while
