@@ -856,6 +856,49 @@ def test_new_race_same_payload_other_agent_is_noop(monkeypatch, tmp_path) -> Non
     assert _count_items(monkeypatch, db) == 1
 
 
+def test_new_race_same_attribution_missed_look_reports_exists(
+    monkeypatch, tmp_path
+) -> None:
+    """Same-key insert between the look and append is exists, not created.
+
+    Ledger.append returns the stored event without IdempotencyConflict when
+    attribution matches, so created must come from the insert, not the look.
+    """
+    db = _db(tmp_path)
+    argv = [
+        "--db", db, "new", "--type", "ticket", "--title", "Sourced",
+        "--id", "s-race-same", "--source", "row:RACE-SAME",
+    ]
+    code1, out1, err1 = invoke(monkeypatch, argv)
+    assert code1 == 0, err1
+    assert out1.startswith("created\ts-race-same\t"), out1
+    before = _count_items(monkeypatch, db)
+    _hide_first_prior_lookup(monkeypatch)
+    code2, out2, err2 = invoke(monkeypatch, argv)
+    assert code2 == 0, err2
+    assert out2.startswith("exists\ts-race-same\t"), out2
+    assert "created" not in out2
+    assert _count_items(monkeypatch, db) == before
+
+    dbj = str(tmp_path / "json.db")
+    code1, out1, err1 = _new(
+        monkeypatch, dbj, "Sourced", "--id", "s-race-same", "--source", "row:RACE-SAME",
+    )
+    assert code1 == 0, err1
+    first = json.loads(out1)
+    assert first["data"]["result"] == "created"
+    _hide_first_prior_lookup(monkeypatch)
+    code2, out2, err2 = _new(
+        monkeypatch, dbj, "Sourced", "--id", "s-race-same", "--source", "row:RACE-SAME",
+    )
+    assert code2 == 0, err2
+    second = json.loads(out2)
+    assert second["data"]["result"] == "exists"
+    assert second["data"]["item_id"] == first["data"]["item_id"] == "s-race-same"
+    assert second["data"]["event"]["id"] == first["data"]["event"]["id"]
+    assert _count_items(monkeypatch, dbj) == 1
+
+
 def test_new_race_different_title_refuses_naming_item(monkeypatch, tmp_path) -> None:
     db = _db(tmp_path)
     _code, out1, _ = _new(monkeypatch, db, "t", "--source", "s-race2")
