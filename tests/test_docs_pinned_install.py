@@ -29,8 +29,11 @@ INSTALL_PAGES = ("README.md", "docs/start-here.md", "docs/upgrading.md")
 
 # What a source argument must be, in full, for this repository.
 PINNED_SOURCE = re.compile(r"https://github\.com/smithadifd/ledger\.git#(v\d+\.\d+\.\d+)")
-# Any word that names this repository (and not smithadifd/ledger-something).
-NAMES_THIS_REPO = re.compile(r"smithadifd/ledger(?![\w-])")
+# Any word that names this repository (and not smithadifd/ledger-something), in
+# any letter case: GitHub resolves `Smithadifd/Ledger`, so a case variant is an
+# install command for this repository that must be seen and then refused,
+# because PINNED_SOURCE above stays exact.
+NAMES_THIS_REPO = re.compile(r"smithadifd/ledger(?![\w-])", re.IGNORECASE)
 ADD = re.compile(r"(?P<prefix>claude plugin )?marketplace add(?P<rest>[^`]*)")
 RELEASED_HEADING = re.compile(r"^## \d+\.\d+\.\d+", re.MULTILINE)
 
@@ -135,6 +138,12 @@ def test_the_scanner_refuses_each_near_miss() -> None:
         "claude plugin marketplace add git@github.com:smithadifd/ledger.git#v0.3.1",
         "claude plugin marketplace add http://github.com/smithadifd/ledger.git#v0.3.1",
         "claude plugin marketplace add https://github.com/smithadifd/ledger.git#V0.3.1",
+        # A case variant of the repository name is still this repository.
+        "claude plugin marketplace add https://github.com/Smithadifd/ledger.git#main",
+        "claude plugin marketplace add https://github.com/Smithadifd/ledger.git#v0.3.1",
+        "claude plugin marketplace add https://github.com/smithadifd/Ledger.git#v0.3.1",
+        "claude plugin marketplace add https://github.com/SMITHADIFD/LEDGER.git#v0.3.1",
+        "claude plugin marketplace add Smithadifd/Ledger",
         "claude  plugin marketplace add https://github.com/smithadifd/ledger.git#v0.3.1x",
         "marketplace add https://github.com/smithadifd/ledger.git#v0.3.1",
         "claude plugin marketplace add smithadifd/ledger follows main.",
@@ -151,6 +160,8 @@ def test_the_scanner_refuses_each_near_miss() -> None:
     for other in (
         "claude plugin marketplace add smithadifd/skills",
         "claude plugin marketplace add smithadifd/ledger-plugins",
+        "claude plugin marketplace add Smithadifd/Skills",
+        "claude plugin marketplace add Smithadifd/Ledger-plugins",
         "claude plugin marketplace update skills",
         "claude plugin marketplace remove ledger-plugins",
     ):

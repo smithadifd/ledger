@@ -603,29 +603,42 @@ suffix follows the repository's main branch, which can carry plugin changes
 that no release has shipped. After a later release, put that release's tag
 where `v0.3.1` is.
 
-After you install the plugin, `ledger` is on the PATH of a Claude Code
-session that has it enabled (the plugin's `bin/ledger`). That command is for
-the session only; in a terminal, install with pipx as in
+With v0.3.1, the version pinned above, the plugin ships no command of its
+own: each hook runs the first `ledger` on the `PATH` Claude Code starts with,
+the pipx install from [step 1](#1-install-the-ledger-command), and `ledger` in
+a terminal comes from pipx too.
+
+The hooks are silent until a database is set: with v0.3.1 they print nothing
+and write nothing when `LEDGER_DB` is unset (an empty value counts as unset).
+The hooks and the `ledger` command they run read `LEDGER_DB`,
+`LEDGER_OPERATOR` and `LEDGER_HARNESS` from the environment Claude Code starts
+with, so set them the way [step 2](#2-set-the-environment) does, in the `env`
+block of Claude Code's settings.
+
+From the next release (on main, not in v0.3.1), the plugin's `bin/ledger` puts
+`ledger` on the PATH of a Claude Code session that has the plugin enabled.
+From the next release (on main, not in v0.3.1), that command is for the
+session only; in a terminal, install with pipx as in
 [step 1](#1-install-the-ledger-command).
 
-The hooks are silent until a database is set: they print nothing and write
-nothing when `LEDGER_DB` is unset and the `ledger_db` plugin option is unset
-(an empty value counts as unset). Set the three values either the way
-[step 2](#2-set-the-environment) does, in the `env` block of Claude Code's
-settings, or as plugin options:
+From the next release (on main, not in v0.3.1), the hooks are silent when
+`LEDGER_DB` is unset and the `ledger_db` plugin option is unset, and the three
+values can be set as plugin options instead of in the settings `env` block:
 
 ```sh
 claude plugin configure ledger-hooks@<marketplace> --values-stdin
 ```
 
 with a JSON object whose keys are `ledger_db` (absolute path to the database),
-`ledger_operator`, and `ledger_harness` (optional). An already-set `LEDGER_DB`,
-`LEDGER_OPERATOR` or `LEDGER_HARNESS` environment value is kept; a plugin
-option fills only an unset one, so an install that put the values in the
-settings `env` block keeps working unchanged.
+`ledger_operator`, and `ledger_harness` (optional). From the next release (on
+main, not in v0.3.1), an already-set `LEDGER_DB`, `LEDGER_OPERATOR` or
+`LEDGER_HARNESS` environment value is kept and a plugin option fills only an
+unset one, so an install that put the values in the settings `env` block keeps
+working unchanged.
 
-Each hook runs the plugin's own `bin/ledger` when that file is executable,
-and otherwise the first `ledger` on `PATH`.
+From the next release (on main, not in v0.3.1), each hook runs the plugin's
+own `bin/ledger` when that file is executable, and otherwise the first
+`ledger` on `PATH`.
 
 No hook blocks a session. Each exits 0 on every path, within a timeout, and a
 failure prints one short line that never holds your text: the brief's goes

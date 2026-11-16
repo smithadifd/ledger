@@ -239,7 +239,10 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   the `#vX.Y.Z` suffix pins the plugin to that release, and an add without it
   follows main. If you added `ledger-plugins` without the suffix, remove it
   (`claude plugin marketplace remove ledger-plugins`) and add it again with
-  the pin. If the skills plugin's session-start hook is also installed with an
+  the pin. A marketplace added with a pin stays on that tag:
+  `claude plugin marketplace update ledger-plugins` re-fetches the same tag, so
+  to move to a later release, remove the marketplace and add it again with the
+  new tag. If the skills plugin's session-start hook is also installed with an
   explicit `ledger_cli`, a session prints the brief twice, and a separate
   prompt-capture hook records each prompt twice.
 
