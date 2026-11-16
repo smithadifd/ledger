@@ -17,15 +17,19 @@ heading:
 - each of the three install pages shows that command on at least one line.
 
 Each line is normalized first: inline backticks and quote characters are
-dropped, each run of whitespace (tabs included) becomes one space, and letter
-case is ignored. A line names an add when its words hold ``marketplace`` and,
-later on the same line, ``add``; a line that names only another marketplace verb
-(``update``, ``remove``) is not an add. The pinned command may be followed by
-more text on its line, but not by more of a tag or version (``-dev``, ``.1``,
-another digit), so a longer tag does not pass for this one.
+dropped and each run of whitespace (tabs included) becomes one space. A line
+names an add when its words hold ``marketplace`` and, later on the same line,
+``add``, compared without regard to letter case; a line that names only
+another marketplace verb (``update``, ``remove``) is not an add. The pinned
+command is compared with letter case kept, because a tag and a URL path are
+case sensitive: ``#V0.3.1`` or ``SmithAdifd`` does not pass. It may be
+followed by more text on its line, but not by more of a tag or version
+(``-dev``, ``.1``, another digit), so a longer tag does not pass for this one.
 
 Not checked: whether the command renders as a code block (a pinned command in
-prose passes), and an add command split across lines. The test reads lines of
+prose passes), an add command split across lines, and a second, unpinned add
+on a line that also holds the pinned command (the line passes). The test reads
+lines of
 text; it does not parse Markdown or the shell, so a fence, a list item or a
 blockquote makes no difference to it, and a command spelled through shell
 expansion (a variable, a glob, command substitution) is not seen.
@@ -60,25 +64,28 @@ RELEASED_HEADING = re.compile(r"^## \d+\.\d+\.\d+", re.MULTILINE)
 MARKER = re.compile(r"from\s+the\s+next\s+release\s+\(on\s+main", re.IGNORECASE)
 
 
-def normalize(line: str) -> str:
+def normalize(line: str, fold: bool = True) -> str:
     """A line as both checks read it.
 
-    Inline backticks and single and double quote characters are dropped, each
-    run of whitespace becomes one space, and case is folded.
+    Inline backticks and single and double quote characters are dropped and each
+    run of whitespace becomes one space. Case is folded unless `fold` is false:
+    finding the words `marketplace` and `add` ignores case, but the pinned
+    command is compared with its case kept (a tag and a URL path are case
+    sensitive).
     """
     bare = re.sub(r"[`'\"]", "", line)
-    bare = re.sub(r"\s+", " ", bare)
-    return bare.strip().casefold()
+    bare = re.sub(r"\s+", " ", bare).strip()
+    return bare.casefold() if fold else bare
 
 
-PIN = normalize(PINNED_COMMAND)
+PIN = normalize(PINNED_COMMAND, fold=False)
 # The pin, not followed by more of a tag or version: `-dev`, `/`, a letter or
 # digit, or a dot and another one. A sentence's final dot is fine.
 SHOWS_PIN = re.compile(re.escape(PIN) + r"(?![\w/-]|\.\w)")
 
 
-def shows_pin(normalized: str) -> bool:
-    return SHOWS_PIN.search(normalized) is not None
+def shows_pin(line: str) -> bool:
+    return SHOWS_PIN.search(normalize(line, fold=False)) is not None
 
 
 def names_add(normalized: str) -> bool:
@@ -94,7 +101,7 @@ def unpinned_adds(text: str) -> list[str]:
     found = []
     for number, line in enumerate(text.splitlines(), 1):
         normalized = normalize(line)
-        if names_add(normalized) and not shows_pin(normalized):
+        if names_add(normalized) and not shows_pin(line):
             found.append(f"{number}: {line}")
     return found
 
@@ -102,7 +109,7 @@ def unpinned_adds(text: str) -> list[str]:
 def install_problems(text: str) -> list[str]:
     """Checks 1 and 2 for one install page."""
     problems = unpinned_adds(text)
-    if not any(shows_pin(normalize(line)) for line in text.splitlines()):
+    if not any(shows_pin(line) for line in text.splitlines()):
         problems.insert(0, MISSING)
     return problems
 
@@ -205,6 +212,26 @@ def test_marketplace_add_in_any_letter_case() -> None:
         "CLAUDE PLUGIN MARKETPLACE ADD smithadifd/ledger",
     ):
         assert install_problems(with_pin(unpinned)) == [f"1: {unpinned}"], unpinned
+
+
+def test_a_wrongly_cased_pin_fails() -> None:
+    # A tag and a URL path are case sensitive, so these would not install the tag.
+    for line in (
+        f"claude plugin marketplace add https://github.com/smithadifd/ledger.git#V{__version__}",
+        f"claude plugin marketplace add https://github.com/SmithAdifd/ledger.git#v{__version__}",
+        f"claude plugin marketplace add https://github.com/smithadifd/Ledger.git#v{__version__}",
+        f"Claude Plugin Marketplace Add {PINNED_SOURCE}",
+    ):
+        assert unpinned_adds(f"{line}\n") == [f"1: {line}"], line
+        assert install_problems(f"{line}\n") == [MISSING, f"1: {line}"], line
+        assert install_problems(with_pin(line)) == [f"1: {line}"], line
+
+
+def test_a_line_with_an_unpinned_and_a_pinned_add_passes() -> None:
+    # Documented limit: the rule reads whole lines, so the pinned command on a
+    # line excuses an unpinned add on the same line.
+    both = f"claude plugin marketplace add smithadifd/ledger; {PINNED_COMMAND}"
+    assert install_problems(f"{both}\n") == []
 
 
 def test_an_unpinned_add_fails_wherever_it_sits() -> None:

@@ -43,10 +43,11 @@ paths:
 `docs/start-here.md` and `docs/upgrading.md` (and in `CHANGELOG.md` above its
 first released section) that names a marketplace add carries the exact pinned
 command `claude plugin marketplace add https://github.com/smithadifd/ledger.git#v`
-followed by `__version__`, and each of those three install pages shows that
-command on at least one line. Known limits: a pinned command that renders as
-prose rather than as a code block still passes, and an add command split
-across lines is not checked. The test also fails when, in any tracked Markdown file (`CHANGELOG.md` above its
+followed by `__version__` (letter case included), and each of those three
+install pages shows that command on at least one line. Known limits: a pinned
+command that renders as prose rather than as a code block still passes, an add
+command split across lines is not checked, and a line that holds both an
+unpinned add and the pinned command passes. The test also fails when, in any tracked Markdown file (`CHANGELOG.md` above its
 first released section), the grep above finds a different number of
 next-release markers than the file has, as when a marker is wrapped across a
 line break. An unpinned add follows main, so a person who
