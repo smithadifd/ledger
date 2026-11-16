@@ -7,14 +7,15 @@ page must get the released tag's plugin.
 
 What this test asserts, and nothing more. On each install page (``README.md``,
 ``docs/start-here.md``, ``docs/upgrading.md``), among the lines inside its
-fenced code blocks (``` or ~~~ fences):
+fenced code blocks (``` or ~~~ fences, a fence inside a blockquote included):
 
 - at least one line is exactly
 
       claude plugin marketplace add https://github.com/smithadifd/ledger.git#vX.Y.Z
 
-  with ``X.Y.Z`` the current release, ``__version__`` (leading and trailing
-  blanks aside, and with the fence's own indentation removed); and
+  with ``X.Y.Z`` the current release, ``__version__``, compared character for
+  character with no trimming (only the fence's own indentation, and a
+  blockquote's ``>`` markers, are taken off each line first); and
 - every fenced line that holds the word ``marketplace`` is that exact line.
 
 So a pinned command split across two lines fails, and so do an unpinned add, a
@@ -25,6 +26,10 @@ backslash is joined to the next one, as the shell joins it, and quote
 characters and backslashes are dropped, so ``market"place"``, ``market\\place``
 and a word split by a continued line count as ``marketplace``; the comparison
 ignores letter case.
+
+A fence inside a blockquote is read as a fence: its opening line may start with
+``>`` markers, and each line inside loses that many markers. A line without them
+ends the blockquote, and so the fence, as in Markdown.
 
 Not checked: prose outside fences, inline code spans included (a person reads
 those rather than copies them as a block); any page other than the three
@@ -58,8 +63,13 @@ INSTALL_PAGES = ("README.md", "docs/start-here.md", "docs/upgrading.md")
 # The one documented install line, compared as a whole string.
 PINNED_SOURCE = f"https://github.com/smithadifd/ledger.git#v{__version__}"
 PINNED_COMMAND = f"claude plugin marketplace add {PINNED_SOURCE}"
-# A fence opens with three or more backticks or tildes, after any indentation.
-FENCE = re.compile(r"^(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})")
+# One blockquote marker: a `>` and the single space that may follow it.
+QUOTE = re.compile(r"[ \t]*> ?")
+# A fence opens with three or more backticks or tildes, after any blockquote
+# markers and indentation.
+FENCE = re.compile(
+    r"^(?P<quote>(?:[ \t]*> ?)*)(?P<indent>[ \t]*)(?P<fence>`{3,}|~{3,})"
+)
 RELEASED_HEADING = re.compile(r"^## \d+\.\d+\.\d+", re.MULTILINE)
 # A "from the next release (on main" marker, wherever its words wrap.
 MARKER = re.compile(r"from\s+the\s+next\s+release\s+\(on\s+main", re.IGNORECASE)
@@ -68,42 +78,62 @@ MARKER = re.compile(r"from\s+the\s+next\s+release\s+\(on\s+main", re.IGNORECASE)
 def fenced_commands(text: str) -> list[tuple[int, str]]:
     """Each line inside the page's fenced code blocks: (line number, text).
 
-    The fence's own indentation is removed from each line inside it. A line
-    that ends in a backslash continues onto the next fenced line, as in the
-    shell; the joined text keeps the backslash and the line break, so it is
-    never equal to a one-line command. A fence that is never closed runs to
-    the end of the page.
+    The fence's own indentation, and the `>` markers of a blockquote it sits
+    in, are removed from each line inside it. A line that ends in a backslash
+    continues onto the next fenced line, as in the shell; the joined text keeps
+    the backslash and the line break, so it is never equal to a one-line
+    command. A fence that is never closed runs to the end of the page, or to
+    the first line that lacks its blockquote's markers.
     """
     found: list[tuple[int, str]] = []
-    fence: tuple[str, int, int] | None = None  # (character, length, indent)
+    # (character, length, indent, blockquote depth)
+    fence: tuple[str, int, int, int] | None = None
     pending: tuple[int, str] | None = None
     for number, line in enumerate(text.splitlines(), 1):
-        if fence is None:
-            opened = FENCE.match(line)
-            if opened:
-                mark = opened.group("fence")
-                fence = (mark[0], len(mark), len(opened.group("indent")))
-            continue
-        char, length, indent = fence
-        stripped = line.strip()
-        if stripped and set(stripped) == {char} and len(stripped) >= length:
+        if fence is not None:
+            char, length, indent, depth = fence
+            rest: str | None = line
+            for _ in range(depth):
+                marker = QUOTE.match(rest)
+                if not marker:
+                    rest = None
+                    break
+                rest = rest[marker.end():]
+            if rest is not None:
+                stripped = rest.strip()
+                if stripped and set(stripped) == {char} and len(stripped) >= length:
+                    if pending:
+                        found.append(pending)
+                        pending = None
+                    fence = None
+                    continue
+                body = rest[min(indent, len(rest) - len(rest.lstrip(" \t"))):]
+                pending = (pending[0], pending[1] + "\n" + body) if pending else (number, body)
+                if not body.endswith("\\"):
+                    found.append(pending)
+                    pending = None
+                continue
+            # The blockquote ended, and the fence with it; read this line afresh.
             if pending:
                 found.append(pending)
                 pending = None
             fence = None
-            continue
-        body = line[min(indent, len(line) - len(line.lstrip(" \t"))):]
-        pending = (pending[0], pending[1] + "\n" + body) if pending else (number, body)
-        if not body.endswith("\\"):
-            found.append(pending)
-            pending = None
+        opened = FENCE.match(line)
+        if opened:
+            mark = opened.group("fence")
+            fence = (
+                mark[0],
+                len(mark),
+                len(opened.group("indent")),
+                opened.group("quote").count(">"),
+            )
     if pending:
         found.append(pending)
     return found
 
 
 def is_pinned(command: str) -> bool:
-    return command.strip() == PINNED_COMMAND
+    return command == PINNED_COMMAND
 
 
 def names_marketplace(command: str) -> bool:
@@ -142,11 +172,75 @@ def test_the_exact_pinned_line_passes() -> None:
     assert install_problems(fence(PINNED_COMMAND, install)) == []
     assert install_problems(fence(PINNED_COMMAND, install, indent="   ")) == []
     assert install_problems(f"~~~sh\n{PINNED_COMMAND}\n~~~\n") == []
-    assert install_problems(f"````\n  {PINNED_COMMAND}  \n````\n") == []
     assert fenced_commands(fence(PINNED_COMMAND, install, indent="   ")) == [
         (4, PINNED_COMMAND),
         (5, install),
     ]
+
+
+def test_a_space_padded_pinned_line_fails() -> None:
+    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
+    for padded in (f" {PINNED_COMMAND}", f"{PINNED_COMMAND} ", f"  {PINNED_COMMAND}  "):
+        assert install_problems(fence(PINNED_COMMAND, padded)) == [f"5: {padded}"], padded
+        assert install_problems(fence(padded)) == [missing, f"4: {padded}"], padded
+        assert install_problems(f"````\n{padded}\n````\n") == [missing, f"2: {padded}"], padded
+    # Only the fence's own indentation is taken off, so padding beyond it fails.
+    assert install_problems(fence(f" {PINNED_COMMAND}", indent="  ")) == [
+        missing,
+        f"4:  {PINNED_COMMAND}",
+    ]
+
+
+def test_the_pinned_line_in_a_blockquoted_fence_passes() -> None:
+    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
+    # The pinned line passes in a blockquoted fence, with and without the
+    # space after each marker, nested, and with the fence indented in the quote.
+    for lines in (
+        ("> ```sh", f"> {PINNED_COMMAND}", "> ```"),
+        ("```sh", f"{PINNED_COMMAND}", "```"),
+        (">```sh", f">{PINNED_COMMAND}", ">```"),
+        ("> > ```sh", f"> > {PINNED_COMMAND}", "> > ```"),
+        ("> ~~~", f"> {PINNED_COMMAND}", "> ~~~"),
+        (">   ```sh", f">   {PINNED_COMMAND}", ">   ```"),
+    ):
+        assert install_problems("\n".join(lines) + "\n") == [], lines
+    assert fenced_commands(f"> ```sh\n> {PINNED_COMMAND}\n>\n> ```\n") == [
+        (2, PINNED_COMMAND),
+        (3, ""),
+    ]
+    # A space-padded pinned line fails in a blockquote as it does outside one.
+    padded = f"> ```sh\n>  {PINNED_COMMAND}\n> ```\n"
+    assert install_problems(padded) == [missing, f"2:  {PINNED_COMMAND}"]
+
+
+def test_an_unpinned_command_in_a_blockquoted_fence_fails() -> None:
+    missing = f"no fenced line is exactly `{PINNED_COMMAND}`"
+    unpinned = "claude plugin marketplace add smithadifd/ledger"
+    # An unpinned command in a blockquoted fence fails, alone and beside the exact line.
+    for opener, prefix, closer in (
+        ("> ```sh", "> ", "> ```"),
+        (">```sh", ">", ">```"),
+        ("> > ```sh", "> > ", "> > ```"),
+        ("> ~~~", "> ", "> ~~~"),
+    ):
+        quoted = f"{opener}\n{prefix}{unpinned}\n{closer}\n"
+        assert install_problems(quoted) == [missing, f"2: {unpinned}"], opener
+        assert install_problems(fence(PINNED_COMMAND) + quoted) == [f"9: {unpinned}"], opener
+        both = f"{opener}\n{prefix}{PINNED_COMMAND}\n{prefix}{unpinned}\n{closer}\n"
+        assert install_problems(both) == [f"3: {unpinned}"], opener
+
+
+def test_a_line_without_the_blockquote_markers_ends_the_fence() -> None:
+    # As in Markdown, the quote ends where its markers stop, and the fence with
+    # it; the later line is prose, and the pinned line above it still counts.
+    page = f"> ```sh\n> {PINNED_COMMAND}\nclaude plugin marketplace add x\n"
+    assert install_problems(page) == []
+    # The line that ended the quote can open a fence of its own.
+    page = f"> ```sh\n> {PINNED_COMMAND}\n```sh\nclaude plugin marketplace add x\n```\n"
+    assert install_problems(page) == ["4: claude plugin marketplace add x"]
+    # A nested quote that loses one marker ends the inner fence.
+    page = f"> > ```sh\n> > {PINNED_COMMAND}\n> claude plugin marketplace add x\n"
+    assert install_problems(page) == []
 
 
 def test_a_pinned_command_split_after_marketplace_fails() -> None:
