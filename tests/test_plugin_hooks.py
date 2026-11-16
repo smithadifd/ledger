@@ -583,8 +583,11 @@ def test_t19_the_plugin_manifest_carries_the_release_version() -> None:
     # Claude Code's plugin list shows this version; without one it shows a commit
     # id. The release bumps it with the package (docs/releasing.md, section 1).
     plugin = load(PLUGIN_JSON)
-    assert re.fullmatch(r"\d+\.\d+\.\d+", str(plugin.get("version"))), plugin.get("version")
-    assert plugin["version"] == __version__
+    assert re.fullmatch(r"\d+\.\d+\.\d+(-dev)?", str(plugin.get("version"))), plugin.get("version")
+    # At a release it is `__version__`; between releases main reads the next patch
+    # with `-dev`, so main never names a released version over unreleased changes.
+    major, minor, patch = (int(part) for part in __version__.split("."))
+    assert plugin["version"] in (__version__, f"{major}.{minor}.{patch + 1}-dev")
     # One place names it: a version in the marketplace entry would be a second one to bump.
     market = load(MARKETPLACE)
     assert "version" not in market

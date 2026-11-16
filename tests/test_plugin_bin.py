@@ -344,7 +344,9 @@ def test_bin_ledger_without_python_prints_one_stderr_line(tmp_path: Path) -> Non
 
 def test_plugin_manifest_version_matches_package() -> None:
     plugin = json.loads(PLUGIN_JSON.read_text(encoding="utf-8"))
-    assert plugin["version"] == __version__
+    # The release version, or the next patch with `-dev` between releases.
+    major, minor, patch = (int(part) for part in __version__.split("."))
+    assert plugin["version"] in (__version__, f"{major}.{minor}.{patch + 1}-dev")
 
 
 def test_bin_ledger_is_executable() -> None:

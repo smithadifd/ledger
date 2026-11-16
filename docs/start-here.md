@@ -211,9 +211,14 @@ your prompts and question-picker answers, install the ledger's plugin from
 Claude Code:
 
 ```sh
-claude plugin marketplace add smithadifd/ledger
+claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.3.1
 claude plugin install ledger-hooks@ledger-plugins
 ```
+
+The `#v0.3.1` suffix pins the plugin to that release. An add without the
+suffix follows the repository's main branch, which can carry plugin changes
+that no release has shipped. After a later release, put that release's tag
+where `v0.3.1` is.
 
 Its hooks do nothing until a database is named, either as `LEDGER_DB` in the
 environment Claude Code starts with (steps 3 and 5) or as the `ledger_db`

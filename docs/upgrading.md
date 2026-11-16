@@ -234,7 +234,12 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   0.2.1, update it after the CLI (the same two steps as section 3.2, with the
   marketplace `ledger-plugins` and the plugin `ledger-hooks@ledger-plugins`):
   0.3.0 adds its PostModelSwitch hook, which needs Claude Code v2.1.251 or
-  later. If the skills plugin's session-start hook is also installed with an
+  later. Add the marketplace with the pinned command,
+  `claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.3.1`:
+  the `#vX.Y.Z` suffix pins the plugin to that release, and an add without it
+  follows main. If you added `ledger-plugins` without the suffix, remove it
+  (`claude plugin marketplace remove ledger-plugins`) and add it again with
+  the pin. If the skills plugin's session-start hook is also installed with an
   explicit `ledger_cli`, a session prints the brief twice, and a separate
   prompt-capture hook records each prompt twice.
 
