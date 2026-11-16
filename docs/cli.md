@@ -209,6 +209,8 @@ content with the same source (or with no `--source`) again reports
 it over the same content writes a new version with the same content and the new
 source, and moving it back is another change. `--source-rev` is not compared. `show [--version N]`
 prints a version; `diff ITEM [FROM [TO]]` prints the change field by field.
+`set` is a write and needs `LEDGER_HARNESS`; `show` and `diff` are reads and
+do not.
 `set` needs one of `--body` or `--body-file`, and `--acceptance` takes one
 value, so several acceptance bullets are one value with a newline between
 them. From bash or zsh, `$'...'` writes the newline; from any POSIX shell,
