@@ -953,8 +953,11 @@ Refusal codes of the export, commit and push steps, each exit 3:
 FILE must not exist, as with `restore`: a backup to a path that any file
 already has (a text file, an older backup) is refused with `backup target
 already exists` (exit 3) and the file is left byte for byte as it was. The
-check runs before the copy and again just before it is published, so a file
-that takes the name while the copy runs is not replaced either. Pass
+check runs before the copy, and the copy is then published with a hard link,
+which fails if the name is taken at that instant, so a file that takes the
+name while the copy runs is not replaced either. On a filesystem that refuses
+hard links the backup looks at the name once more and then renames, which
+leaves a window of an instant. Pass
 `--overwrite` to replace the file on purpose; a scheduled backup that reuses
 one name needs it. `--overwrite` does not lift the other refusals: the live
 database, its `-wal`, `-shm` and `-journal` files, and any name ending in one

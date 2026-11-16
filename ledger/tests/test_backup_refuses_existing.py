@@ -8,6 +8,7 @@ explicit way to replace it.
 """
 from __future__ import annotations
 
+import errno
 import io
 import os
 import sqlite3
@@ -225,6 +226,8 @@ def test_a_name_that_cannot_be_read_late_is_refused(
     live = _ledger_with(tmp_path / "ledger.db", ITEM)
     dest = tmp_path / "copy.db"
     real_integrity = backup_module.integrity_check
+    # The look at the name is the fallback for a filesystem without hard links.
+    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
 
     def unreadable(_path: Path):
         raise PermissionError("denied")
@@ -237,5 +240,104 @@ def test_a_name_that_cannot_be_read_late_is_refused(
     monkeypatch.setattr(backup_module, "integrity_check", check_then_break_lstat)
     with pytest.raises(LedgerError, match="backup target cannot be checked"):
         backup_db(live, dest)
+    assert not dest.exists()
+    assert _no_partial(tmp_path)
+
+
+def _link_unsupported(code: int):
+    def refuse(_src, _dst, *_args, **_kwargs):
+        raise OSError(code, os.strerror(code))
+
+    return refuse
+
+
+def test_a_file_that_appears_just_before_the_publish_is_not_replaced(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The name is free at the early check and free when the publish starts;
+    # the file takes it in the instant before the link is made.
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    real_link = os.link
+
+    def appear_then_link(src, dst, *args, **kwargs):
+        Path(dst).write_bytes(NOT_A_DB)
+        return real_link(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(os, "link", appear_then_link)
+    with pytest.raises(LedgerError, match="backup target already exists"):
+        backup_db(live, dest)
+    assert dest.read_bytes() == NOT_A_DB
+    assert _no_partial(tmp_path)
+
+
+def test_overwrite_publishes_by_rename_never_by_link(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = _ledger_with(tmp_path / "copy.db", OTHER)
+
+    def no_link(*_args, **_kwargs):
+        raise AssertionError("an overwrite published by hard link")
+
+    monkeypatch.setattr(os, "link", no_link)
+    backup_db(live, dest, overwrite=True)
+    assert _items(dest) == [ITEM]
+
+
+def test_a_published_backup_has_one_name_and_the_partial_is_gone(
+    tmp_path: Path,
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    backup_db(live, dest)
+    assert os.lstat(dest).st_nlink == 1
+    assert _no_partial(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "code",
+    sorted({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}),
+)
+def test_a_filesystem_without_hard_links_still_publishes_an_absent_target(
+    tmp_path: Path, monkeypatch, code: int
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    monkeypatch.setattr(os, "link", _link_unsupported(code))
+    assert backup_db(live, dest).integrity == "ok"
+    assert _items(dest) == [ITEM]
+    assert _no_partial(tmp_path)
+
+
+def test_without_hard_links_a_file_present_at_the_publish_is_still_refused(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    real_integrity = backup_module.integrity_check
+
+    def check_then_appear(partial: Path) -> str:
+        verdict = real_integrity(partial)
+        dest.write_bytes(NOT_A_DB)
+        return verdict
+
+    monkeypatch.setattr(backup_module, "integrity_check", check_then_appear)
+    monkeypatch.setattr(os, "link", _link_unsupported(errno.EPERM))
+    with pytest.raises(LedgerError, match="backup target already exists"):
+        backup_db(live, dest)
+    assert dest.read_bytes() == NOT_A_DB
+    assert _no_partial(tmp_path)
+
+
+def test_another_link_failure_is_not_taken_for_missing_hard_link_support(
+    tmp_path: Path, monkeypatch
+) -> None:
+    live = _ledger_with(tmp_path / "ledger.db", ITEM)
+    dest = tmp_path / "copy.db"
+    monkeypatch.setattr(os, "link", _link_unsupported(errno.EIO))
+    with pytest.raises(OSError) as info:
+        backup_db(live, dest)
+    assert info.value.errno == errno.EIO
     assert not dest.exists()
     assert _no_partial(tmp_path)

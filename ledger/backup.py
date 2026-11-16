@@ -8,10 +8,15 @@ source path still names the file the copy was read from.
 
 A destination that already exists is refused unless the caller passes
 ``overwrite=True`` (the CLI's ``--overwrite``), the same rule ``restore``
-applies to its target.
+applies to its target. Without ``overwrite`` the copy is published with a
+hard link, which fails atomically when the name is taken, so a file that
+appears while the copy runs is never replaced. A filesystem that refuses hard
+links falls back to a second look at the name followed by a rename, which
+leaves a window of an instant between the look and the rename.
 """
 from __future__ import annotations
 
+import errno
 import os
 import sqlite3
 import stat
@@ -198,13 +203,53 @@ def _refuse_existing_target(dest_path: Path) -> None:
         )
 
 
+# Why a filesystem cannot make the hard link that publishes a backup without
+# replacing: no permission to link (EPERM, as on some network and FAT-family
+# volumes), links not supported there (ENOTSUP, which is EOPNOTSUPP on some
+# platforms), a destination on another device (EXDEV) or a file at its link
+# limit (EMLINK). Any other error is a real failure and propagates.
+_LINK_UNSUPPORTED = frozenset(
+    {errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EXDEV, errno.EMLINK}
+)
+
+
+def _publish_without_replacing(partial: Path, dest_path: Path) -> None:
+    """Move ``partial`` to ``dest_path`` unless a file has that name by then.
+
+    A hard link raises ``FileExistsError`` atomically when the name is taken,
+    so a file that appears at any moment before the link, however late, is
+    refused and left as it was; the partial is unlinked once the link holds.
+    On a filesystem that refuses hard links (see ``_LINK_UNSUPPORTED``) this
+    falls back to looking at the name again and then renaming: a file that
+    takes the name between that look and the rename is replaced, a window of
+    an instant that only a filesystem without hard links has.
+    """
+    try:
+        os.link(partial, dest_path)
+    except FileExistsError as exc:
+        raise LedgerError(
+            f"backup target already exists: {dest_path} "
+            f"(pass --overwrite to replace it)"
+        ) from exc
+    except OSError as exc:
+        if exc.errno not in _LINK_UNSUPPORTED:
+            raise
+        _refuse_existing_target(dest_path)
+        partial.replace(dest_path)
+        return
+    partial.unlink(missing_ok=True)
+
+
 def backup_db(
     db_path: Path | str, dest: Path | str, *, overwrite: bool = False
 ) -> BackupResult:
     """Snapshot ``db_path`` into ``dest`` via the online backup API.
 
     A ``dest`` that already exists is refused (``backup target already
-    exists``) and left untouched, unless ``overwrite`` is true. The live
+    exists``) and left untouched, unless ``overwrite`` is true. The check
+    runs before the copy starts and again, atomically, when the copy is
+    published (a hard link, with a look-then-rename fallback on a filesystem
+    without hard links; see ``_publish_without_replacing``). The live
     database and its side files are refused either way.
     """
     source_path = resolve_db_path(db_path)
@@ -262,11 +307,12 @@ def backup_db(
             more = f" (+{len(lines) - 1} more)" if len(lines) > 1 else ""
             raise LedgerError(f"backup failed integrity_check: {lines[0]}{more}")
         _refuse_newer_schema_in_copy(partial)
-        if not overwrite:
-            # The copy can take long: look again, so a file that took the
+        if overwrite:
+            partial.replace(dest_path)
+        else:
+            # The copy can take long: publish so that a file that took the
             # name meanwhile is not replaced either.
-            _refuse_existing_target(dest_path)
-        partial.replace(dest_path)
+            _publish_without_replacing(partial, dest_path)
     except BaseException:
         partial.unlink(missing_ok=True)
         raise
