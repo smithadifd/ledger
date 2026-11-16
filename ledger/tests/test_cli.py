@@ -171,6 +171,60 @@ def test_link_json_and_text(tmp_path: Path, monkeypatch) -> None:
     assert body["data"]["event"]["payload"]["rel"] == "url"
 
 
+def test_link_rel_pr_refuses_a_non_pr_target(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db)
+    from ledger import open_ledger
+
+    lg = open_ledger(db)
+    try:
+        before = len(list(lg.events()))
+    finally:
+        lg.close()
+    code, out, err = invoke(
+        monkeypatch,
+        ["--db", db, "link", "it-1", "--rel", "pr", "--target", "notapr"],
+    )
+    assert code == EXIT_REFUSED, (out, err)
+    assert "pr target must be" in (out + err)
+    codej, outj, errj = invoke(
+        monkeypatch,
+        ["--json", "--db", db, "link", "it-1", "--rel", "pr", "--target", "notapr"],
+    )
+    assert codej == EXIT_REFUSED, (outj, errj)
+    body = json.loads(outj)
+    assert body["ok"] is False
+    assert body["error"]["code"] == "bad_pr_target"
+    lg = open_ledger(db)
+    try:
+        assert len(list(lg.events())) == before
+    finally:
+        lg.close()
+
+
+def test_link_rel_pr_accepts_a_github_pull_url(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db)
+    target = "https://github.com/owner/repo/pull/12"
+    code, out, err = invoke(
+        monkeypatch,
+        ["--db", db, "link", "it-1", "--rel", "pr", "--target", target],
+    )
+    assert code == 0, err
+    assert target in out
+
+
+def test_link_rel_pr_accepts_a_hash_number(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db)
+    code, out, err = invoke(
+        monkeypatch,
+        ["--db", db, "link", "it-1", "--rel", "pr", "--target", "#12"],
+    )
+    assert code == 0, err
+    assert "#12" in out
+
+
 def test_note_json_and_text(tmp_path: Path, monkeypatch) -> None:
     db = _db(tmp_path)
     seed(monkeypatch, db)
@@ -711,6 +765,38 @@ def test_new_same_source_yields_one_item(monkeypatch, tmp_path) -> None:
     assert code1 == 0, err1
     assert code2 == 0, err2
     assert json.loads(out1)["data"]["item_id"] == json.loads(out2)["data"]["item_id"]
+    assert _count_items(monkeypatch, db) == 1
+
+
+def test_new_same_source_repeat_prints_exists_not_created(monkeypatch, tmp_path) -> None:
+    db = _db(tmp_path)
+    argv = [
+        "--db", db, "new", "--type", "ticket", "--title", "Sourced",
+        "--id", "s-1", "--source", "row:DEMO-1",
+    ]
+    code1, out1, err1 = invoke(monkeypatch, argv)
+    assert code1 == 0, err1
+    assert out1.startswith("created\ts-1\t"), out1
+    before = _count_items(monkeypatch, db)
+    code2, out2, err2 = invoke(monkeypatch, argv)
+    assert code2 == 0, err2
+    assert out2.startswith("exists\ts-1\t"), out2
+    assert "created" not in out2
+    assert _count_items(monkeypatch, db) == before
+
+
+def test_new_same_source_json_result_is_exists(monkeypatch, tmp_path) -> None:
+    db = _db(tmp_path)
+    code1, out1, err1 = _new(monkeypatch, db, "Sourced", "--id", "s-1", "--source", "row:DEMO-1")
+    assert code1 == 0, err1
+    first = json.loads(out1)
+    assert first["data"]["result"] == "created"
+    code2, out2, err2 = _new(monkeypatch, db, "Sourced", "--id", "s-1", "--source", "row:DEMO-1")
+    assert code2 == 0, err2
+    second = json.loads(out2)
+    assert second["data"]["result"] == "exists"
+    assert second["data"]["item_id"] == first["data"]["item_id"] == "s-1"
+    assert second["data"]["event"]["id"] == first["data"]["event"]["id"]
     assert _count_items(monkeypatch, db) == 1
 
 

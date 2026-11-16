@@ -90,9 +90,11 @@ def run(args, ctx: Context) -> Result:
                 exit_code=EXIT_REFUSED,
             )
 
+        created = True
         prior = prior_event() if source is not None else None
         if prior is not None:
             event = settle(prior)
+            created = False
         else:
             try:
                 event = lg.append(
@@ -108,11 +110,13 @@ def run(args, ctx: Context) -> Result:
                 if prior is None:
                     raise
                 event = settle(prior)
+                created = False
     finally:
         lg.close()
+    verb = "created" if created else "exists"
     return Result(
-        data={"item_id": item_id, "event": event_dict(event)},
-        text=f"created\t{item_id}\tevent={event.id}\t{args.type}\t{args.title}",
+        data={"item_id": item_id, "event": event_dict(event), "result": verb},
+        text=f"{verb}\t{item_id}\tevent={event.id}\t{args.type}\t{args.title}",
     )
 
 

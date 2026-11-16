@@ -118,7 +118,8 @@ An optional `config.json` beside the database:
 Create an item. Types: `topic`, `ticket`, `initiative`, `decision`, `gate`,
 `guidance`. Without `--id` an id like `it-1a2b3c4d5e6f` is generated. With
 `--source` the item is keyed by its source: repeating `new` with the same
-source returns the same item, and a different id or title for that source is
+source returns the same item and prints `exists` (not `created`; JSON `result`
+is `exists`), and a different id or title for that source is
 refused, naming the existing item. A source of the form
 `path:line@commit` lets `export-item --ticket` read the item's text back from
 git.
@@ -178,6 +179,9 @@ after the item or as `--target TARGET`, and may be a local file path. `REL`
 defaults to `url` and is one of `pr`, `branch`, `session`, `item`, `url`,
 `blocks`, `duplicate-of`, `child-of`; it goes after `--rel`, never as a
 bare word.
+`--rel pr` requires a target of the form `owner/repo#N`, `#N`, or
+`https://github.com/owner/repo/pull/N`; any other target is refused (exit 3,
+code `bad_pr_target`) and writes nothing.
 `duplicate-of` also closes the item, in the same transaction, as a duplicate
 of `TARGET`; both cards show the relation. There is no merge verb.
 `child-of` makes the item a child of the anchor `TARGET`. An item has one
