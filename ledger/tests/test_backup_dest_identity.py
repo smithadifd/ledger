@@ -180,11 +180,14 @@ def test_backup_to_a_case_variant_of_the_live_name(tmp_path: Path) -> None:
         assert _state(live) == before, "the refused backup touched the live database"
     else:
         # The volume tells case apart: LEDGER.db is a real sibling, another
-        # ledger, and a backup may replace it.
+        # ledger, and a backup may replace it when told to.
         _ledger_with(dest, OTHER)
         assert _identity(dest) != _identity(live)
         before = _state(live)
-        backup_db(live, dest)
+        with pytest.raises(LedgerError, match="backup target already exists"):
+            backup_db(live, dest)
+        assert _items(dest) == [OTHER]
+        backup_db(live, dest, overwrite=True)
         assert _items(dest) == [ITEM]
         assert _state(live)[:2] == before[:2]
 
@@ -225,10 +228,15 @@ def test_backup_to_a_hard_link_of_the_live_wal_refuses(tmp_path: Path) -> None:
             dest.unlink()
 
 
-def test_an_ordinary_existing_backup_is_still_replaced(tmp_path: Path) -> None:
+def test_an_ordinary_existing_backup_is_replaced_only_when_told_to(
+    tmp_path: Path,
+) -> None:
     live = _ledger_with(tmp_path / "ledger.db", ITEM)
     dest = _ledger_with(tmp_path / "copy.db", OTHER)
-    backup_db(live, dest)
+    with pytest.raises(LedgerError, match="backup target already exists"):
+        backup_db(live, dest)
+    assert _items(dest) == [OTHER]
+    backup_db(live, dest, overwrite=True)
     assert _items(dest) == [ITEM]
 
 
