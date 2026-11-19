@@ -1,6 +1,8 @@
 """Query current items with filters and a bounded row cap."""
 from __future__ import annotations
 
+from ledger import lease
+from ledger.card import _read_snapshot
 from ledger.search import in_window, newest_event_times
 from ledger.verbs import (
     DEFAULT_LIMIT,
@@ -12,7 +14,9 @@ from ledger.verbs import (
     Verb,
     format_items,
     item_dict,
+    lease_rows,
     open_db,
+    read_item,
     resolve_limit,
 )
 from ledger.verbs.search import UNTIL_HELP, when_option
@@ -99,8 +103,17 @@ def run(args, ctx: Context) -> Result:
                 if rel == "blocks" and target == args.blocks:
                     blocking.add(event.item_id)
         matched = []
-        for row in lg.items_with_revision():
-            item = item_dict(row)
+        moment = lease.now()
+        with _read_snapshot(lg):
+            rows = lg.items_with_revision()
+            leases = lease_rows(lg)
+        for row in rows:
+            # The status a reader acts on: an expired claim reads open.
+            held = leases.get(row["item_id"])
+            item = read_item(item_dict(row), held, at=moment)
+            age = lease.stale_age(held, at=moment) if item["recorded_status"] == "claimed" else None
+            item["stale_claim"] = age is not None
+            item["claim_age_seconds"] = age
             item["revision"] = row["revision"]
             item["parent_id"] = row["parent_id"]
             item["children_open"] = row["children_open"]

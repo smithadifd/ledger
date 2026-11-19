@@ -23,7 +23,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping
 
-from ledger import __version__
+from ledger import __version__, lease
 from ledger.card import _one_line
 from ledger.store import Event, Ledger, open_ledger
 
@@ -352,3 +352,34 @@ def require_item(lg: Ledger, item_id: str) -> dict[str, Any]:
         if row["item_id"] == item_id:
             return item_dict(row)
     raise CliError(f"item not found: {item_id}", code="not_found", exit_code=EXIT_NOT_FOUND)
+
+
+def lease_rows(lg: Ledger) -> dict[str, dict[str, Any]]:
+    """Every current claim's ``v_leases`` row, by item id."""
+    return {
+        row["item_id"]: dict(row) for row in lg._conn.execute("SELECT * FROM v_leases")
+    }
+
+
+def read_item(
+    item: Mapping[str, Any],
+    lease_row: Mapping[str, Any] | None,
+    *,
+    at: Any = None,
+) -> dict[str, Any]:
+    """``item`` as ``query`` and ``ready`` show it (``card`` carries the same fields).
+
+    ``status`` is ``lease.read_status``: ``open`` for a claim whose lease
+    expired. ``recorded_status`` is the status the events record, and for an
+    expired claim ``expired_holder`` and ``expires_at`` name the old holder
+    and the lease stamp (both ``None`` otherwise). Read side only: guards and
+    write verbs read the recorded status, and nothing is written.
+    """
+    out = dict(item)
+    shown = lease.read_status(item, lease_row, at=at)
+    expired = shown != item["status"]
+    out["status"] = shown
+    out["recorded_status"] = item["status"]
+    out["expired_holder"] = lease_row["holder"] if expired else None
+    out["expires_at"] = lease_row["expires_at"] if expired else None
+    return out

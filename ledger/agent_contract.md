@@ -63,6 +63,13 @@ When you start, or come back to an item:
    when the card shows a cut (a `Truncated` section), because the card is a
    projection and the events are the record.
 
+A claim whose lease has expired reads `open` in `query`, `ready` and `card`;
+the JSON keeps `recorded_status` (`claimed`), `expired_holder` and
+`expires_at`. Take it over with `ledger claim ITEM`, which records the
+holder it replaced. A claim with no lease stamp never expires; `ledger
+doctor` lists one older than 7 days as a stale claim with a release command
+to run only when its holder is gone.
+
 ## Finding things
 
 - `ledger search WORD...`: a decision or a topic, by words; reach for it when you have words for it but no id.

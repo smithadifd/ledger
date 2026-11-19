@@ -624,6 +624,19 @@ matches. Each row in `items` carries the item's fields plus `revision`, `parent_
 many of its children are not closed, an integer of 0 or more). The text output lists
 id, type, status and title only.
 
+`status` in `query`, `ready` and `card` is the status a reader acts on: a
+claim whose lease has expired reads `open`, in the text and in the JSON, and
+`--status` filters on it. The JSON keeps what is recorded beside it:
+`recorded_status` is the status the events record (`claimed` for an expired
+claim), and `expired_holder` and `expires_at` name the old holder and the
+lease stamp (both `null` unless the claim expired). A claim with no lease
+stamp never reads `open`. Each `query` row also carries `stale_claim` and
+`claim_age_seconds`: `true` and the claim's age for a claim with no lease
+stamp recorded more than 7 days ago (doctor lists it with a release command),
+else `false` and `null`. Reading writes nothing: the ledger still records the
+claim, `claim` by another actor takes it over and records `prior_holder`, and
+nothing releases a claim by itself.
+
 **`events [--since DATE] [--until DATE] [--kind KIND] [--item ID] [--actor ACTOR] [--limit N]`**
 Events across all items, newest first, at most 50 unless `--limit` says
 otherwise (1 to 1000). `--since` and `--until` filter on each event's
@@ -663,12 +676,16 @@ ledger questions --type ticket
 ```
 
 **`ready [--limit N]`** Open items with no open blocker, including claimed
-items whose lease expired.
+items whose lease expired; those read `open`, with `recorded_status`,
+`expired_holder` and `expires_at` as in `query`.
 
 **`card ITEM [--md PATH] [--full]`** A bounded resume card: header (revision and
 source event ids), fields, decisions, open questions with their options, the
 next step, links, blockers, notes and resume sections. `--md` also writes a
-markdown copy. `--full` prints the same card unbounded: every row, every word
+markdown copy. A claim whose lease expired shows `status: open` and, under
+it, an `expired claim:` line naming the old holder, the lease stamp and the
+recorded status; `--json` carries `status`, `recorded_status`,
+`expired_holder` and `expires_at` as `query` does. `--full` prints the same card unbounded: every row, every word
 of every row and every source event id, with no caps and no cut markers, so it
 can run past the 400-word bound. Links show the newest 8 and a count of the
 rest; past the word bound the oldest shown link goes first. A section a long
@@ -861,6 +878,24 @@ the word `missing`. `--json` carries `stamps`, an object with the keys
 environment. In text a control character in a value prints as an escape such
 as `\n`; `--json` keeps the value. A stamp whose value is the word `missing`
 reads the same as an unset one.
+
+Before it reports the search index, `doctor` refreshes it the way `search`
+does, so after a write it reports `current`. It leaves the index as it is
+when a rebuild would refuse (a `warn` state) or the index path is not a
+regular file. When the refresh cannot write, for example in a read-only
+directory, `doctor` reports the state it can read (such as the `behind` line
+above) with the same exit code and the same JSON shape. `doctor` also lists
+stale claims: claims with no lease stamp whose claim event is older than 7
+days, which never expire by themselves. Each prints as `stale claim: ITEM`
+with `holder=`, `age=` (seconds) and `release:`, a command that reopens the
+item. `doctor` prints it and never runs it; it names the database doctor
+read with `--db` and carries `--expect-revision`, so it refuses once the item
+has changed since. `--json` carries them as `stale_claims`, the same shape as
+`expired_claims` (`{status, items}`, or `{status: "unknown", items: [],
+reason}` when they cannot be read); each item has `item_id`, `holder`,
+`claim_event_id`, `claimed_at`, `expires_at` (`null`), `age_seconds` and
+`release_command`, the command as one string. An item is never in both
+lists, and neither list changes the exit code.
 
 **`verify [--system NAME]`** Walk the hash chain and re-validate every
 payload. With `--system`, also require the database's claim to be `NAME`.

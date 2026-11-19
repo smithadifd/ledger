@@ -164,3 +164,71 @@ def expired_leases(conn: sqlite3.Connection, *, at: datetime | None = None) -> l
 
 def _seconds(delta: timedelta) -> int:
     return max(0, int(delta.total_seconds()))
+
+
+# DESIGN: a claim with no lease stamp (recorded before leases) never expires
+# and never reads as open. Once its claim event is older than this it is
+# stale: doctor lists it with a release command it prints and never runs, and
+# query flags it. Nothing releases it automatically.
+STALE_CLAIM_SECONDS = 7 * 24 * 60 * 60
+
+
+def read_status(
+    row: Mapping[str, Any],
+    lease_row: Mapping[str, Any] | None,
+    *,
+    at: datetime | None = None,
+) -> str:
+    """The status a read verb shows for the item ``row``.
+
+    Read side only: every guard and write path keeps reading the recorded
+    status, and nothing here writes. ``lease_row`` is the item's ``v_leases``
+    row (``current_lease``). The item reads ``open`` exactly when its recorded
+    status is ``claimed`` and ``is_expired`` holds on that row's
+    ``expires_at`` stamp, the test ``takeover_holder`` makes before a
+    takeover. Otherwise it reads its recorded status. A claim with no stamp,
+    or a stamp that does not parse, keeps ``claimed``: an unreadable stamp
+    never makes a claim look free.
+    """
+    status = row["status"]
+    if status != "claimed" or lease_row is None or lease_row["item_id"] != row["item_id"]:
+        return status
+    expires = lease_row["expires_at"]
+    if expires is None:
+        return status
+    try:
+        parse_stamp(expires)
+    except (ValueError, TypeError):
+        return status
+    return "open" if is_expired(expires, at=at) else status
+
+
+def stale_age(lease_row: Mapping[str, Any] | None, *, at: datetime | None = None) -> int | None:
+    """Seconds since a stamp-less claim was recorded, once that is past
+    ``STALE_CLAIM_SECONDS``; else None (a stamped claim is never stale)."""
+    if lease_row is None or lease_row["expires_at"] is not None:
+        return None
+    try:
+        began = parse_stamp(lease_row["claimed_at"])
+    except (ValueError, TypeError):
+        return None
+    age = _seconds((at or now()) - began)
+    return age if age > STALE_CLAIM_SECONDS else None
+
+
+def stale_claims(conn: sqlite3.Connection, *, at: datetime | None = None) -> list[dict[str, Any]]:
+    """Every stamp-less claim older than ``STALE_CLAIM_SECONDS``, with its holder and age.
+
+    Disjoint from ``expired_leases``, which lists only stamped claims.
+    """
+    moment = at or now()
+    cursor = conn.execute("SELECT * FROM v_leases WHERE expires_at IS NULL ORDER BY item_id")
+    cursor.row_factory = sqlite3.Row
+    out = []
+    for raw in cursor.fetchall():
+        row = dict(raw)
+        age = stale_age(row, at=moment)
+        if age is not None:
+            row["age_seconds"] = age
+            out.append(row)
+    return out

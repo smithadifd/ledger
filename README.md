@@ -366,7 +366,7 @@ the first write it prints (`N` is the newest migration applied):
 ```text
 path: /tmp/ledger-demo/ledger.db
 schema_version: N
-search: missing (ledger index rebuilds it)
+search: current
 ```
 
 `card` prints a bounded resume card for the item:
@@ -546,7 +546,7 @@ captured and `pick` refuses (`capture_missing`).
 | `index` | build or rebuild the derived search index | no |
 | `lint-quotes` | check every election's quotes against its utterance | no |
 | `verify` | verify the hash chain and every payload, then replay the `child-of` forest and fail with exit 4 on the first break; `--system` checks the claim | no |
-| `doctor` | print the database path, schema version, search-index state and expired claims | no |
+| `doctor` | refresh the search index, then print the database path, schema version, search-index state, expired claims and stale claims (no lease stamp, older than 7 days) with a release command it never runs | no |
 | `export` | write events after the watermark; `--commit`, `--push`, `--check` | no |
 | `backup` | online backup with an integrity check | no |
 | `restore` | replay an export into a fresh database | new file |
