@@ -83,7 +83,9 @@ VERB = Verb(
     name="claim-system",
     help=(
         "claim this database for a system (for example work or home); "
-        "a repeat of the same name changes nothing, another name is refused. "
+        "a repeat of the same name writes no event but, as every write does, "
+        "applies any pending migration (an older ledger then refuses the file), "
+        "another name is refused. "
         + NAME_RULE
     ),
     add_arguments=add_arguments,

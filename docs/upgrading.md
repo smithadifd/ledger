@@ -358,6 +358,12 @@ pinning 0.1.14").
 
 Run them in this order. Each has a check that proves it.
 
+`claude plugin install` (and `claude plugin update`) rewrites
+`~/.claude/settings.json`. If you also edit that file, for example to add the
+`env` block, do the plugin installs first and the edit after, or open the file
+again and re-read it right before you edit it, so the edit does not start from a
+copy the install has since changed.
+
 ### 3.1 The ledger
 
 First check how this machine installed the ledger. Run:
@@ -384,6 +390,45 @@ would decide which one runs. Choose one:
 
 Either way, `command -v ledger` then shows one path and `ledger --version`
 prints `ledger 0.4.0`.
+
+If `command -v ledger` prints nothing, the ledger you use is not on `PATH`: a
+vendored copy, or a wrapper script that runs one from a folder of its own.
+Neither choice above fits it. Build a new one beside it and move every caller
+over:
+
+1. Build a virtual environment on a Python that passes the 1.1 probe (`PY` is
+   that Python; `<venv>` is a folder of your choosing) and install the tag into
+   it:
+
+   ```sh
+   "$PY" -m venv <venv>
+   <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.4.0"
+   <venv>/bin/ledger --version
+   ```
+
+   The last line prints `ledger 0.4.0`.
+2. Link it onto `PATH`, in a folder that is already on it (`~/.local/bin` for a
+   pipx user):
+
+   ```sh
+   ln -s <venv>/bin/ledger ~/.local/bin/ledger
+   command -v ledger
+   ```
+
+3. Before the new copy writes anything, list every caller of the old copy: its
+   wrappers, scheduled jobs, hook and plugin settings (for example a
+   `ledger_cli` option), scripts and agent instructions. Search each folder
+   that holds them (`FOLDER`) for the old copy's path:
+
+   ```sh
+   grep -rn 'OLD-COPY-PATH' FOLDER
+   ```
+
+   Point each caller at the new `ledger`, or stop it. The new copy migrates the
+   database on its first write, and from then on the old copy cannot open the
+   file: it refuses a database whose schema is newer than it knows
+   ([migrations.md](migrations.md)). `ledger claim-system NAME` counts as a
+   write here, even on a repeat.
 
 ```sh
 pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.4.0

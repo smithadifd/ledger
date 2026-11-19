@@ -163,7 +163,8 @@ so every new terminal has them.
 - `LEDGER_DB` is the path from step 4.
 
 Claude Code starts its sessions with an environment of its own, so give it the
-database and the operator too: add them to the `env` block of its settings
+database, the operator and the harness too: add them to the `env` block of its
+settings
 (`~/.claude/settings.json` for your user), adding keys and keeping any that
 are already there. If that file does not exist yet, create it (and the
 `~/.claude` folder, if that is missing too) holding exactly the block below,
@@ -175,16 +176,19 @@ already a whole valid settings file. Write the database path in full; `echo
 {
   "env": {
     "LEDGER_DB": "/absolute/path/to/work.db",
-    "LEDGER_OPERATOR": "me"
+    "LEDGER_OPERATOR": "me",
+    "LEDGER_HARNESS": "claude-code"
   }
 }
 ```
 
-Leave `LEDGER_HARNESS` out of the settings: the plugin's session-start hook
-(step 9) sets it to `claude-code` when it is unset. A session started from a
-shell that exports `LEDGER_HARNESS=cli` inherits that value instead, so run
-`unset LEDGER_HARNESS` before you start Claude Code. Reads such as `doctor`
-and `verify` do not need `LEDGER_HARNESS`.
+`LEDGER_HARNESS` is `cli` in your shell profile and `claude-code` in the
+settings block. The settings value wins over the one a session inherits from
+the shell that started it: measured with Claude Code 2.1.328, a session
+launched from a shell that exported `LEDGER_HARNESS=cli`, with a settings `env`
+block that set `LEDGER_HARNESS=claude-code`, saw `claude-code` from its Bash
+tool. So there is nothing to unset before you start Claude Code. Reads such as
+`doctor` and `verify` do not need `LEDGER_HARNESS`.
 
 ## 6. Make the first write
 
@@ -223,10 +227,17 @@ inside that file. The claim is part of the file, so any path or link that
 reaches the file reaches the claim: the boundary between two systems is the
 file itself, not a naming habit, and an export or a restore carries it. The
 command prints `claimed for work: <path>`. Running it again with the same name
-prints `already claimed for work` and changes nothing; running it with another
+prints `already claimed for work` and writes no event; running it with another
 name is refused, so two systems cannot end up in one database. A system name is
 a lowercase letter followed by lowercase letters, digits, `_` or `-`, up to 64
 characters.
+
+The command opens the database for writing, so the first write after an
+upgrade applies the pending migrations, and a repeat run does too: on a
+database from an older release, a run that printed `already claimed` moved
+`schema_version` from 9 to 10. An older copy of the ledger then refuses to
+open the file, so upgrade every copy that writes to it before this step (the
+upgrade page's [section 3.1](upgrading.md#31-the-ledger) says how).
 
 ## 8. Check with `doctor`
 
@@ -274,9 +285,10 @@ where `v0.4.0` is.
 
 With v0.4.0, the version this page pins, the hooks and the `ledger` command
 they run read `LEDGER_DB` and `LEDGER_OPERATOR` from the environment Claude
-Code starts with: the `env` block of its settings (step 5). The hooks supply
-`LEDGER_HARNESS` themselves (`claude-code` when it is unset), which is why
-step 5 leaves it out of that block. The hooks do nothing until `LEDGER_DB` is
+Code starts with: the `env` block of its settings (step 5), which also carries
+`LEDGER_HARNESS=claude-code`. The session-start hook backs that up: it stamps
+`LEDGER_HARNESS=claude-code` when the inherited value is unset or exactly
+`cli`, and keeps any other value. The hooks do nothing until `LEDGER_DB` is
 set there or the `ledger_db` plugin option names a database.
 
 A database can also be named as the `ledger_db` plugin option. An already-set

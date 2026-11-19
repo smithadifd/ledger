@@ -3,8 +3,8 @@
 # model, then print the ledger's brief. The ledger CLI does all the work; this
 # shim exits 0 on every path, because its stdout is the brief. A failed model
 # record is one line ahead of the brief, with no model text. The record needs
-# LEDGER_HARNESS, as a write does; the hook supplies claude-code when it is
-# unset. Off (no output, no write) unless a `ledger` command is found and
+# LEDGER_HARNESS, as a write does; the hook passes claude-code when it is unset,
+# empty or exactly `cli`, and any other value as it is (see common.sh). Off (no output, no write) unless a `ledger` command is found and
 # LEDGER_DB is set (from the environment or a plugin option).
 _hooks_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd) || exit 0
 . "$_hooks_dir/common.sh" || exit 0
@@ -21,7 +21,7 @@ if [ -n "${CLAUDE_ENV_FILE:-}" ]; then
     printf 'ledger-hooks: session env failed\n' >&2
   fi
 fi
-printf '%s\n' "$input" | LEDGER_HARNESS="${LEDGER_HARNESS:-claude-code}" "$LEDGER_HOOKS_CMD" resume --hook-model >/dev/null 2>&1
+printf '%s\n' "$input" | LEDGER_HARNESS="$LEDGER_HOOKS_HARNESS" "$LEDGER_HOOKS_CMD" resume --hook-model >/dev/null 2>&1
 rc=$?
 [ "$rc" -eq 0 ] || printf 'ledger-hooks: model record failed (exit %s)\n' "$rc"
 brief=$("$LEDGER_HOOKS_CMD" resume --brief </dev/null 2>/dev/null)

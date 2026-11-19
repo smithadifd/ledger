@@ -134,7 +134,30 @@ _REF_TARGET_PATTERN = "|".join((
     r"[0-9a-f]{7,40}",
     r"event:[1-9][0-9]*",
 ))
-_REF_TARGET = {**_REF, "pattern": f"(?:{_REF_TARGET_PATTERN})"}
+# The forms the pattern above accepts, one example each, in the words the
+# refusal below, the agent contract page and `resume --brief` use. A test runs
+# every example through the pattern, and another reads the page and the short
+# form for each one, so the list cannot drift from the pattern.
+REF_FORMS = (
+    ("a file path", "src/app.py:12"),
+    ("a pull request or issue", "#12"),
+    ("a pull request or issue with its repository", "owner/repo#12"),
+    ("a branch", "branch:feat/x"),
+    ("a commit sha of 7 to 40 lowercase hex digits", "3f2a9c1"),
+    ("an event", "event:42"),
+)
+# A URL is refused as a ref, never accepted: it goes on the item as a link.
+REF_URL_ROUTE = (
+    "a URL is not a ref: put it on the item with ledger link ITEM --rel url --target URL"
+)
+REF_ALLOWED_TEXT = (
+    ", ".join(f"{form} ({example})" for form, example in REF_FORMS) + "; " + REF_URL_ROUTE
+)
+_REF_TARGET = {
+    **_REF,
+    "pattern": f"(?:{_REF_TARGET_PATTERN})",
+    "allowed_text": REF_ALLOWED_TEXT,
+}
 # A directory path, absolute or with at least one "/", no :line suffix: the
 # only ref whose one trailing slash the writing verbs strip.
 _DIRECTORY_REF = re.compile(
@@ -1095,10 +1118,21 @@ def _is_json(value: Any) -> bool:
 
 
 def _field_error(reason: str, path: str, spec: Mapping[str, Any]) -> str:
+    """The refusal for ``path``: ``reason:path``, the one prefix a caller
+    matches on, then ``; allowed: ...`` when the spec says what is allowed
+    (an enum with ``show_allowed``, or free text in ``allowed_text``). A spec
+    that says neither keeps the bare prefix."""
     message = f"{reason}:{path}"
     if spec.get("show_allowed"):
         message += f"; allowed: {', '.join(spec['enum'])}"
+    elif spec.get("allowed_text"):
+        message += f"; allowed: {spec['allowed_text']}"
     return message
+
+
+def _too_long(path: str, max_len: int, given: int) -> str:
+    """``too-long:path`` then the limit and the length given."""
+    return f"too-long:{path}; max {max_len}, got {given}"
 
 
 def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
@@ -1109,13 +1143,13 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
     field_type = spec["type"]
     if field_type == "string":
         if type(value) is not str:
-            _fail(f"bad-type:{path}")
+            _fail(_field_error("bad-type", path, spec))
         min_len = spec.get("min_len", 0)
         if min_len and len(value) < min_len:
-            _fail(f"bad-type:{path}")
+            _fail(_field_error("bad-type", path, spec))
         max_len = spec.get("max_len")
         if max_len is not None and len(value) > max_len:
-            _fail(f"too-long:{path}")
+            _fail(_too_long(path, max_len, len(value)))
         if spec.get("single_line") and ("\n" in value or "\r" in value):
             _fail(f"not-single-line:{path}")
         if spec.get("no_control") and control_character(value) is not None:
@@ -1124,7 +1158,7 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
             _fail(f"{DOC_PATH_REFUSAL}:{path}")
         pattern = spec.get("pattern")
         if pattern is not None and re.fullmatch(pattern, value) is None:
-            _fail(f"bad-type:{path}")
+            _fail(_field_error("bad-type", path, spec))
         if spec.get("calendar_stamp"):
             from . import lease
 
@@ -1151,7 +1185,7 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
             _fail(f"bad-type:{path}")
         max_len = spec.get("max_len")
         if max_len is not None and len(value) > max_len:
-            _fail(f"too-long:{path}")
+            _fail(_too_long(path, max_len, len(value)))
         item_spec = spec["items"]
         for index, item in enumerate(value):
             _check_field(item, item_spec, f"{path}[{index}]")

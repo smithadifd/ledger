@@ -40,6 +40,10 @@ exists to prevent.
 - **thread parked** — work pauses with more to do: write `item.stopped`.
 - **thread stopped** — a session ends mid-item: write `item.stopped`.
 
+`ledger new --type` takes one of `topic`, `ticket`, `initiative`, `decision`,
+`gate` or `guidance`, and refuses any other word. There is no `task`: use
+`ticket`.
+
 Use the verbs `note`, `link`, `ask-display`, `pick` and `elect`. Never write
 a hand-made append script. Two events have no verb of their own and go
 through one plain `ledger append` command each: `decision.asked` (the
@@ -188,3 +192,23 @@ ledger resume --item ITEM
 `refs` are optional: the skills the next session should invoke and the files,
 pull requests or event ids it should read. The newest stop on an item is the
 one `resume` shows.
+
+The stop has limits, and a write over one is refused with the reason first,
+then the limit and the length you gave, for example
+`too-long:point; max 600, got 643`:
+
+- `point` is one string of 1 to 600 characters. Write where you stopped and
+  the next step; put anything longer in a note on the item.
+- `skills` holds at most 12 names and `refs` at most 20 entries. Each ref is
+  at most 300 characters on one line.
+- Each ref is one of these forms, with one example of each:
+  - a file path: `src/app.py:12` (absolute, or relative with a `/` or an
+    extension, with an optional `:LINE` or `:START-END`)
+  - a pull request or issue: `#12`
+  - a pull request or issue with its repository: `owner/repo#12`
+  - a branch: `branch:feat/x`
+  - a commit sha of 7 to 40 lowercase hex digits: `3f2a9c1`
+  - an event: `event:42`
+- A URL is not a ref and is refused (`bad-type:refs[0]`, followed by the
+  allowed forms). Put the URL on the item with
+  `ledger link ITEM --rel url --target URL`.

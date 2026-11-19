@@ -147,8 +147,10 @@ refuses the claim when N items are already claimed.
 letters, digits, `_` or `-`; anything else is refused with exit 2 before the
 database is opened. An unclaimed database is claimed and the verb exits 0. The
 same name again exits 0, says the database is already claimed for that name and
-writes nothing (a read-only database file refuses even the repeat, as every
-write verb does). A different name is refused (exit 3, code `shared_database`,
+writes no event (a read-only database file refuses even the repeat, as every
+write verb does). The verb opens the database for writing, so a repeat on a
+database from an older release applies the pending migrations, and an older copy
+of the ledger then refuses to open the file. A different name is refused (exit 3, code `shared_database`,
 naming both systems) and writes nothing. The verb reports the outcome its
 transaction reached: two callers claiming the same name at once both exit 0 and
 exactly one says `claimed`. After an I/O error in the claim's transaction
@@ -1029,7 +1031,7 @@ shell-quoted, in this order:
 |------|--------------|
 | `LEDGER_SESSION=<session_id>` | the input's `session_id` is usable, even when `LEDGER_SESSION` is already set |
 | `LEDGER_AGENT=claude-code` | `LEDGER_AGENT` is absent from the environment |
-| `LEDGER_HARNESS=claude-code` | `LEDGER_HARNESS` is absent from the environment |
+| `LEDGER_HARNESS=claude-code` | `LEDGER_HARNESS` is absent from the environment, or is exactly `cli` (a shell profile's value, never true inside Claude Code); any other value, an empty one included, is kept and gets no line |
 
 It prints no `LEDGER_MODEL` line, whatever the input's `model`. Only
 SessionStart, Setup, CwdChanged and FileChanged hooks can write
@@ -1091,7 +1093,7 @@ file without following a symbolic link (Windows). On such a platform every
 other command still works and writes stamp `LEDGER_MODEL`. The record
 changes what the session's later writes stamp, so, like a write, the command
 needs `LEDGER_HARNESS` and is refused with `missing_harness` (exit 3)
-without it; the plugin's hooks supply `claude-code` when it is unset.
+without it; the plugin's hooks supply `claude-code` when it is unset, empty or exactly `cli`.
 The command never opens or creates the database, never reads
 `LEDGER_SESSION` (the input's `session_id` names the file), and creates the
 `.session-models` folder (mode 0700) only inside an existing database

@@ -932,6 +932,101 @@ def test_prompt_and_picker_and_model_switch_see_option_values(rig: Rig) -> None:
     assert recorded_env.count("HA=opt-harness\n") == 3
 
 
+# --- the harness each hook passes to its own ledger call -----------------------
+#
+# claude-code when the inherited LEDGER_HARNESS is unset, empty or exactly
+# `cli` (a shell profile's value; the hooks run only inside Claude Code), and
+# any other value as it is. Each family runs the real shim against a stub that
+# records the arguments and the harness of every call.
+
+
+def _harness_stub(rig: Rig) -> Path:
+    stamp = rig.tmp / "harness-stamp"
+    body = (
+        f'stamp={shlex.quote(str(stamp))}\n'
+        'printf "%s|HA=%s\\n" "$*" "$LEDGER_HARNESS" >>"$stamp"\n'
+        'for a in "$@"; do\n'
+        '  case "$a" in\n'
+        '    --hook-env) exit 0 ;;\n'
+        '    --brief) printf "brief\\n"; exit 0 ;;\n'
+        '  esac\n'
+        'done\n'
+        'exit 0\n'
+    )
+    stub_ledger(rig, body)
+    return stamp
+
+
+def _picker_answer() -> dict:
+    return answered([{"question": QUESTION, "header": "q", "multiSelect": False,
+                      "options": OPTIONS}], "ship")
+
+
+HARNESS_CALLS = {
+    "prompt": ("capture --kind prompt",
+               lambda rig, env: prompt_hook(rig, prompt_input(), env=env)),
+    "picker": ("capture --kind picker",
+               lambda rig, env: picker_hook(rig, _picker_answer(), env=env)),
+    "model-switch": ("resume --hook-model",
+                     lambda rig, env: switch_hook(rig, switch_input(), env=env)),
+    "session-start": ("resume --hook-model",
+                      lambda rig, env: session_hook(rig, env=env)),
+}
+
+
+@pytest.mark.parametrize("hook", HARNESS_CALLS)
+@pytest.mark.parametrize("inherited, passed", [
+    (None, "claude-code"),
+    ("", "claude-code"),
+    ("cli", "claude-code"),
+    ("omp", "omp"),
+    ("claude-code", "claude-code"),
+    ("CLI", "CLI"),
+    ("cli ", "cli "),
+    ("xcli", "xcli"),
+], ids=["unset", "empty", "cli", "omp", "claude-code", "upper", "trailing-space", "prefix"])
+def test_each_hook_passes_claude_code_for_unset_empty_or_cli_and_keeps_the_rest(
+    rig: Rig, hook: str, inherited: str | None, passed: str
+) -> None:
+    stamp = _harness_stub(rig)
+    call, run = HARNESS_CALLS[hook]
+    ran = run(rig, {"LEDGER_HARNESS": inherited})
+    assert ran.returncode == 0, ran.stderr
+    assert f"{call}|HA={passed}\n" in stamp.read_text(encoding="utf-8")
+
+
+def test_the_prompt_capture_of_an_inherited_cli_is_stamped_claude_code(rig: Rig) -> None:
+    assert_quiet(prompt_hook(rig, prompt_input(), env={"LEDGER_HARNESS": "cli"}))
+    [event] = captures(rig, "hook:prompt")
+    assert event.harness == "claude-code"
+
+
+def test_the_prompt_capture_of_another_inherited_harness_keeps_it(rig: Rig) -> None:
+    assert_quiet(prompt_hook(rig, prompt_input(), env={"LEDGER_HARNESS": "omp"}))
+    [event] = captures(rig, "hook:prompt")
+    assert event.harness == "omp"
+
+
+def test_session_start_replaces_an_inherited_cli_in_the_environment_file(rig: Rig) -> None:
+    rig.db.parent.mkdir()
+    env_file = rig.tmp / "claude-env"
+    env_file.write_text("")
+    ran = session_hook(rig, env={"LEDGER_HARNESS": "cli", "CLAUDE_ENV_FILE": str(env_file)})
+    assert (ran.returncode, ran.stderr) == (0, "")
+    assert "export LEDGER_HARNESS=claude-code\n" in env_file.read_text(encoding="utf-8")
+
+
+def test_session_start_keeps_another_inherited_harness_out_of_the_environment_file(
+    rig: Rig,
+) -> None:
+    rig.db.parent.mkdir()
+    env_file = rig.tmp / "claude-env"
+    env_file.write_text("")
+    ran = session_hook(rig, env={"LEDGER_HARNESS": "omp", "CLAUDE_ENV_FILE": str(env_file)})
+    assert (ran.returncode, ran.stderr) == (0, "")
+    assert "LEDGER_HARNESS" not in env_file.read_text(encoding="utf-8")
+
+
 def test_hooks_use_plugin_bin_when_path_has_no_ledger(rig: Rig) -> None:
     rig.db.parent.mkdir()
     py = str(Path(sys.executable).resolve().parent)
