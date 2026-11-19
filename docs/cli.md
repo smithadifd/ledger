@@ -849,6 +849,19 @@ failure reading the summary or the watermark becomes
 `{"status": "unknown", "reason": "..."}` for that part and never changes the
 exit code. Without `LEDGER_EXPORT_DIR`, `export` is omitted.
 
+Doctor also prints the four actor stamps a write from this environment would
+carry, one line each after the search line: `actor: NAME`, `harness: NAME`,
+`model: NAME` and `session: ID`. They are the values every write stamps its
+event with (the actor is `<operator>/<agent>` when both are set, and the model
+is the session's own recorded model when one exists, else `LEDGER_MODEL`), so
+doctor shows what a write would record. A stamp that is unset or empty prints
+the word `missing`. `--json` carries `stamps`, an object with the keys
+`actor`, `harness`, `model` and `session`, each the value or the string
+`missing`. Doctor reads only these variables and prints no other part of the
+environment. In text a control character in a value prints as an escape such
+as `\n`; `--json` keeps the value. A stamp whose value is the word `missing`
+reads the same as an unset one.
+
 **`verify [--system NAME]`** Walk the hash chain and re-validate every
 payload. With `--system`, also require the database's claim to be `NAME`.
 Then replay every event, in id order, through the child-of guard every write
