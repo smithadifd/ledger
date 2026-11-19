@@ -159,6 +159,10 @@ _WARN_REMEDIES: tuple[tuple[str, str], ...] = (
         "cannot stat the search index ",
         "make the index path's directory readable",
     ),
+    (
+        "refusing to replace ",
+        f"move or rename that file; {search.SEARCH_DB_NAME} beside a ledger is its index",
+    ),
 )
 
 _REBUILD_HINT = " (ledger index rebuilds it)"
@@ -236,41 +240,18 @@ def _expired_line(c: dict) -> str:
     )
 
 
-def _another_file(resolved: Path, index: Path, present: os.stat_result | None) -> bool:
-    """Whether the index path is provably a different file from the database.
-
-    Their resolved real paths must differ and, when something is at the index
-    path (``present``, its ``lstat``), so must its device and inode: on a
-    case-insensitive file system a ledger named ``SEARCH.DB`` has another real
-    path than its index path and the same inode. A comparison that cannot be
-    made reads as the same file, so the refresh is skipped.
-    """
-    try:
-        if os.path.realpath(index) == os.path.realpath(resolved, strict=True):
-            return False
-        database = os.stat(resolved)
-    except (OSError, ValueError, RuntimeError):
-        return False
-    if present is not None and (present.st_dev, present.st_ino) == (
-        database.st_dev,
-        database.st_ino,
-    ):
-        return False
-    return True
-
-
 def _refresh_search(resolved: Path, ctx: Context) -> None:
     """Bring the search index up to date before it is reported, as ``search`` does.
 
     Only when the index is not current, a rebuild would not refuse (the
-    severity is not ``warn``), the index path is absent or a regular file, and
-    it is a different file from the database (``_another_file``); anything
-    else is reported as found. A refresh replaces the file at the index path,
-    so a ledger named ``search.db`` beside its own index path would otherwise
-    be replaced by the index. A refresh that cannot write (an unwritable index
-    directory raises ``OSError``) is not a doctor failure: the exit code and
-    the JSON shape stay as they are, and doctor reports the state it then
-    reads.
+    severity is not ``warn``), and the index path is absent or a regular file;
+    anything else is reported as found. A file at the index path that the
+    index writer will not replace (a ledger, such as one named ``search.db``,
+    or anything else that is not a search index) reads as ``warn``, so it is
+    reported, never refreshed; the writer refuses it as well. A refresh that
+    cannot write (an unwritable index directory raises ``OSError``) is not a
+    doctor failure: the exit code and the JSON shape stay as they are, and
+    doctor reports the state it then reads.
     """
     try:
         found = search.index_status(resolved, ctx.search_fallback_root)
@@ -286,8 +267,6 @@ def _refresh_search(resolved: Path, ctx: Context) -> None:
     except OSError:
         return
     if present is not None and not stat.S_ISREG(present.st_mode):
-        return
-    if not _another_file(resolved, index, present):
         return
     try:
         search.refresh_index(resolved, ctx.search_fallback_root)

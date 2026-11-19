@@ -672,6 +672,72 @@ def _open_index(index: Path) -> sqlite3.Connection:
     return sqlite3.connect(index.as_uri() + "?mode=ro", uri=True)
 
 
+def _replace_refusal(index: Path, ledger: Path) -> str | None:
+    """Why the index writer must not replace what is at ``index``, or ``None``.
+
+    The writer replaces only: nothing (the path is absent); a path that is not
+    a regular file (a FIFO, socket or symlink is replaced, the link itself and
+    never its target; a directory makes the rename fail and is refused by
+    name); or a regular file that opens read-only as SQLite with a
+    ``manifest`` table and no ``events`` table. Every index format has the
+    manifest, so an older index still upgrades; a ledger database has
+    ``events`` and no ``manifest``, so neither the ledger itself (a ledger
+    named ``search.db``) nor another ledger at the index path is replaced.
+    Anything else, and any error while checking, refuses, naming the index
+    path and the ledger.
+    """
+    try:
+        found = os.lstat(index)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        return f"cannot stat the search index {index}: {exc} (ledger {ledger})"
+    if not stat.S_ISREG(found.st_mode):
+        return None
+    try:
+        conn = sqlite3.connect(index.as_uri() + "?mode=ro", uri=True)
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+            }
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        detail = f"it does not read as SQLite: {exc}"
+    else:
+        if "manifest" in tables and "events" not in tables:
+            return None
+        detail = "it has an events table" if "events" in tables else "it has no manifest table"
+    return (
+        f"refusing to replace {index}, which is not a search index, "
+        f"with the index of the ledger {ledger}: {detail}"
+    )
+
+
+def _replace_index(tmp: Path, index: Path, ledger: Path) -> None:
+    """Swap the finished index at ``tmp`` in at ``index``: the only rename
+    onto the index path. ``_replace_refusal`` decides first; a refusal raises
+    ``SearchError`` and leaves ``index`` as it was (the caller removes ``tmp``).
+    """
+    refusal = _replace_refusal(index, ledger)
+    if refusal is not None:
+        raise SearchError(refusal)
+    try:
+        # A rename replaces a FIFO, socket or symlink at the index path
+        # (the link itself, never its target); it cannot replace a
+        # directory, which is refused by name.
+        os.replace(tmp, index)
+    except OSError as exc:
+        found = _lstat_index(index)
+        kind = None if found is None else _not_regular_kind(found.st_mode)
+        if kind is None:
+            raise
+        raise SearchError(
+            f"cannot replace the {kind} at the search index path {index}: {exc}"
+        ) from exc
+
+
 def stored_manifest(index: Path) -> dict:
     conn = _open_index(index)
     try:
@@ -744,6 +810,11 @@ def _build_blocker(
             # A rename cannot replace a directory. Worded as the missing
             # reason is, so ``index_status`` names it once.
             return f"{SEARCH_DB_NAME} is a directory, not a regular file: {index}"
+        # A file the index writer will not replace (a ledger, or anything
+        # that is not a search index): a rebuild refuses, so this is a warn.
+        refusal = _replace_refusal(index, resolved)
+        if refusal is not None:
+            return refusal
         resolve_roots(load_config(resolved), fallback_root)
     except SearchError as exc:
         return str(exc)
@@ -871,19 +942,7 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
             conn.commit()
         finally:
             conn.close()
-        try:
-            # A rename replaces a FIFO, socket or symlink at the index path
-            # (the link itself, never its target); it cannot replace a
-            # directory, which is refused by name.
-            os.replace(tmp, index)
-        except OSError as exc:
-            found = _lstat_index(index)
-            kind = None if found is None else _not_regular_kind(found.st_mode)
-            if kind is None:
-                raise
-            raise SearchError(
-                f"cannot replace the {kind} at the search index path {index}: {exc}"
-            ) from exc
+        _replace_index(tmp, index, resolved)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -1007,7 +1066,7 @@ def _append_trailing(
             conn.commit()
         finally:
             conn.close()
-        os.replace(tmp, index)
+        _replace_index(tmp, index, resolved)
         tmp = None
     finally:
         source.close()

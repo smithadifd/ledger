@@ -472,14 +472,20 @@ def test_doctor_reports_search_state_and_never_fails_on_it(db, monkeypatch):
     assert "to clear it, make config.json readable, valid JSON)" in out
     assert "rebuilds it" not in out
     config.write_text(good_config)
-    (db.parent / "search.db").write_bytes(b"not a database at all " * 50)
+    garbage = b"not a database at all " * 50
+    (db.parent / "search.db").write_bytes(garbage)
     with _doctor_cannot_refresh(monkeypatch):
         code, body = run_json(monkeypatch, db, "doctor")
     assert code == EXIT_OK
     assert body["data"]["search"]["status"] == "stale"
+    # A regular file that is not a search index is never replaced: doctor
+    # reports the refusal with its remedy and leaves the file as it was.
     code, body = run_json(monkeypatch, db, "doctor")
     assert code == EXIT_OK
-    assert body["data"]["search"]["status"] == "current"
+    found = body["data"]["search"]
+    assert (found["status"], found["severity"]) == ("stale", "warn"), found
+    assert found["reasons"][-1].startswith("refusing to replace "), found
+    assert (db.parent / "search.db").read_bytes() == garbage
 
 
 def _doctor_search_line(monkeypatch, db: Path) -> str:
