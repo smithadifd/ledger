@@ -299,11 +299,21 @@ def test_existing_doctor_text_lines_are_unchanged(tmp_path, monkeypatch):
         ["--db", db, "new", "--id", "it-1", "--type", "ticket", "--title", "one"],
     )
     assert code == 0, err
-    code, out, err = invoke(monkeypatch, ["--db", db, "doctor"])
+    code, out, err = invoke(
+        monkeypatch,
+        ["--db", db, "doctor"],
+        env={"LEDGER_OPERATOR": None, "LEDGER_MODEL": None, "LEDGER_SESSION": None},
+    )
     assert code == EXIT_OK, err
     resolved = str(Path(db).resolve())
+    # The first three lines are what they always were; the four stamp lines
+    # follow (test_doctor_stamps.py covers them in full).
     assert out == (
         f"path: {resolved}\n"
         f"schema_version: 10\n"
         f"search: missing (ledger index rebuilds it)\n"
+        f"actor: tester\n"
+        f"harness: pytest\n"
+        f"model: missing\n"
+        f"session: missing\n"
     )

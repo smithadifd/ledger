@@ -10,6 +10,12 @@ does not know is printed as it is, with a pointer to ``ledger doctor --json``.
 
 It also lists claims whose lease has expired, with holder and age, so a dead
 seat's claim is noticed. That list never changes the exit code either.
+
+It prints, and ``--json`` carries under ``stamps``, the four actor stamps (actor,
+harness, model, session) a write from this environment would record. They come
+from ``actor_kwargs(ctx)``, the function every write stamps its event with, so
+doctor cannot drift from what a write records, and doctor reads no environment
+variable itself. An unset stamp is the word ``missing``.
 """
 from __future__ import annotations
 
@@ -18,6 +24,7 @@ import sqlite3
 from pathlib import Path
 
 from ledger import lease, search
+from ledger.card import _one_line
 from ledger.dbfile import UnsafeDatabaseFile
 from ledger.export import read_watermark, resolve_export_dir
 from ledger.paths import resolve_db_path
@@ -27,11 +34,38 @@ from ledger.store import (
     _refuse_unknown_versions,
     load_migrations,
 )
-from ledger.verbs import EXIT_NOT_FOUND, EXIT_REFUSED, CliError, Context, Result, Verb
+from ledger.verbs import (
+    EXIT_NOT_FOUND,
+    EXIT_REFUSED,
+    CliError,
+    Context,
+    Result,
+    Verb,
+    actor_kwargs,
+)
 
 
 def add_arguments(parser) -> None:
     return
+
+
+# The stamps a write records, in the order doctor prints them, and what an
+# unset one reads as.
+STAMP_NAMES = ("actor", "harness", "model", "session")
+MISSING = "missing"
+
+
+def _stamps(ctx: Context) -> dict[str, str]:
+    """The stamps a write from this context would record; ``missing`` for an
+    unset or empty one, never a guessed value."""
+    stamped = actor_kwargs(ctx)
+    return {name: stamped[name] or MISSING for name in STAMP_NAMES}
+
+
+def _stamp_lines(stamps: dict[str, str]) -> str:
+    """One ``name: value`` line per stamp. The value is escaped so a control
+    character in it cannot end its line or forge another."""
+    return "".join(f"{name}: {_one_line(value)}\n" for name, value in stamps.items())
 
 
 def _schema_version(path: Path) -> int:
@@ -264,10 +298,12 @@ def run(args, ctx: Context) -> Result:
     version = _schema_version(resolved)
     found = _search_status(resolved, ctx)
     claims = _expired_claims(resolved)
+    stamps = _stamps(ctx)
     data = {
         "path": str(resolved),
         "schema_version": version,
         "search": found,
+        "stamps": stamps,
         "expired_claims": claims,
         "summary": _summary(resolved),
     }
@@ -277,6 +313,7 @@ def run(args, ctx: Context) -> Result:
             f"path: {resolved}\nschema_version: {version}\n"
             f"search: {_search_line(found)}\n"
         )
+        + _stamp_lines(stamps)
         + "".join(_expired_line(c) for c in claims["items"]),
     )
 

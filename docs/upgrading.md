@@ -394,7 +394,9 @@ prints `ledger 0.4.0`.
 If `command -v ledger` prints nothing, the ledger you use is not on `PATH`: a
 vendored copy, or a wrapper script that runs one from a folder of its own.
 Neither choice above fits it. Build a new one beside it and move every caller
-over:
+over. This route replaces the pipx command below: do not run both, or the
+machine ends with two installs and `PATH` order decides which one runs. After
+step 3, skip the `pipx install` line and go on to the checks after it.
 
 1. Build a virtual environment on a Python that passes the 1.1 probe (`PY` is
    that Python; `<venv>` is a folder of your choosing) and install the tag into

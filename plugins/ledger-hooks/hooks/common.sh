@@ -7,7 +7,11 @@
 # LEDGER_HARNESS is unset, empty or exactly `cli` (the value a shell profile
 # sets; these hooks run only inside Claude Code, where `cli` is never true),
 # and any other value unchanged. `resume --hook-env` applies the same rule to
-# the session environment it prints.
+# the session environment it prints, for an unset value (it prints
+# `claude-code`), for exactly `cli` (the same) and for any other non-empty value
+# (no line; the value stays). It differs for an empty LEDGER_HARNESS: the hooks
+# pass `claude-code`, while `--hook-env` keeps the empty value and prints no
+# LEDGER_HARNESS line.
 
 ledger_hooks_quote() {
   printf "'"

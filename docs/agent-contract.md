@@ -172,6 +172,14 @@ plugin or harness that starts your session normally exports them.
 | `LEDGER_MODEL` | the model id, so a later reader knows what wrote it |
 | `LEDGER_SESSION` | the session id, so every event of one session can be found together |
 
+Check them before you write with `ledger doctor`. It prints the actor,
+harness, model and session a write from this environment would be stamped
+with, one line each, and the word `missing` for one that is unset;
+`ledger doctor --json` carries the same under `stamps`. It reads only these
+variables and prints no other part of the environment, so you do not need
+`env` or `printenv`. Like the rest of `doctor`, it needs the database to
+exist. When a stamp shows `missing`, set it before you write.
+
 The database path comes from `LEDGER_DB` (or `--db`). There is no default
 path; the supported location is `~/.local/share/ledger/<system>.db`, or
 whatever `LEDGER_DB` names.
