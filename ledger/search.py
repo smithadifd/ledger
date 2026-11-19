@@ -91,7 +91,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from .paths import resolve_db_path
 from .schema import ITEM_STATUSES
-from .store import Event, open_ledger_readonly
+from .store import Event, is_search_index_tables, open_ledger_readonly
 
 SEARCH_DB_NAME = "search.db"
 CONFIG_NAME = "config.json"
@@ -712,7 +712,7 @@ def _replace_verdict(index: Path, ledger: Path) -> tuple[bool, str | None]:
     except (sqlite3.Error, OSError, ValueError) as exc:
         detail = f"it does not read as SQLite: {exc}"
     else:
-        if "manifest" in tables and "events" not in tables:
+        if is_search_index_tables(tables):
             return False, None
         detail = "it has an events table" if "events" in tables else "it has no manifest table"
     return False, (

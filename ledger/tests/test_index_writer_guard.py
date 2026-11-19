@@ -8,6 +8,9 @@ named ``search.db`` beside ``ledger.db``, and a ledger named ``SEARCH.DB`` on a
 case-insensitive file system are refused by ``index``, ``index --rebuild`` and
 ``search``, and doctor reports them as a warning with a remedy.
 
+The other direction holds too: every ledger open refuses a search index, so
+no ledger session commits events into a file the writer may replace.
+
 Every ledger here is synthetic and built under tmp_path.
 """
 from __future__ import annotations
@@ -20,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from ledger import search, store
+from ledger import dbfile, search, store
 from ledger.paths import resolve_db_path
 from ledger.verbs import EXIT_OK, EXIT_REFUSED
 
@@ -422,3 +425,141 @@ def test_a_behind_index_with_an_events_table_is_not_replaced_by_the_append(
     _run_refused(
         tmp_path, monkeypatch, ledger, index, ["search", "synthetic"], "it has an events table"
     )
+
+
+# --- the ledger open refuses a search index -----------------------------------
+
+
+def _not_a_ledger(path: Path) -> str:
+    return (
+        f"refusing to open {resolve_db_path(path)} as a ledger: it is a search index "
+        f"(a manifest table and no events table), not a ledger"
+    )
+
+
+def _tables(path: Path) -> set[str]:
+    conn = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
+    try:
+        return {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+    finally:
+        conn.close()
+
+
+def _built_index(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(ledger), "index"])
+    assert code == EXIT_OK, out + err
+    index = search.search_db_path(ledger)
+    assert search.index_status(ledger)["status"] == "current"
+    return ledger, index
+
+
+INTO_THE_INDEX = ["new", "--id", "it-9", "--type", "ticket", "--title", "into the index"]
+
+
+@pytest.mark.parametrize(
+    "verb", [INTO_THE_INDEX, ["query"], ["search", "synthetic"]], ids=lambda v: v[0]
+)
+def test_a_ledger_verb_at_a_search_index_refuses_and_keeps_its_bytes(
+    tmp_path, monkeypatch, verb
+):
+    _ledger, index = _built_index(tmp_path, monkeypatch)
+    before = index.read_bytes()
+    names = set(os.listdir(tmp_path))
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(index), *verb])
+    assert "Traceback" not in err, err
+    # The bytes first: a refusal after a migration or a journal switch is too late.
+    assert index.read_bytes() == before, f"{verb[0]} changed the search index"
+    assert set(os.listdir(tmp_path)) == names
+    assert code == EXIT_REFUSED, out
+    assert json.loads(out)["error"]["message"] == _not_a_ledger(index)
+
+
+def test_the_read_only_ledger_open_refuses_a_search_index(tmp_path, monkeypatch):
+    _ledger, index = _built_index(tmp_path, monkeypatch)
+    before = index.read_bytes()
+    with pytest.raises(store.LedgerError) as refused:
+        store.open_ledger_readonly(index)
+    assert str(refused.value) == _not_a_ledger(index)
+    assert index.read_bytes() == before
+
+
+def test_a_ledger_write_at_a_confirmed_index_during_a_publish_is_refused(
+    tmp_path, monkeypatch
+):
+    # The index writer has confirmed a search index at its path and is about
+    # to rename over it; another session runs a ledger write at that path.
+    ledger, index = _built_index(tmp_path, monkeypatch)
+    expected = _events(ledger)
+    writes = []
+    race = _race_at_publish(
+        monkeypatch,
+        lambda: writes.append(invoke(monkeypatch, ["--json", "--db", str(index), *INTO_THE_INDEX])),
+    )
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(ledger), "index", "--rebuild"])
+    assert "Traceback" not in err, err
+    assert race["fired"] == 1, "the publish never ran"
+    [(write_code, write_out, write_err)] = writes
+    assert "Traceback" not in write_err, write_err
+    # The write was refused, so the rename below had no events to lose.
+    assert write_code == EXIT_REFUSED, write_out
+    assert json.loads(write_out)["error"]["message"] == _not_a_ledger(index)
+    assert code == EXIT_OK, out
+    assert json.loads(out)["ok"] is True
+    assert search.index_status(ledger)["status"] == "current"
+    assert "events" not in _tables(index)
+    assert _events(ledger) == expected
+    assert _partials(tmp_path) == []
+
+
+def test_a_search_index_that_appears_before_the_connect_is_refused(tmp_path, monkeypatch):
+    # The first check finds nothing at the path; a search index appears there
+    # before the connect. The connect itself refuses it, before any migration.
+    _ledger, index = _built_index(tmp_path, monkeypatch)
+    spare = tmp_path / "spare-index.db"
+    shutil.copyfile(index, spare)
+    target = tmp_path / "late.db"
+    planted = {"count": 0}
+
+    def plant(stage, path):
+        if stage == "before_connect" and Path(path).name == target.name and not planted["count"]:
+            planted["count"] += 1
+            shutil.copyfile(spare, target)
+
+    monkeypatch.setattr(dbfile, "_TEST_SEAM", plant)
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(target), *INTO_THE_INDEX])
+    assert "Traceback" not in err, err
+    assert planted["count"] == 1, "the connect never ran"
+    assert _tables(target) == _tables(spare), "the open migrated into the search index"
+    assert code == EXIT_REFUSED, out
+    assert json.loads(out)["error"]["message"] == _not_a_ledger(target)
+
+
+def test_a_fresh_path_and_an_ordinary_ledger_open_and_migrate_as_before(tmp_path, monkeypatch):
+    fresh = tmp_path / "fresh.db"
+    assert not fresh.exists()
+    seed(monkeypatch, str(fresh), "it-1")
+    seed(monkeypatch, str(fresh), "it-2", "synthetic-two")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(fresh), "query"])
+    assert code == EXIT_OK, out + err
+    assert len(_events(fresh)) == 2
+    assert "events" in _tables(fresh)
+
+
+def test_a_ledger_that_also_has_a_manifest_table_still_opens(tmp_path, monkeypatch):
+    # The marker is a manifest table and no events table; a ledger with a
+    # manifest table of its own is still a ledger.
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    conn = sqlite3.connect(ledger)
+    try:
+        conn.execute("CREATE TABLE manifest (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.commit()
+    finally:
+        conn.close()
+    seed(monkeypatch, str(ledger), "it-2", "synthetic-two")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(ledger), "query"])
+    assert code == EXIT_OK, out + err
+    with store.open_ledger_readonly(ledger) as lg:
+        assert len(list(lg.events())) == 2
