@@ -91,7 +91,7 @@ from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence
 
 from .paths import resolve_db_path
 from .schema import ITEM_STATUSES
-from .store import Event, open_ledger_readonly
+from .store import Event, is_search_index_tables, open_ledger_readonly
 
 SEARCH_DB_NAME = "search.db"
 CONFIG_NAME = "config.json"
@@ -686,14 +686,20 @@ def _replace_refusal(index: Path, ledger: Path) -> str | None:
     Anything else, and any error while checking, refuses, naming the index
     path and the ledger.
     """
+    return _replace_verdict(index, ledger)[1]
+
+
+def _replace_verdict(index: Path, ledger: Path) -> tuple[bool, str | None]:
+    """``(absent, refusal)`` for the index path, from one ``lstat``: whether
+    nothing is there, and ``_replace_refusal``'s answer for what is."""
     try:
         found = os.lstat(index)
     except FileNotFoundError:
-        return None
+        return True, None
     except OSError as exc:
-        return f"cannot stat the search index {index}: {exc} (ledger {ledger})"
+        return False, f"cannot stat the search index {index}: {exc} (ledger {ledger})"
     if not stat.S_ISREG(found.st_mode):
-        return None
+        return False, None
     try:
         conn = sqlite3.connect(index.as_uri() + "?mode=ro", uri=True)
         try:
@@ -706,23 +712,68 @@ def _replace_refusal(index: Path, ledger: Path) -> str | None:
     except (sqlite3.Error, OSError, ValueError) as exc:
         detail = f"it does not read as SQLite: {exc}"
     else:
-        if "manifest" in tables and "events" not in tables:
-            return None
+        if is_search_index_tables(tables):
+            return False, None
         detail = "it has an events table" if "events" in tables else "it has no manifest table"
-    return (
+    return False, (
         f"refusing to replace {index}, which is not a search index, "
         f"with the index of the ledger {ledger}: {detail}"
     )
 
 
 def _replace_index(tmp: Path, index: Path, ledger: Path) -> None:
-    """Swap the finished index at ``tmp`` in at ``index``: the only rename
-    onto the index path. ``_replace_refusal`` decides first; a refusal raises
+    """Publish the finished index at ``tmp`` at ``index``: the only writer of
+    the index path. ``_replace_verdict`` decides first; a refusal raises
     ``SearchError`` and leaves ``index`` as it was (the caller removes ``tmp``).
+
+    Another session can create a ledger at the index path after the check,
+    so a path the check saw absent is published with a hard link, which
+    never replaces an existing file. When the link finds something there,
+    the check runs again on what is there now: a search index (or a path
+    that is not a regular file) is replaced as below, and anything else
+    refuses. A path the check confirmed is replaced with a rename. No
+    failure falls back to a rename over an unchecked path.
     """
-    refusal = _replace_refusal(index, ledger)
+    absent, refusal = _replace_verdict(index, ledger)
     if refusal is not None:
         raise SearchError(refusal)
+    if absent:
+        if _link_new_index(tmp, index, ledger):
+            return
+        # Something appeared at the index path after the check.
+        absent, refusal = _replace_verdict(index, ledger)
+        if refusal is not None:
+            raise SearchError(refusal)
+        if absent:
+            # The link found a file that is gone again: the path is changing
+            # under the writer, so it decides nothing and replaces nothing.
+            raise SearchError(
+                f"refusing to publish the search index at {index}: the path "
+                f"changed while it was published (ledger {ledger})"
+            )
+    _rename_over_index(tmp, index)
+
+
+def _link_new_index(tmp: Path, index: Path, ledger: Path) -> bool:
+    """Publish ``tmp`` at ``index`` only when nothing is there: ``True`` when
+    it is published (``tmp`` is then removed), ``False`` when a file exists
+    at ``index``. Any other failure refuses; it never falls back to a
+    rename, which would replace whatever is there."""
+    try:
+        os.link(tmp, index)
+    except FileExistsError:
+        return False
+    except OSError as exc:
+        raise SearchError(
+            f"cannot publish the search index at {index} without replacing "
+            f"what may be there: {exc} (ledger {ledger})"
+        ) from exc
+    tmp.unlink(missing_ok=True)
+    return True
+
+
+def _rename_over_index(tmp: Path, index: Path) -> None:
+    """Rename ``tmp`` over a path ``_replace_verdict`` confirmed."""
     try:
         # A rename replaces a FIFO, socket or symlink at the index path
         # (the link itself, never its target); it cannot replace a

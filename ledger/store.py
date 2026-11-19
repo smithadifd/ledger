@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Collection, Iterator, Mapping, Sequence
 
 from .dbfile import OpenProof, checked_connect, precheck_files, verify_bound
 from .decisions import check_event as check_decision_event
@@ -245,6 +245,39 @@ def _recorded_versions(conn: sqlite3.Connection) -> set[int]:
     return {row[0] for row in conn.execute("SELECT version FROM schema_version")}
 
 
+def is_search_index_tables(tables: Collection[str]) -> bool:
+    """Whether a database with these table names is a search index.
+
+    A search index (``search.db``) has a ``manifest`` table and no ``events``
+    table; a ledger has ``events``. This is the one rule both sides read: the
+    index writer replaces only such a file (``search._replace_verdict``), and
+    every ledger open refuses one (``_search_index_refusal``), so no ledger
+    session commits events into a file the index writer may replace.
+    """
+    return "manifest" in tables and "events" not in tables
+
+
+def _search_index_refusal(conn: sqlite3.Connection, path: Path) -> str | None:
+    """The refusal for opening ``path`` as a ledger when it is a search index.
+
+    Reads only the table names. A file that does not read as SQLite returns
+    ``None``, so it fails later exactly as it did before this check.
+    """
+    try:
+        tables = {
+            row[0]
+            for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    except sqlite3.Error:
+        return None
+    if not is_search_index_tables(tables):
+        return None
+    return (
+        f"refusing to open {path} as a ledger: it is a search index (a manifest "
+        f"table and no events table), not a ledger"
+    )
+
+
 def _refuse_newer_schema_in_transaction(conn: sqlite3.Connection) -> None:
     """Refuse to write into a schema that a newer writer has migrated.
 
@@ -269,6 +302,9 @@ def _refuse_newer_schema_before_connect(path: Path) -> None:
     connection closes (``mode=ro`` would leave both beside a WAL database).
     The one change SQLite itself may still make is its standard recovery of a
     crashed writer's hot journal, which restores the last committed state.
+
+    The same read refuses a search index (``_search_index_refusal``), so a
+    search index at ``path`` keeps its bytes and its journal mode.
     """
     if not precheck_files(path):
         return
@@ -282,9 +318,12 @@ def _refuse_newer_schema_before_connect(path: Path) -> None:
         ),
     )
     try:
+        refusal = _search_index_refusal(conn, path)
         versions = _recorded_versions(conn)
     finally:
         conn.close()
+    if refusal is not None:
+        raise LedgerError(refusal)
     _refuse_unknown_versions(versions, load_migrations())
 
 
@@ -379,6 +418,10 @@ def connect(path: Path) -> tuple[sqlite3.Connection, OpenProof]:
     ``PRAGMA journal_mode = WAL`` runs only when the file is not already WAL.
     Returns the connection and the ``OpenProof`` of the files it holds, which
     every write checks again before it is reported (``Ledger._settle_bound``).
+
+    A search index is refused (``_search_index_refusal``) before the
+    connection is returned, so nothing migrates or writes into it. This
+    catches one that appeared at ``path`` after ``open_ledger``'s first check.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     last_error: BaseException | None = None
@@ -392,6 +435,10 @@ def connect(path: Path) -> tuple[sqlite3.Connection, OpenProof]:
                 ),
                 set_wal=True,
             )
+            refusal = _search_index_refusal(conn, path)
+            if refusal is not None:
+                conn.close()
+                raise LedgerError(refusal)
             conn.row_factory = sqlite3.Row
             conn.execute(f"PRAGMA busy_timeout = {BUSY_TIMEOUT_MS}")
             conn.execute("PRAGMA foreign_keys = ON")
@@ -1628,6 +1675,9 @@ def open_ledger_readonly(path: Path | str) -> Ledger:
         raise LedgerError(f"database does not exist: {resolved}")
     conn, proof = _connect_readonly_proved(resolved)
     try:
+        refusal = _search_index_refusal(conn, resolved)
+        if refusal is not None:
+            raise LedgerError(refusal)
         has_versions = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version'"
         ).fetchone()
@@ -1668,6 +1718,7 @@ __all__ = [
     "claim_database",
     "connect",
     "event_digest",
+    "is_search_index_tables",
     "item_is_loop_managed",
     "load_migrations",
     "migrate",
