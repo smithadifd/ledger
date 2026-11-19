@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -190,3 +191,234 @@ def test_an_older_index_without_doc_meta_is_rebuilt_in_place(tmp_path, monkeypat
         conn.close()
     assert "doc_meta" in tables
     assert search.index_status(ledger)["status"] == "current"
+
+
+# --- the publish: a path the check saw absent is never replaced -------------
+
+
+def _race_at_publish(monkeypatch, act):
+    """Run ``act`` once inside the index writer, after its check and before
+    its publish: another session writing the index path between the two.
+    Returns a dict whose ``fired`` counts the runs."""
+    real_replace = search._replace_index
+    real_verdict = search._replace_verdict
+    state = {"armed": False, "fired": 0}
+
+    def replace_index(tmp, index, ledger):
+        state["armed"] = True
+        try:
+            return real_replace(tmp, index, ledger)
+        finally:
+            state["armed"] = False
+
+    def verdict(index, ledger):
+        found = real_verdict(index, ledger)
+        if state["armed"] and not state["fired"]:
+            state["fired"] += 1
+            act()
+        return found
+
+    monkeypatch.setattr(search, "_replace_index", replace_index)
+    monkeypatch.setattr(search, "_replace_verdict", verdict)
+    return state
+
+
+def _partials(directory: Path) -> list[str]:
+    return sorted(n for n in os.listdir(directory) if n.endswith(".partial"))
+
+
+@pytest.mark.parametrize("verb", VERBS, ids=" ".join)
+def test_a_ledger_created_at_the_index_path_during_a_publish_is_not_replaced(
+    tmp_path, monkeypatch, verb
+):
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    other = tmp_path / "elsewhere" / "ledger.db"
+    other.parent.mkdir()
+    seed(monkeypatch, str(other), "it-2")
+    expected = _events(other)
+    expected_bytes = other.read_bytes()
+    assert expected
+    index = search.search_db_path(ledger)
+    assert not os.path.lexists(index)
+    race = _race_at_publish(monkeypatch, lambda: shutil.copyfile(other, index))
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(ledger), *verb])
+    assert "Traceback" not in err, err
+    assert race["fired"] == 1, "the publish never ran"
+    # The events first: the ledger that appeared at the index path survives.
+    assert _events(index) == expected, f"{' '.join(verb)} replaced the ledger at {index}"
+    assert index.read_bytes() == expected_bytes
+    assert _partials(tmp_path) == []
+    body = json.loads(out)
+    if verb[0] == "doctor":
+        assert code == EXIT_OK, body
+        assert body["data"]["search"]["severity"] == "warn", body
+    else:
+        assert code == EXIT_REFUSED, body
+        message = body["error"]["message"]
+        assert message.startswith(f"refusing to replace {index}, "), message
+        assert "it has an events table" in message, message
+
+
+def test_a_search_index_created_at_the_index_path_during_a_publish_is_replaced(
+    tmp_path, monkeypatch
+):
+    # Another session's index is still a search index: the writer decides
+    # again on what is there and replaces it, as it replaces any index.
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(ledger), "index"])
+    assert code == EXIT_OK, out + err
+    index = search.search_db_path(ledger)
+    other_index = tmp_path / "elsewhere.db"
+    os.rename(index, other_index)
+    race = _race_at_publish(monkeypatch, lambda: shutil.copyfile(other_index, index))
+    code, out, err = invoke(
+        monkeypatch, ["--json", "--db", str(ledger), "index", "--rebuild"]
+    )
+    assert "Traceback" not in err, err
+    assert race["fired"] == 1, "the publish never ran"
+    assert code == EXIT_OK, out
+    assert os.stat(index).st_ino != os.stat(other_index).st_ino
+    assert search.index_status(ledger)["status"] == "current"
+    assert _partials(tmp_path) == []
+
+
+def test_a_link_that_finds_a_file_which_is_gone_again_refuses(tmp_path, monkeypatch):
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    index = search.search_db_path(ledger)
+
+    def link(src, dst, *args, **kwargs):
+        raise FileExistsError(17, "File exists", str(dst))
+
+    monkeypatch.setattr(search.os, "link", link)
+    code, out, err = invoke(
+        monkeypatch, ["--json", "--db", str(ledger), "index", "--rebuild"]
+    )
+    assert "Traceback" not in err, err
+    assert code == EXIT_REFUSED, out
+    message = json.loads(out)["error"]["message"]
+    assert message == (
+        f"refusing to publish the search index at {index}: the path changed "
+        f"while it was published (ledger {resolve_db_path(ledger)})"
+    ), message
+    assert not os.path.lexists(index)
+    assert _partials(tmp_path) == []
+
+
+def test_a_publish_that_cannot_link_refuses_and_never_renames(tmp_path, monkeypatch):
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    index = search.search_db_path(ledger)
+
+    def link(src, dst, *args, **kwargs):
+        raise PermissionError(1, "Operation not permitted", str(dst))
+
+    monkeypatch.setattr(search.os, "link", link)
+    code, out, err = invoke(
+        monkeypatch, ["--json", "--db", str(ledger), "index", "--rebuild"]
+    )
+    assert "Traceback" not in err, err
+    assert code == EXIT_REFUSED, out
+    message = json.loads(out)["error"]["message"]
+    assert message.startswith(
+        f"cannot publish the search index at {index} without replacing what may be there: "
+    ), message
+    assert message.endswith(f"(ledger {resolve_db_path(ledger)})"), message
+    assert not os.path.lexists(index)
+    assert _partials(tmp_path) == []
+
+
+# --- what the rule refuses: no manifest, or an events table ------------------
+
+
+def _no_manifest_table(index: Path) -> None:
+    conn = sqlite3.connect(index)
+    try:
+        conn.execute("CREATE TABLE notes (body TEXT)")
+        conn.execute("INSERT INTO notes (body) VALUES ('not an index')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _zero_bytes(index: Path) -> None:
+    index.write_bytes(b"")
+
+
+def _manifest_and_events(index: Path) -> None:
+    conn = sqlite3.connect(index)
+    try:
+        conn.execute("CREATE TABLE manifest (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, hash TEXT)")
+        conn.execute("INSERT INTO events (id, hash) VALUES (1, 'not an index')")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _run_refused(tmp_path, monkeypatch, ledger: Path, index: Path, verb, detail: str):
+    """Run ``verb``; the file at ``index`` keeps its bytes, nothing is left
+    over, and the verb refuses (doctor reports a warning instead)."""
+    before = index.read_bytes()
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(ledger), *verb])
+    assert "Traceback" not in err, err
+    assert index.read_bytes() == before, f"{' '.join(verb)} replaced {index}"
+    assert _partials(tmp_path) == []
+    body = json.loads(out)
+    if verb[0] == "doctor":
+        assert code == EXIT_OK, body
+        assert body["data"]["search"]["severity"] == "warn", body
+        assert any(detail in reason for reason in body["data"]["search"]["reasons"]), body
+    else:
+        assert code == EXIT_REFUSED, body
+        message = body["error"]["message"]
+        assert message.startswith(f"refusing to replace {index}, "), message
+        assert message.endswith(detail), message
+
+
+@pytest.mark.parametrize("verb", VERBS, ids=" ".join)
+@pytest.mark.parametrize("make", [_no_manifest_table, _zero_bytes], ids=lambda f: f.__name__.lstrip("_"))
+def test_a_file_without_a_manifest_table_at_the_index_path_is_never_replaced(
+    tmp_path, monkeypatch, make, verb
+):
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    index = search.search_db_path(ledger)
+    make(index)
+    _run_refused(tmp_path, monkeypatch, ledger, index, verb, "it has no manifest table")
+
+
+@pytest.mark.parametrize("verb", [["index", "--rebuild"], ["search", "synthetic"]], ids=" ".join)
+def test_a_file_with_a_manifest_and_an_events_table_is_never_replaced(
+    tmp_path, monkeypatch, verb
+):
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    index = search.search_db_path(ledger)
+    _manifest_and_events(index)
+    _run_refused(tmp_path, monkeypatch, ledger, index, verb, "it has an events table")
+
+
+def test_a_behind_index_with_an_events_table_is_not_replaced_by_the_append(
+    tmp_path, monkeypatch
+):
+    ledger = tmp_path / "ledger.db"
+    seed(monkeypatch, str(ledger), "it-1")
+    code, out, err = invoke(monkeypatch, ["--json", "--db", str(ledger), "index"])
+    assert code == EXIT_OK, out + err
+    index = search.search_db_path(ledger)
+    conn = sqlite3.connect(index)
+    try:
+        conn.execute("CREATE TABLE events (id INTEGER PRIMARY KEY, hash TEXT)")
+        conn.commit()
+    finally:
+        conn.close()
+    seed(monkeypatch, str(ledger), "it-2", "synthetic-two")
+    # Behind: everything recorded matches and one event is new, so search
+    # takes the append path first.
+    assert search.index_status(ledger)["status"] == "behind"
+    _run_refused(
+        tmp_path, monkeypatch, ledger, index, ["search", "synthetic"], "it has an events table"
+    )
