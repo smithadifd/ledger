@@ -78,7 +78,8 @@ def test_near_misses_still_refuse_by_name(db, monkeypatch, given):
     code, body = _stop(monkeypatch, db, ["ok/dir", given])
     assert code == EXIT_REFUSED
     assert body["error"]["code"] == "validation"
-    assert body["error"]["message"] == "bad-type:refs[1]"
+    # The reason and path come first; the allowed forms follow the semicolon.
+    assert body["error"]["message"].startswith("bad-type:refs[1]; allowed: ")
     assert _stored_refs(db) == []
 
 

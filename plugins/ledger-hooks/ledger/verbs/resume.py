@@ -24,8 +24,11 @@ directory.
 stdin and prints the lines the hook appends to the session's environment file,
 each ``export NAME=<value>`` with the value shell-quoted, in this order:
 ``LEDGER_SESSION`` from ``session_id`` (even when the variable is already set);
-then ``LEDGER_AGENT`` and ``LEDGER_HARNESS`` as ``claude-code``, each only
-when the name is absent from this process's environment. A ``session_id``
+then ``LEDGER_AGENT`` as ``claude-code`` when the name is absent from this
+process's environment, and ``LEDGER_HARNESS`` as ``claude-code`` when it is
+absent or exactly ``cli`` (the value a shell profile sets; this hook runs only
+inside Claude Code, where ``cli`` is never true); any other value, an empty
+one included, is kept and gets no line. A ``session_id``
 that is missing, not a string, empty, or holds a control character leaves
 its line out. It prints no ``LEDGER_MODEL`` line, whatever the input's
 ``model``: only a few hook events may write the session's environment file
@@ -122,6 +125,10 @@ and printing the exact resume command, never prose. Replace ITEM:
   ledger append --item ITEM --kind item.stopped --payload '{"point": "what is done and what is next", "phase": "build", "skills": ["review"], "refs": ["plan.md"]}'
   ledger resume --item ITEM
 phase is one of orient, plan, build, review, close. skills and refs are optional.
+Item types for ledger new --type: topic, ticket, initiative, decision, gate, guidance (there is no task: use ticket).
+Limits: point is 1 to 600 characters; skills at most 12; refs at most 20, each at most 300 characters, one line, and one of:
+a file path (src/app.py:12), a pull request or issue (#12 or owner/repo#12), a branch (branch:feat/x), a commit sha (3f2a9c1), an event (event:42).
+A URL is not a ref: ledger link ITEM --rel url --target URL. A refusal names the limit and the length you gave.
 """
 
 
@@ -137,7 +144,7 @@ def add_arguments(parser) -> None:
         action="store_true",
         help="read a SessionStart hook input on stdin and print the export lines"
         " for LEDGER_SESSION, LEDGER_AGENT and LEDGER_HARNESS (never LEDGER_MODEL);"
-        " opens no database",
+        " LEDGER_HARNESS is printed when it is unset or exactly cli; opens no database",
     )
     parser.add_argument(
         "--hook-model",
@@ -174,6 +181,10 @@ def _escape(text: str) -> str:
 # What --hook-env stamps for a variable the environment does not set.
 HOOK_AGENT = "claude-code"
 HOOK_HARNESS = "claude-code"
+# The one inherited LEDGER_HARNESS value --hook-env replaces: a shell profile
+# sets it for the commands a person types, and a session started from that
+# shell inherits it, but the hook runs only inside Claude Code.
+SHELL_HARNESS = "cli"
 
 
 def _hook_env_refusal(code: str, message: str) -> CliError:
@@ -200,7 +211,7 @@ def hook_env(hook: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, s
         env["LEDGER_SESSION"] = session
     if "LEDGER_AGENT" not in environ:
         env["LEDGER_AGENT"] = HOOK_AGENT
-    if "LEDGER_HARNESS" not in environ:
+    if "LEDGER_HARNESS" not in environ or environ["LEDGER_HARNESS"] == SHELL_HARNESS:
         env["LEDGER_HARNESS"] = HOOK_HARNESS
     # No LEDGER_MODEL: the input's model is the one the session started on, and
     # a model switch later in the session cannot re-stamp the environment file.

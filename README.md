@@ -120,8 +120,8 @@ the environment names the database, the hooks need the `ledger` command and
    tag.
 2. [Set the environment](#2-set-the-environment): `LEDGER_DB`,
    `LEDGER_OPERATOR` and `LEDGER_HARNESS` (`cli`) in your shell, and
-   `LEDGER_DB` and `LEDGER_OPERATOR` in the `env` block of Claude Code's
-   settings.
+   `LEDGER_DB`, `LEDGER_OPERATOR` and `LEDGER_HARNESS` (`claude-code`) in the
+   `env` block of Claude Code's settings.
 3. Install the `ledger-hooks` plugin
    ([Claude Code plugin](#claude-code-plugin)).
 4. Install the skills plugin and run its setup step, which pins its
@@ -221,13 +221,14 @@ clone with nothing installed, `python3 -m ledger <verb>` is the same as
 The ledger has no default database path and takes its settings from the
 environment. Set the values in two places: your shell, for the commands you
 type, and the `env` block of Claude Code's settings, for the sessions it
-starts. `LEDGER_HARNESS` goes in the shell only (see the table).
+starts. `LEDGER_HARNESS` differs between the two: `cli` in the shell,
+`claude-code` in the settings (see the table).
 
 | Variable | Set it to | Where |
 |----------|-----------|-------|
 | `LEDGER_DB` | an absolute path, `~/.local/share/ledger/<system>.db`, with a short name of your own for `<system>` (a relative path resolves against whatever folder a session starts in) | shell and Claude Code settings |
 | `LEDGER_OPERATOR` | your name: the person the writes are made for | shell and Claude Code settings |
-| `LEDGER_HARNESS` | `cli`: what is writing, which every write you type needs | shell; in Claude Code settings it is optional and best left out, because the plugin's session-start hook sets `claude-code` when it is unset |
+| `LEDGER_HARNESS` | what is writing, which every write needs: `cli` for the commands you type, `claude-code` for a Claude Code session | `cli` in the shell; `claude-code` in Claude Code settings |
 
 In your shell, put these lines in your profile (for zsh, `~/.zshrc`) so every
 new terminal has them; the shell expands `~` to an absolute path. The first
@@ -240,8 +241,8 @@ export LEDGER_OPERATOR=me
 export LEDGER_HARNESS=cli
 ```
 
-In Claude Code, add the database and the operator to the `env` block of its
-settings (`~/.claude/settings.json` for your user), adding keys and keeping
+In Claude Code, add the database, the operator and the harness to the `env`
+block of its settings (`~/.claude/settings.json` for your user), adding keys and keeping
 any that are already there. If that file does not exist yet, create it (and
 the `~/.claude` folder, if that is missing too) holding exactly the block
 below, with your real absolute path and name filled in: the block as printed
@@ -252,14 +253,17 @@ is already a whole valid settings file. Write the database path in full;
 {
   "env": {
     "LEDGER_DB": "/absolute/path/to/work.db",
-    "LEDGER_OPERATOR": "me"
+    "LEDGER_OPERATOR": "me",
+    "LEDGER_HARNESS": "claude-code"
   }
 }
 ```
 
-A Claude Code session started from a shell that exports `LEDGER_HARNESS=cli`
-inherits it, and its writes then say `cli` rather than `claude-code`: run
-`unset LEDGER_HARNESS` before you start it.
+The settings value wins over the one a session inherits from the shell that
+started it. Measured with Claude Code 2.1.328: a session launched from a shell
+that exported `LEDGER_HARNESS=cli`, with a settings `env` block that set
+`LEDGER_HARNESS=claude-code`, saw `claude-code` from its Bash tool. There is
+nothing to unset before you start Claude Code.
 
 Steps 3 and 4 are the plugin and the skills:
 [Claude Code plugin](#claude-code-plugin) and
@@ -513,7 +517,7 @@ captured and `pick` refuses (`capture_missing`).
 | `note` | append a note to an item | yes |
 | `state` | set an item's status (`open`, `claimed`, `blocked`, `closed`), owner, claim or blocker | yes |
 | `claim` | claim an item with a lease, optionally capped by `--capacity` | yes |
-| `claim-system` | claim this database for a system such as `work` or `home`; the same name again changes nothing, another name is refused | yes |
+| `claim-system` | claim this database for a system such as `work` or `home`; the same name again writes no event, but opening the database for writing applies any pending migration (an older copy then refuses the file); another name is refused | yes |
 | `link` | link an item to a PR, branch, session, URL or another item; `duplicate-of` also closes it | yes |
 | `append` | append a validated event of any non-reserved kind | yes |
 | `append-many` | append several events for one item in one transaction (JSON array on stdin) | yes |
@@ -597,8 +601,9 @@ has that name.)
   terminal does not show it; run that command yourself to read the same
   text), and with `ledger resume --hook-env` stamps the session's
   environment:
-  `LEDGER_SESSION` from the session id, and `LEDGER_AGENT` and
-  `LEDGER_HARNESS` when they are not already set. It stamps no
+  `LEDGER_SESSION` from the session id, `LEDGER_AGENT` when it is not already
+  set, and `LEDGER_HARNESS` as `claude-code` when it is unset or exactly `cli`
+  (any other value is kept). It stamps no
   `LEDGER_MODEL`, because the model can change during a session; instead
   `ledger resume --hook-model` records the session's start model beside the
   database.
@@ -638,8 +643,12 @@ nothing when `LEDGER_DB` is unset (an empty value counts as unset) and the
 The hooks and the `ledger` command they run read `LEDGER_DB` and
 `LEDGER_OPERATOR` from the environment Claude Code starts with, so set them
 the way [step 2](#2-set-the-environment) does, in the `env` block of Claude
-Code's settings. The hooks supply `LEDGER_HARNESS` themselves: they pass
-`claude-code` when it is unset, so it is best left out of that block.
+Code's settings, together with `LEDGER_HARNESS=claude-code`. The session-start
+hook backs the harness up: it stamps `claude-code` when the inherited value is
+unset or exactly `cli`, and keeps any other value. Each of the four hooks passes
+the same harness to its own `ledger` call (the model record and the two
+captures): `claude-code` when the inherited value is unset, empty or exactly
+`cli`, else the value as it is.
 
 The three values can be set as plugin options instead of in the settings
 `env` block,

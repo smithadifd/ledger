@@ -5,15 +5,15 @@
 # PostModelSwitch hook's stdout to the model's context. A failure is one stderr
 # line with no model text, and exit 2, so Claude Code shows the line to the
 # user (exit 0 would hide it; the switch itself is never blocked). The record
-# needs LEDGER_HARNESS, as a write does; the hook supplies claude-code when it
-# is unset. Off (no output, no write) unless a `ledger` command is found and
+# needs LEDGER_HARNESS, as a write does; the hook passes claude-code when it is
+# unset, empty or exactly `cli`, and any other value as it is (see common.sh). Off (no output, no write) unless a `ledger` command is found and
 # LEDGER_DB is set (from the environment or a plugin option).
 _hooks_dir=$(CDPATH= cd -- "$(dirname "$0")" && pwd) || exit 0
 . "$_hooks_dir/common.sh" || exit 0
 ledger_hooks_prepare || exit 0
 [ -n "$LEDGER_HOOKS_CMD" ] || exit 0
 [ -n "${LEDGER_DB:-}" ] || exit 0
-LEDGER_HARNESS="${LEDGER_HARNESS:-claude-code}" "$LEDGER_HOOKS_CMD" resume --hook-model >/dev/null 2>&1
+LEDGER_HARNESS="$LEDGER_HOOKS_HARNESS" "$LEDGER_HOOKS_CMD" resume --hook-model >/dev/null 2>&1
 rc=$?
 if [ "$rc" -ne 0 ]; then
   printf 'ledger-hooks: model record failed (exit %s)\n' "$rc" >&2

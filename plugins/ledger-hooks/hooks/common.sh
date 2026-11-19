@@ -1,6 +1,13 @@
 # Shared by the four ledger-hooks shims. Sourced, never executed.
 # An already-set LEDGER_* value is kept; a plugin option fills only an unset
 # or empty one. An empty option counts as unset.
+#
+# The harness each hook passes to its own ledger call is LEDGER_HOOKS_HARNESS
+# (set by ledger_hooks_prepare, after the option fill): claude-code when
+# LEDGER_HARNESS is unset, empty or exactly `cli` (the value a shell profile
+# sets; these hooks run only inside Claude Code, where `cli` is never true),
+# and any other value unchanged. `resume --hook-env` applies the same rule to
+# the session environment it prints.
 
 ledger_hooks_quote() {
   printf "'"
@@ -27,6 +34,10 @@ ledger_hooks_prepare() {
     export LEDGER_HARNESS
     LEDGER_HARNESS_FROM_OPTION=1
   fi
+  case "${LEDGER_HARNESS:-}" in
+    ''|cli) LEDGER_HOOKS_HARNESS=claude-code ;;
+    *) LEDGER_HOOKS_HARNESS=$LEDGER_HARNESS ;;
+  esac
   LEDGER_HOOKS_CMD=
   if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -x "${CLAUDE_PLUGIN_ROOT}/bin/ledger" ]; then
     LEDGER_HOOKS_CMD="${CLAUDE_PLUGIN_ROOT}/bin/ledger"

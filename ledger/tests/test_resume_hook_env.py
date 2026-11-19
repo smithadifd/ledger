@@ -2,8 +2,9 @@
 
 The flag reads one SessionStart hook input on stdin and prints up to three
 ``export NAME=<value>`` lines: ``LEDGER_SESSION`` always (when the input has a
-usable ``session_id``), then ``LEDGER_AGENT`` and ``LEDGER_HARNESS`` only when
-each is absent from the environment. It never prints ``LEDGER_MODEL``: a model
+usable ``session_id``), then ``LEDGER_AGENT`` only when it is absent from the
+environment, and ``LEDGER_HARNESS`` only when it is absent or exactly ``cli``
+(a shell profile's value, never true inside Claude Code). It never prints ``LEDGER_MODEL``: a model
 switch during the session could not re-stamp it; ``--hook-model`` records
 the model beside the database instead. It never resolves, opens or
 creates the database. Each case runs the CLI as a hook does: a subprocess with
@@ -20,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from ledger.store import open_ledger
+from ledger.verbs.resume import hook_env as hook_env_map
 
 PKG_PARENT = Path(__file__).resolve().parents[2]  # makes ``python -m ledger`` importable
 SESSION = "3f2b8c1e-5d4a-4e7b-9a10-2c6d8e4f1a2b"
@@ -130,6 +132,54 @@ def test_t22_all_three_set_leaves_only_the_session(db: Path) -> None:
     env = {"LEDGER_AGENT": "a", "LEDGER_HARNESS": "h", "LEDGER_MODEL": "m"}
     done = hook_env(db, json.dumps(hook()), env=env)
     assert done.stdout == f"export LEDGER_SESSION={SESSION}\n"
+
+
+# An inherited ``cli`` is the shell profile's value for the commands a person
+# types; this hook runs only inside Claude Code, where ``cli`` is never true.
+# It is the one inherited LEDGER_HARNESS value the hook replaces.
+
+
+def test_t22_an_inherited_cli_harness_is_replaced_by_claude_code(db: Path) -> None:
+    done = hook_env(db, json.dumps(hook()), env={"LEDGER_HARNESS": "cli"})
+    assert (done.returncode, done.stderr) == (0, "")
+    assert done.stdout == THREE_LINES
+    assert not db.exists() and not db.parent.exists()
+
+
+def test_t22_the_cli_replacement_reaches_the_json_map(db: Path) -> None:
+    done = hook_env(db, json.dumps(hook()), "--json", env={"LEDGER_HARNESS": "cli"})
+    assert done.returncode == 0, done.stderr
+    assert json.loads(done.stdout)["data"]["env"]["LEDGER_HARNESS"] == "claude-code"
+
+
+def test_t22_cli_is_replaced_whatever_the_agent_is(db: Path) -> None:
+    env = {"LEDGER_HARNESS": "cli", "LEDGER_AGENT": "mine"}
+    done = hook_env(db, json.dumps(hook()), env=env)
+    assert done.stdout == f"export LEDGER_SESSION={SESSION}\nexport LEDGER_HARNESS=claude-code\n"
+
+
+@pytest.mark.parametrize("value", ["omp", "pytest", "claude-code", "CLI", "Cli", "cli ", " cli",
+                                   "cli2", "xcli", "cli\t", ""],
+                         ids=["omp", "pytest", "claude-code", "upper", "title", "trailing-space",
+                              "leading-space", "suffix", "prefix", "trailing-tab", "empty"])
+def test_t22_any_other_harness_value_is_kept_and_gets_no_line(db: Path, value: str) -> None:
+    done = hook_env(db, json.dumps(hook()), env={"LEDGER_HARNESS": value})
+    assert (done.returncode, done.stderr) == (0, "")
+    assert done.stdout == (
+        f"export LEDGER_SESSION={SESSION}\nexport LEDGER_AGENT=claude-code\n"
+    )
+
+
+@pytest.mark.parametrize("environ, harness", [
+    ({}, "claude-code"),
+    ({"LEDGER_HARNESS": "cli"}, "claude-code"),
+    ({"LEDGER_HARNESS": "omp"}, None),
+    ({"LEDGER_HARNESS": "CLI"}, None),
+    ({"LEDGER_HARNESS": ""}, None),
+])
+def test_t22_the_function_maps_unset_and_exactly_cli_to_claude_code(environ, harness) -> None:
+    env = hook_env_map(hook(), environ)
+    assert env.get("LEDGER_HARNESS") == harness
 
 
 def test_t22_the_session_line_is_printed_even_when_the_session_is_set(db: Path) -> None:
