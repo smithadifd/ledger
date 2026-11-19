@@ -1,6 +1,8 @@
 """List unblocked open items."""
 from __future__ import annotations
 
+from ledger import lease
+from ledger.card import _read_snapshot
 from ledger.verbs import (
     DEFAULT_LIMIT,
     EXIT_NOT_FOUND,
@@ -10,7 +12,9 @@ from ledger.verbs import (
     Verb,
     format_items,
     item_dict,
+    lease_rows,
     open_db,
+    read_item,
     resolve_limit,
 )
 
@@ -27,7 +31,14 @@ def run(args, ctx: Context) -> Result:
     limit = resolve_limit(args.limit)
     lg = open_db(ctx, write=False)
     try:
-        matched = [item_dict(row) for row in lg.ready()]
+        moment = lease.now()
+        with _read_snapshot(lg):
+            rows = lg.ready()
+            leases = lease_rows(lg)
+        # An expired claim is ready and reads open (lease.read_status).
+        matched = [
+            read_item(item_dict(row), leases.get(row["item_id"]), at=moment) for row in rows
+        ]
     finally:
         lg.close()
     capped = matched[:limit]

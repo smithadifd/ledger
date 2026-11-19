@@ -311,7 +311,8 @@ def test_existing_doctor_text_lines_are_unchanged(tmp_path, monkeypatch):
     assert out == (
         f"path: {resolved}\n"
         f"schema_version: 10\n"
-        f"search: missing (ledger index rebuilds it)\n"
+        # Doctor builds the missing index before it reports it.
+        f"search: current\n"
         f"actor: tester\n"
         f"harness: pytest\n"
         f"model: missing\n"

@@ -11,7 +11,7 @@ import os
 import re
 import sqlite3
 import stat
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pytest
@@ -60,6 +60,20 @@ def run_json(monkeypatch, db: Path, *argv: str) -> tuple[int, dict]:
     code, out, err = invoke(monkeypatch, ["--json", "--db", str(db), *argv])
     assert "Traceback" not in err
     return code, json.loads(out)
+
+
+@contextmanager
+def _doctor_cannot_refresh(monkeypatch):
+    """Doctor refreshes the index before it reports it. Inside this block that
+    refresh fails as it does in an unwritable directory, so doctor reports the
+    state it reads; the index is left as it was."""
+
+    def refuse(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(search_mod, "refresh_index", refuse)
+        yield
 
 
 def _append(lg, kind: str, item_id: str | None, payload: dict, key: str):
@@ -316,10 +330,11 @@ def test_trailing_events_are_behind_not_stale_and_search_finds_them(db, monkeypa
     assert status["status"] == "behind"
     assert status["reasons"] == []
     assert status["new_events"] == 1
-    code, body = run_json(monkeypatch, db, "doctor")
-    assert code == EXIT_OK
-    assert body["data"]["search"]["status"] != "stale"
-    code, out, _err = invoke(monkeypatch, ["--db", str(db), "doctor"])
+    with _doctor_cannot_refresh(monkeypatch):
+        code, body = run_json(monkeypatch, db, "doctor")
+        assert code == EXIT_OK
+        assert body["data"]["search"]["status"] != "stale"
+        code, out, _err = invoke(monkeypatch, ["--db", str(db), "doctor"])
     assert "search: current to event 8, 1 new event will be indexed on the next search" in out
     assert "stale" not in out
     code, body = run_json(monkeypatch, db, "search", "capybara")
@@ -432,9 +447,14 @@ def test_a_behind_index_is_never_answered_from(db, monkeypatch):
 
 
 def test_doctor_reports_search_state_and_never_fails_on_it(db, monkeypatch):
-    code, body = run_json(monkeypatch, db, "doctor")
+    with _doctor_cannot_refresh(monkeypatch):
+        code, body = run_json(monkeypatch, db, "doctor")
     assert code == EXIT_OK
     assert body["data"]["search"]["status"] == "missing"
+    # Where it can write, doctor builds the missing index before it reports it.
+    code, body = run_json(monkeypatch, db, "doctor")
+    assert code == EXIT_OK
+    assert body["data"]["search"]["status"] == "current"
     run_json(monkeypatch, db, "index")
     code, body = run_json(monkeypatch, db, "doctor")
     assert body["data"]["search"]["status"] == "current"
@@ -453,9 +473,13 @@ def test_doctor_reports_search_state_and_never_fails_on_it(db, monkeypatch):
     assert "rebuilds it" not in out
     config.write_text(good_config)
     (db.parent / "search.db").write_bytes(b"not a database at all " * 50)
-    code, body = run_json(monkeypatch, db, "doctor")
+    with _doctor_cannot_refresh(monkeypatch):
+        code, body = run_json(monkeypatch, db, "doctor")
     assert code == EXIT_OK
     assert body["data"]["search"]["status"] == "stale"
+    code, body = run_json(monkeypatch, db, "doctor")
+    assert code == EXIT_OK
+    assert body["data"]["search"]["status"] == "current"
 
 
 def _doctor_search_line(monkeypatch, db: Path) -> str:
@@ -637,7 +661,9 @@ def test_doctor_info_line_keeps_the_rebuild_parenthetical(db, root, monkeypatch,
     make(db, monkeypatch, root)
     found = search_mod.index_status(db)
     assert (found["status"], found["severity"]) == (status, "info")
-    assert _doctor_search_line(monkeypatch, db) == f"search: {status} (ledger index rebuilds it)"
+    with _doctor_cannot_refresh(monkeypatch):
+        line = _doctor_search_line(monkeypatch, db)
+    assert line == f"search: {status} (ledger index rebuilds it)"
 
 
 def test_doctor_behind_line_names_the_new_events_without_a_warning(db, monkeypatch):
@@ -645,8 +671,9 @@ def test_doctor_behind_line_names_the_new_events_without_a_warning(db, monkeypat
     with open_ledger(db) as lg:
         _append(lg, "item.note", "T-feed", {"text": "after the build"}, "k9")
     assert search_mod.index_status(db)["severity"] == "info"
-    assert _doctor_search_line(monkeypatch, db) == (
-        "search: current to event 8, 1 new event will be indexed on the next search")
+    with _doctor_cannot_refresh(monkeypatch):
+        line = _doctor_search_line(monkeypatch, db)
+    assert line == "search: current to event 8, 1 new event will be indexed on the next search"
 
 
 def test_doctor_current_line_has_no_hint(db, monkeypatch):

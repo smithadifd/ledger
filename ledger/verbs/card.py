@@ -34,6 +34,7 @@ def run(args, ctx: Context) -> Result:
             pointers=sidecar_from_env(),
             program=invocation_prefix(ctx.program, str(lg.path), ctx.db_explicit),
             full=args.full,
+            lease_status=True,
         )
         text = format_card(card)
         data = card.as_dict()

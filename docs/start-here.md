@@ -255,13 +255,15 @@ A healthy result exits 0 and prints three lines:
 ```text
 path: <the database path from step 4>
 schema_version: N
-search: missing (ledger index rebuilds it)
+search: current
 ```
 
-`N` is the newest migration applied. `search: missing` is normal until your
-first `ledger search`; it is the optional search index, not a fault. `verify`
-prints `ok events=` and a count. `doctor` also lists any claim whose lease has
-expired, one line each; a new database has none.
+`N` is the newest migration applied. `doctor` brings the optional search
+index up to date before it reports it; where it cannot write the index it
+reports what it finds instead (`missing`, or `behind` with a count), which
+is not a fault. `verify` prints `ok events=` and a count. `doctor` also lists
+any claim whose lease has expired, and any claim with no lease stamp older
+than 7 days, one line each; a new database has none.
 
 If `doctor` says `database does not exist`, it is looking at a path where
 nothing has been written: check `echo $LEDGER_DB` and run step 6. If it says

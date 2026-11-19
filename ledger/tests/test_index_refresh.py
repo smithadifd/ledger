@@ -17,7 +17,15 @@ from ledger import search as search_mod
 from ledger.store import open_ledger
 from ledger.verbs import EXIT_OK, EXIT_REFUSED
 
-from test_search import _append, _rewrite_stored_manifest, db, invoke, root, run_json  # noqa: F401
+from test_search import (  # noqa: F401
+    _append,
+    _doctor_cannot_refresh,
+    _rewrite_stored_manifest,
+    db,
+    invoke,
+    root,
+    run_json,
+)
 
 
 def _index(db: Path) -> Path:
@@ -67,7 +75,8 @@ def test_one_new_event_reads_behind_info_and_index_makes_it_current(db, monkeypa
     assert status["status"] == "behind"
     assert status["new_events"] == 1
     assert status["severity"] == "info"
-    assert _doctor_search(monkeypatch, db)["severity"] == "info"
+    with _doctor_cannot_refresh(monkeypatch):
+        assert _doctor_search(monkeypatch, db)["severity"] == "info"
     code, body = run_json(monkeypatch, db, "index")
     assert code == EXIT_OK, body
     assert body["data"]["refresh"] == "append"

@@ -13,6 +13,7 @@ Format (stable — a later reader should parse this layout, not invent one):
     type: ...
     title: ...
     status: ...
+    expired claim: ...         (card verb only, when a claim's lease expired: status reads open)
     owner: ...
     claim: ...
     spec v<N>                  (or "spec -" when the item has no spec)
@@ -155,6 +156,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from typing import Any, Callable, Iterable, Iterator, Mapping
 
+from . import lease
 from .export import decay_boundary, decayed
 from .schema import SPEC_KIND
 from .store import Ledger
@@ -455,14 +457,21 @@ class Card:
     omitted_elsewhere: tuple[tuple[str, int], ...] = ()
     # Invocation prefix used only to preserve runnable commands while bounding.
     program: str = "ledger"
+    # The card verb's read-side status (lease.read_status), set by
+    # project_card(lease_status=True) only: ``open`` for a claim whose lease
+    # expired, with the old holder and the stamp. ``status`` stays the
+    # recorded status, which the next step and every guard read.
+    shown_status: str | None = None
+    expired_holder: str | None = None
+    expires_at: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Structured form of the same content the text card shows."""
-        return {
+        out = {
             "item_id": self.item_id,
             "type": self.type,
             "title": self.title,
-            "status": self.status,
+            "status": self.status if self.shown_status is None else self.shown_status,
             "owner": self.owner,
             "claim": self.claim,
             "revision": {"id": self.revision_id, "hash": self.revision_hash},
@@ -499,6 +508,11 @@ class Card:
             "cuts": _cut_entries(self),
             "footer": footer_line(self.item_id, self.program),
         }
+        if self.shown_status is not None:
+            out["recorded_status"] = self.status
+            out["expired_holder"] = self.expired_holder
+            out["expires_at"] = self.expires_at
+        return out
 
 
 def spec_moved_line(
@@ -1098,6 +1112,17 @@ def _with_inline_marker(text: str, card: Card, section: str, order: list[str]) -
     return f"{text} {_cut_words(count, card.item_id, card.program)}"
 
 
+def _expired_claim_lines(card: Card) -> list[str]:
+    """The line under ``status: open`` when the recorded claim's lease expired."""
+    if card.shown_status is None or card.shown_status == card.status:
+        return []
+    return [
+        f"expired claim: holder {_one_line(_dash(card.expired_holder))}, "
+        f"lease expired {_one_line(_dash(card.expires_at))}, "
+        f"recorded status {_one_line(card.status)}"
+    ]
+
+
 def format_card(card: Card) -> str:
     """Render the stable text/markdown card, including the authority footer."""
     return _render_card(card, [])
@@ -1115,7 +1140,8 @@ def _render_card(card: Card, order: list[str]) -> str:
         f"source_event_ids: {source}",
         f"type: {_one_line(card.type)}",
         f"title: {_with_inline_marker(_one_line(card.title), card, 'title', order)}",
-        f"status: {_one_line(card.status)}",
+        f"status: {_one_line(card.status if card.shown_status is None else card.shown_status)}",
+        *_expired_claim_lines(card),
         f"owner: {_with_inline_marker(_one_line(_dash(card.owner)), card, 'owner', order)}",
         f"claim: {_with_inline_marker(_one_line(_dash(card.claim)), card, 'claim', order)}",
         f"spec {_dash(None if card.spec_version is None else f'v{card.spec_version}')}",
@@ -2090,6 +2116,19 @@ def _project_item(
     return _with_source(card, base, base | _key_step_ids(card))
 
 
+def _with_lease_status(lg: Ledger, item: Mapping[str, Any], card: Card) -> Card:
+    """``card`` with the read-side status; the recorded one stays in ``status``."""
+    held = lease.current_lease(lg._conn, item["item_id"])
+    shown = lease.read_status(item, held)
+    expired = shown != item["status"]
+    return replace(
+        card,
+        shown_status=shown,
+        expired_holder=held["holder"] if expired else None,
+        expires_at=held["expires_at"] if expired else None,
+    )
+
+
 def project_card(
     lg: Ledger,
     item_id: str,
@@ -2097,16 +2136,20 @@ def project_card(
     pointers: PointerSource | None = None,
     program: str = "ledger",
     full: bool = False,
+    lease_status: bool = False,
 ) -> Card:
     """Project a bounded card for ``item_id`` (unbounded with ``full``);
     raise KeyError if missing. The item lookup and the whole projection read
-    one snapshot (see _read_snapshot)."""
+    one snapshot (see _read_snapshot). ``lease_status`` (the card verb) adds
+    the read-side status (``lease.read_status``) from the same snapshot."""
     with _read_snapshot(lg):
         for row in lg.items():
             if row["item_id"] == item_id:
                 card = _project_item(
                     lg, row, pointers=pointers, program=program, full=full
                 )
+                if lease_status:
+                    card = _with_lease_status(lg, row, card)
                 return card if full else bound_card(card)
     raise KeyError(item_id)
 

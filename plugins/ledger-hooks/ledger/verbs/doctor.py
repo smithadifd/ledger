@@ -16,11 +16,19 @@ harness, model, session) a write from this environment would record. They come
 from ``actor_kwargs(ctx)``, the function every write stamps its event with, so
 doctor cannot drift from what a write records, and doctor reads no environment
 variable itself. An unset stamp is the word ``missing``.
+
+Stale claims are listed beside the expired claims: claims with no lease stamp whose claim
+event is older than ``lease.STALE_CLAIM_SECONDS`` (7 days), each with a
+release command doctor prints and never runs. Before it reports the search
+index, doctor refreshes it as ``search`` does; when that cannot write (an
+unwritable index directory), it reports the state it reads and keeps its
+exit code and JSON shape.
 """
 from __future__ import annotations
 
 import os
 import sqlite3
+import stat
 from pathlib import Path
 
 from ledger import lease, search
@@ -29,6 +37,7 @@ from ledger.dbfile import UnsafeDatabaseFile
 from ledger.export import read_watermark, resolve_export_dir
 from ledger.paths import resolve_db_path
 from ledger.store import (
+    LedgerError,
     _connect_readonly,
     _recorded_versions,
     _refuse_unknown_versions,
@@ -42,6 +51,8 @@ from ledger.verbs import (
     Result,
     Verb,
     actor_kwargs,
+    invocation_prefix,
+    quote_command_arg,
 )
 
 
@@ -225,6 +236,92 @@ def _expired_line(c: dict) -> str:
     )
 
 
+def _refresh_search(resolved: Path, ctx: Context) -> None:
+    """Bring the search index up to date before it is reported, as ``search`` does.
+
+    Only when the index is not current, a rebuild would not refuse (the
+    severity is not ``warn``) and the index path is absent or a regular file;
+    anything else is reported as found. A refresh that cannot write (an
+    unwritable index directory raises ``OSError``) is not a doctor failure:
+    the exit code and the JSON shape stay as they are, and doctor reports the
+    state it then reads.
+    """
+    try:
+        found = search.index_status(resolved, ctx.search_fallback_root)
+    except Exception:  # _search_status reports it as unknown
+        return
+    if found.get("status") == "current" or found.get("severity") == "warn":
+        return
+    try:
+        present = os.lstat(search.search_db_path(resolved))
+    except FileNotFoundError:
+        present = None
+    except OSError:
+        return
+    if present is not None and not stat.S_ISREG(present.st_mode):
+        return
+    try:
+        search.refresh_index(resolved, ctx.search_fallback_root)
+    except OSError:
+        return
+    except (sqlite3.Error, search.SearchError, LedgerError):
+        # LedgerError: a newer schema committed after doctor's version check;
+        # doctor reports the snapshot that check passed on.
+        return
+
+
+def _release_command(prefix: str, item_id: str, revision: int) -> str:
+    """The command that releases a stale claim; doctor prints it, never runs it.
+
+    ``prefix`` always names the database doctor opened (``--db``), so the
+    command never falls back to another ``LEDGER_DB`` and releases an item
+    in an unrelated database. ``--expect-revision`` makes it refuse once the
+    item has moved on since doctor read it.
+    """
+    return (
+        f"{prefix} state --status open --expect-revision {revision} -- "
+        f"{quote_command_arg(item_id)}"
+    )
+
+
+def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
+    """Stamp-less claims past ``lease.STALE_CLAIM_SECONDS``, disjoint from
+    ``expired``, each with its release command; any failure reads as
+    ``unknown``, never an error."""
+    try:
+        conn = _connect_readonly(resolved)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("BEGIN")
+            listed = {c["item_id"] for c in expired.get("items") or []}
+            prefix = invocation_prefix(ctx.program, str(resolved), True)
+            items = []
+            for row in lease.stale_claims(conn):
+                if row["item_id"] in listed:
+                    continue
+                revision = conn.execute(
+                    "SELECT MAX(id) FROM events WHERE item_id = ?", (row["item_id"],)
+                ).fetchone()[0]
+                row["release_command"] = _release_command(prefix, row["item_id"], revision)
+                items.append(row)
+            return {"status": "ok", "items": items}
+        finally:
+            if conn.in_transaction:
+                conn.execute("ROLLBACK")
+            conn.close()
+    except UnsafeDatabaseFile:
+        raise
+    except Exception as exc:  # an unmigrated or unreadable file is not a doctor failure
+        return {"status": "unknown", "items": [], "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _stale_line(c: dict) -> str:
+    return (
+        f"stale claim: {c['item_id']}\tholder={c['holder']}\tage={c['age_seconds']}s"
+        f"\trelease: {c['release_command']}\n"
+    )
+
+
 def _counts(conn: sqlite3.Connection, sql: str) -> dict[str, int]:
     out: dict[str, int] = {}
     for key, n in conn.execute(sql):
@@ -296,15 +393,18 @@ def run(args, ctx: Context) -> Result:
             exit_code=EXIT_NOT_FOUND,
         )
     version = _schema_version(resolved)
+    _refresh_search(resolved, ctx)
     found = _search_status(resolved, ctx)
     claims = _expired_claims(resolved)
     stamps = _stamps(ctx)
+    stale = _stale_claims(resolved, ctx, claims)
     data = {
         "path": str(resolved),
         "schema_version": version,
         "search": found,
         "stamps": stamps,
         "expired_claims": claims,
+        "stale_claims": stale,
         "summary": _summary(resolved),
     }
     return Result(
@@ -314,7 +414,8 @@ def run(args, ctx: Context) -> Result:
             f"search: {_search_line(found)}\n"
         )
         + _stamp_lines(stamps)
-        + "".join(_expired_line(c) for c in claims["items"]),
+        + "".join(_expired_line(c) for c in claims["items"])
+        + "".join(_stale_line(c) for c in stale["items"]),
     )
 
 
