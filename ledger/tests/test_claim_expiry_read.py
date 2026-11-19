@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import sqlite3
 import stat
 from datetime import timedelta
 from pathlib import Path
@@ -417,3 +418,103 @@ def test_doctor_in_an_unwritable_directory_keeps_exit_code_and_json_shape(
     assert found["status"] == "behind"  # the state doctor can read
     assert found["severity"] == "info"
     assert "1 new event will be indexed on the next search" in text_out
+
+
+# --- 6. doctor's refresh never replaces the database or a non-regular path ---
+
+
+def _event_hashes(path) -> list[tuple[int, str]]:
+    """Every event's id and hash, read without changing the database."""
+    try:
+        with store.open_ledger_readonly(path) as lg:
+            return [(event.id, event.hash) for event in lg.events()]
+    except (store.LedgerError, sqlite3.Error) as exc:
+        pytest.fail(f"the ledger at {path} no longer reads: {type(exc).__name__}: {exc}")
+
+
+def test_doctor_on_a_ledger_named_search_db_keeps_its_events(
+    tmp_path, db, monkeypatch
+) -> None:
+    # The index path of a ledger named search.db is the ledger itself.
+    code, normal, err = _doctor(monkeypatch, db)
+    assert code == 0, err
+    named = tmp_path / "named" / search.SEARCH_DB_NAME
+    named.parent.mkdir()
+    seed(monkeypatch, str(named), "it-1")
+    before = _event_hashes(named)
+    assert len(before) == 1
+    assert search.search_db_path(named) == resolve_db_path(named)
+    code, body, err = _doctor(monkeypatch, str(named))
+    assert code == 0, err
+    assert _event_hashes(named) == before, "doctor changed the ledger's events"
+    assert sorted(p.name for p in named.parent.iterdir() if p.name.endswith(".partial")) == []
+    # The same JSON parts as a doctor on a ledger with its own index path; the
+    # search part is the state index_status reads.
+    found = body["data"].pop("search")
+    normal["data"].pop("search")
+    assert _shape(body["data"]) == _shape(normal["data"])
+    assert found == search.index_status(named)
+
+
+def test_doctor_on_a_ledger_named_search_db_in_another_case_keeps_its_events(
+    tmp_path, monkeypatch
+) -> None:
+    # On a case-insensitive file system (the macOS default) the index path
+    # names this ledger under another spelling: the real paths differ and the
+    # inode is the same. On a case-sensitive one the index is another file,
+    # and the events survive either way.
+    named = tmp_path / search.SEARCH_DB_NAME.upper()
+    seed(monkeypatch, str(named), "it-1")
+    before = _event_hashes(named)
+    assert len(before) == 1
+    code, body, err = _doctor(monkeypatch, str(named))
+    assert code == 0, err
+    assert _event_hashes(named) == before, "doctor changed the ledger's events"
+    assert body["data"]["search"] == search.index_status(named)
+
+
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_doctor_leaves_a_non_regular_index_path_alone(
+    tmp_path, db, monkeypatch, kind
+) -> None:
+    index = Path(db).parent / search.SEARCH_DB_NAME
+    target = tmp_path / "elsewhere.txt"
+    if kind == "symlink":
+        target.write_text("not an index\n")
+        index.symlink_to(target)
+    else:
+        os.mkfifo(index)
+    before = os.lstat(index)
+    code, body, err = _doctor(monkeypatch, db)
+    assert code == 0, err
+    after = os.lstat(index)
+    assert (after.st_ino, stat.S_IFMT(after.st_mode)) == (
+        before.st_ino,
+        stat.S_IFMT(before.st_mode),
+    ), f"doctor replaced the {kind} at the index path"
+    if kind == "symlink":
+        assert os.readlink(index) == str(target)
+        assert target.read_text() == "not an index\n"
+    found = body["data"]["search"]
+    assert found == search.index_status(db)  # the state doctor reads
+    assert found["status"] == "missing"
+
+
+def test_doctor_on_a_database_that_needs_migrations_reports_search_missing(
+    tmp_path, monkeypatch
+) -> None:
+    # The first doctor after an upgrade: the newest migration is pending and
+    # there is no index yet, so a refresh cannot read the ledger.
+    path = tmp_path / "older.db"
+    migrations = store.load_migrations()
+    conn, _proof = store.connect(path)
+    try:
+        store.migrate(conn, migrations[:-1])
+    finally:
+        conn.close()
+    code, body, err = _doctor(monkeypatch, str(path))
+    assert code == 0, (body, err)
+    assert body["data"]["schema_version"] == migrations[-2].version
+    assert body["data"]["search"]["status"] == "missing"
+    assert not (tmp_path / search.SEARCH_DB_NAME).exists()
+    assert "\nsearch: missing" in text(monkeypatch, str(path), "doctor")

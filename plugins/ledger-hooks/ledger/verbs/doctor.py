@@ -236,15 +236,41 @@ def _expired_line(c: dict) -> str:
     )
 
 
+def _another_file(resolved: Path, index: Path, present: os.stat_result | None) -> bool:
+    """Whether the index path is provably a different file from the database.
+
+    Their resolved real paths must differ and, when something is at the index
+    path (``present``, its ``lstat``), so must its device and inode: on a
+    case-insensitive file system a ledger named ``SEARCH.DB`` has another real
+    path than its index path and the same inode. A comparison that cannot be
+    made reads as the same file, so the refresh is skipped.
+    """
+    try:
+        if os.path.realpath(index) == os.path.realpath(resolved, strict=True):
+            return False
+        database = os.stat(resolved)
+    except (OSError, ValueError, RuntimeError):
+        return False
+    if present is not None and (present.st_dev, present.st_ino) == (
+        database.st_dev,
+        database.st_ino,
+    ):
+        return False
+    return True
+
+
 def _refresh_search(resolved: Path, ctx: Context) -> None:
     """Bring the search index up to date before it is reported, as ``search`` does.
 
     Only when the index is not current, a rebuild would not refuse (the
-    severity is not ``warn``) and the index path is absent or a regular file;
-    anything else is reported as found. A refresh that cannot write (an
-    unwritable index directory raises ``OSError``) is not a doctor failure:
-    the exit code and the JSON shape stay as they are, and doctor reports the
-    state it then reads.
+    severity is not ``warn``), the index path is absent or a regular file, and
+    it is a different file from the database (``_another_file``); anything
+    else is reported as found. A refresh replaces the file at the index path,
+    so a ledger named ``search.db`` beside its own index path would otherwise
+    be replaced by the index. A refresh that cannot write (an unwritable index
+    directory raises ``OSError``) is not a doctor failure: the exit code and
+    the JSON shape stay as they are, and doctor reports the state it then
+    reads.
     """
     try:
         found = search.index_status(resolved, ctx.search_fallback_root)
@@ -252,21 +278,25 @@ def _refresh_search(resolved: Path, ctx: Context) -> None:
         return
     if found.get("status") == "current" or found.get("severity") == "warn":
         return
+    index = search.search_db_path(resolved)
     try:
-        present = os.lstat(search.search_db_path(resolved))
+        present = os.lstat(index)
     except FileNotFoundError:
         present = None
     except OSError:
         return
     if present is not None and not stat.S_ISREG(present.st_mode):
         return
+    if not _another_file(resolved, index, present):
+        return
     try:
         search.refresh_index(resolved, ctx.search_fallback_root)
     except OSError:
         return
     except (sqlite3.Error, search.SearchError, LedgerError):
-        # LedgerError: a newer schema committed after doctor's version check;
-        # doctor reports the snapshot that check passed on.
+        # LedgerError: a newer schema committed after doctor's version check,
+        # or a database that still needs migrations and has no index yet (the
+        # first doctor after an upgrade); doctor reports the state it reads.
         return
 
 
