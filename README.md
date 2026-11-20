@@ -621,16 +621,16 @@ This is step 3 of the [install](#install), after the command and the
 environment, because the hooks need both. Install it from Claude Code:
 
 ```sh
-claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.4.0
+claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.5.0
 claude plugin install ledger-hooks@ledger-plugins
 ```
 
-The `#v0.4.0` suffix pins the plugin to that release. An add without the
+The `#v0.5.0` suffix pins the plugin to that release. An add without the
 suffix follows the repository's main branch, which can carry plugin changes
 that no release has shipped. After a later release, put that release's tag
-where `v0.4.0` is.
+where `v0.5.0` is.
 
-With v0.4.0, the version pinned above, the plugin's `bin/ledger` puts
+With v0.5.0, the version pinned above, the plugin's `bin/ledger` puts
 `ledger` on the PATH of a Claude Code session that has the plugin enabled.
 That command is for the session only; in a terminal, install with pipx as in
 [step 1](#1-install-the-ledger-command). Each hook runs the plugin's own

@@ -1,6 +1,6 @@
 {
   "name": "ledger-hooks",
-  "version": "0.4.1-dev",
+  "version": "0.5.0",
   "description": "Prints the ledger's session brief at session start, records the session's model at start and on every model switch, and records submitted prompts and question-picker answers through the ledger CLI; silent unless a ledger is configured.",
   "author": {
     "name": "smithadifd"
