@@ -276,16 +276,16 @@ your prompts and question-picker answers, install the ledger's plugin from
 Claude Code:
 
 ```sh
-claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.4.0
+claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.4.1
 claude plugin install ledger-hooks@ledger-plugins
 ```
 
-The `#v0.4.0` suffix pins the plugin to that release. An add without the
+The `#v0.4.1` suffix pins the plugin to that release. An add without the
 suffix follows the repository's main branch, which can carry plugin changes
 that no release has shipped. After a later release, put that release's tag
-where `v0.4.0` is.
+where `v0.4.1` is.
 
-With v0.4.0, the version this page pins, the hooks and the `ledger` command
+With v0.4.1, the version this page pins, the hooks and the `ledger` command
 they run read `LEDGER_DB` and `LEDGER_OPERATOR` from the environment Claude
 Code starts with: the `env` block of its settings (step 5), which also carries
 `LEDGER_HARNESS=claude-code`. The session-start hook backs that up: it stamps
