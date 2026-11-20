@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.4.1 — 2026-11-19
+## 0.5.0 — 2026-11-19
 
 An expired claim reads `open` in `query`, `ready` and `card`, `doctor` lists stale claims, refreshes the search index and prints the actor stamps a write would carry, every ledger open refuses a search index and the index writer never replaces a file that appears at its path, a refused write says its limit and the forms it allows, `resume --hook-env` and the plugin's hooks replace an inherited `cli` harness, and the install and upgrade pages are corrected.
 
@@ -12,7 +12,7 @@ An expired claim reads `open` in `query`, `ready` and `card`, `doctor` lists sta
 - **Docs: an upgrade route for a ledger that is not on `PATH`, `claim-system` on a repeat run, and the settings file order.** `docs/upgrading.md` 3.1 gains the route for a vendored or wrapped copy (a virtual environment on a Python that passes the 1.1 probe, the tag installed into it, a link onto `PATH`, and every caller of the old copy listed before the new one writes, because the old copy cannot open a database the new one has migrated); section 3 says `claude plugin install` rewrites `~/.claude/settings.json`, so install the plugins before editing it or re-read it first. `docs/start-here.md` step 7, the README verb table, `docs/cli.md` and the `claim-system` help text no longer say a repeat run "changes nothing": it writes no event, but it opens the database for writing and applies pending migrations, after which an older copy refuses the file.
 - **An expired claim reads `open` in `query`, `ready` and `card`; `doctor` lists stale claims and refreshes the search index.** A claim whose lease has expired now shows `open` (before, `ready` listed it as `claimed`); `--json` keeps `recorded_status` (`claimed`), `expired_holder` and `expires_at`, and `query --status` filters on the status shown. The ledger still records the claim: guards and write verbs read the recorded status, `claim` takes it over and records `prior_holder`, and no read writes an event. A claim with no lease stamp never reads `open`; once its claim event is older than 7 days `doctor` lists it under `stale_claims` (text: `stale claim:`) with a release command naming the database and `--expect-revision`, which doctor prints and never runs, and `query` rows carry `stale_claim` and `claim_age_seconds`. `doctor` brings the search index up to date before it reports it, so after a write it reports `current`; where it cannot write the index it reports the state it reads with the same exit code and JSON shape. No schema or migration change.
 
-Upgrade with `@v0.4.1`.
+Upgrade with `@v0.5.0`.
 
 ## 0.4.0 — 2026-11-16
 
