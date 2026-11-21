@@ -219,7 +219,9 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   ends in `-wal`, `-shm` or `-journal`. Check the destinations your scripts
   give `backup --to` and `restore`. A backup destination may hold a `FILE.partial` left by an older
   version, or a `.FILE.<random>.partial` left by a killed backup; either is safe
-  to delete when no backup is running.
+  to delete when no backup is running. A backup killed after the temp name
+  changed leaves `.ledger-backup.FILE.<random>.partial` instead, safe to delete
+  the same way.
 - **Library callers (0.3.0).** `ledger.dbfile.checked_connect` returns
   `(conn, mode, proof)` and `ledger.store.connect` returns `(conn, proof)`;
   `Ledger(conn, path, proof)` takes the proof. A caller that unpacked two values

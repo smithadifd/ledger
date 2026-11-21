@@ -498,7 +498,7 @@ def test_backup_refuses_a_newer_schema_and_leaves_no_target(newer: Path, tmp_pat
     _assert_names_both(str(exc.value), NEWER, HIGHEST)
 
     assert not dest.exists()
-    assert not list(dest.parent.glob(f".{dest.name}.*.partial"))
+    assert not list(dest.parent.glob(f".ledger-backup.{dest.name}.*.partial"))
     assert not dest.parent.exists()
     assert _sha256(newer) == before_sha
     assert sorted(p.name for p in newer.parent.iterdir()) == [newer.name]
@@ -579,4 +579,4 @@ def test_backup_refuses_a_newer_migration_committed_after_its_version_check(
     assert calls == [1]
     assert [v for v, _ in _versions(current)][-1] == NEWER
     assert not dest.exists()
-    assert not list(dest.parent.glob(f".{dest.name}.*.partial"))
+    assert not list(dest.parent.glob(f".ledger-backup.{dest.name}.*.partial"))

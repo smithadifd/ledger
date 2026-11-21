@@ -442,7 +442,9 @@ or `--max-hours` hours (24) are waiting, for a scheduled alert.
 
 **Backup** (`ledger/backup.py`). `ledger backup --to FILE` uses SQLite's
 online backup API (never a file copy of a live database), writes the copy at a
-unique `.FILE.<random>.partial` name beside FILE (readable by its owner only),
+unique `.ledger-backup.FILE.<random>.partial` name beside FILE (readable by its
+owner only; the fixed `.ledger-backup.` start means no FILE name can give it a
+name the search-index cleanup matches),
 runs `PRAGMA integrity_check`, and renames it to FILE only when the check passes
 and the source path still names the file the copy was read from. FILE must not
 exist, before the copy or when it is published (a hard link, which refuses
@@ -454,7 +456,8 @@ FILE each write their own copy; without `--overwrite` the one that renames
 last is refused, and with it the last one wins. A
 backup killed mid-run (by a signal or a power loss) leaves its hidden partial
 file behind, and no later backup removes it; delete it by hand when no backup
-is running.
+is running. A `FILE.partial` or `.FILE.<random>.partial` left by an older
+version is safe to delete the same way.
 
 Neither the export nor the backup holds a by-path document's bytes, only its
 stored path, sha256 and size: the bytes live only under the database's

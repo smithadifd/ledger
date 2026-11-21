@@ -2,7 +2,7 @@
 
 Uses sqlite3's backup API (or, as a documented alternative, VACUUM INTO).
 Never copies the live database file. The copy is written at a unique
-``.<name>.*.partial`` name beside the destination, checked with ``PRAGMA
+``.ledger-backup.<name>.*.partial`` name beside the destination, checked with ``PRAGMA
 integrity_check``, and renamed only when the check returns ``ok`` and the
 source path still names the file the copy was read from.
 
@@ -36,6 +36,15 @@ from .store import (
 )
 
 BACKUP_PAGES_PER_STEP = 64
+
+# Every backup temp starts with this fixed prefix and ends with this suffix.
+# The search-index cleanup removes files named ``.search.db.<id>.partial``,
+# so a temp named from the destination alone (``.<name>.<id>.partial``)
+# would match it for a destination named ``search.db`` or
+# ``search.db.<anything>``. A name that starts with this prefix never
+# starts with ``.search.db.``, whatever the destination is called.
+BACKUP_TEMP_PREFIX = ".ledger-backup."
+BACKUP_TEMP_SUFFIX = ".partial"
 
 
 @dataclass(frozen=True)
@@ -282,9 +291,12 @@ def backup_db(
     _refuse_newer_schema_before_connect(source_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
     # A unique partial name, so two backups to one destination never unlink
-    # or write each other's copy.
+    # or write each other's copy, and a fixed prefix, so the name can never
+    # match the search-index cleanup's pattern whatever the destination is.
     handle, partial_name = tempfile.mkstemp(
-        prefix=f".{dest_path.name}.", suffix=".partial", dir=dest_path.parent
+        prefix=f"{BACKUP_TEMP_PREFIX}{dest_path.name}.",
+        suffix=BACKUP_TEMP_SUFFIX,
+        dir=dest_path.parent,
     )
     partial = Path(partial_name)
     try:
