@@ -40,8 +40,19 @@ revision print the same bytes. ``ledger grants --check GRANT_ID`` exits 0 when
 the grant is STANDING and otherwise refuses with exit 3 and one of the codes
 ``grant_withdrawn``, ``grant_unverified`` or ``grant_unknown``.
 
-A read verb: it never appends, so it needs no ``LEDGER_HARNESS``. It reports;
-no gate reads it.
+A read verb: it never appends, so it needs no ``LEDGER_HARNESS``.
+
+Gates. A gate decides a grant through one library call,
+``ledger.verbs.grants.standing(lg, grant_id)``, and a shell caller through
+``ledger grants --check GRANT_ID``; both run ``read_grants`` and
+``check_grant``, so they agree on every grant. ``standing`` returns the
+``Grant`` only when that exact id is STANDING and otherwise raises the
+``CliError`` ``--check`` refuses with; it has no other return. It reads inside
+the caller's transaction when there is one (so a gate may call it inside
+``Ledger.transaction()`` before its own append), else in a read transaction of
+its own, and it never writes. The readers it is for are the merge command, the
+review-run round check, apply-reviewed-patch and design dispatch; each moves
+to it in its own change.
 """
 from __future__ import annotations
 
@@ -197,9 +208,16 @@ def _grant(lg: Ledger, grant_id: str, event_id: int, payload: Mapping[str, Any])
 
 
 def read_grants(lg: Ledger) -> tuple[int, list[Grant]]:
-    """``(ledger_revision, grants)`` from one read snapshot, sorted by grant id."""
+    """``(ledger_revision, grants)`` from one read snapshot, sorted by grant id.
+
+    Reads inside the caller's transaction when there is one, and leaves it
+    open with its pending writes; else in a read transaction of its own,
+    which it rolls back.
+    """
     conn = lg._conn
-    conn.execute("BEGIN")
+    own = not conn.in_transaction
+    if own:
+        conn.execute("BEGIN")
     try:
         revision = int(conn.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0])
         newest: dict[str, tuple[int, dict[str, Any]]] = {}
@@ -217,7 +235,7 @@ def read_grants(lg: Ledger) -> tuple[int, list[Grant]]:
             for grant_id, (event_id, payload) in sorted(newest.items())
         ]
     finally:
-        if conn.in_transaction:
+        if own and conn.in_transaction:
             conn.execute("ROLLBACK")
     return revision, grants
 
@@ -254,6 +272,24 @@ def check_grant(grants: list[Grant], grant_id: str) -> Grant:
     )
 
 
+def standing(lg: Ledger, grant_id: Any) -> Grant:
+    """The ``Grant`` for exactly ``grant_id`` when it is STANDING.
+
+    Otherwise raises ``CliError`` (exit code ``EXIT_REFUSED``) with code
+    ``grant_unknown``, ``grant_withdrawn`` or ``grant_unverified`` and
+    ``check_grant``'s message. There is no return for a grant that is not
+    standing. The id is compared as an exact string: an id that is not a
+    ``str``, is empty, or carries none of the grant prefixes is
+    ``grant_unknown``. The same functions decide ``ledger grants --check``.
+    Safe inside the caller's write transaction (see ``read_grants``).
+    """
+    if type(grant_id) is not str or grant_kind(grant_id) is None:
+        # No stored grant can match; check_grant([]) raises grant_unknown.
+        check_grant([], grant_id)
+    _revision, grants = read_grants(lg)
+    return check_grant(grants, grant_id)
+
+
 def _cell(value: Any) -> str:
     return " ".join(str(value).split()).replace("|", "\\|")
 
@@ -285,11 +321,13 @@ def add_arguments(parser) -> None:
 def run(args, ctx: Context) -> Result:
     lg = open_db(ctx, write=False)
     try:
-        revision, grants = read_grants(lg)
+        if args.check is not None:
+            grant = standing(lg, args.check)
+        else:
+            revision, grants = read_grants(lg)
     finally:
         lg.close()
     if args.check is not None:
-        grant = check_grant(grants, args.check)
         return Result(
             data=grant.row(),
             text=(
