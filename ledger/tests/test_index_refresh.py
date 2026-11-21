@@ -407,6 +407,21 @@ def test_the_running_rebuild_keeps_its_own_partial_until_it_is_published(
     assert not (db.parent / seen["own_name"]).exists()
 
 
+def test_remove_stale_index_partials_keeps_the_named_writer_temp_even_when_it_is_old(
+    db,
+):
+    keep = _stale_index_partial(db.parent, "keep1")
+    leftover = _stale_index_partial(db.parent, "stale9")
+    ledger_before = db.read_bytes()
+    search_mod._remove_stale_index_partials(
+        db.parent / "search.db", keep=keep, older_than_ns=2
+    )
+    assert keep.is_file()
+    assert keep.read_bytes() == b"stale-index"
+    assert not leftover.exists()
+    assert db.read_bytes() == ledger_before
+
+
 def test_a_partial_removal_error_is_one_stderr_line_and_keeps_the_new_index(
     db, monkeypatch
 ):
