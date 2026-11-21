@@ -133,6 +133,9 @@ OUTSIDE_ROOT = "doc_outside_root"
 DOC_MISMATCH = "doc_mismatch"
 DOC_MISSING = "doc_missing"
 DOC_REFUSED = "doc_refused"
+# attach_inline_in_transaction: a matching document is on the item but its
+# bytes are not stored inline.
+DOC_NOT_INLINE = "doc_not_inline"
 # FILE exactly this reads standard input; a file of that name is ``./-``.
 STDIN = "-"
 STATUS_OK = "ok"
@@ -775,8 +778,11 @@ def attach_inline_in_transaction(
     are scanned for credential shapes before the duplicate check and before
     any write, and a hit is refused ``doc_credential_shape`` (this form has
     no override); and a document with the same item, role and sha256 already
-    on the item, whatever its storage, is returned with False and nothing is
-    written. ``data`` that is not bytes, or over ``DOC_INLINE_LIMIT``, is
+    on the item is returned with False and nothing is written, but only when
+    its bytes are stored inline and hash to that sha256. One stored by path
+    (whose file can be missing now or later) is refused ``doc_not_inline``
+    and nothing is written, so a caller never commits against a digest
+    whose bytes the ledger does not hold. ``data`` that is not bytes, or over ``DOC_INLINE_LIMIT``, is
     refused ``doc_too_large`` (the bytes are stored inline only); an item that
     does not exist is ``not_found``. Called outside a transaction it raises
     ``LedgerError`` before anything is read. Returns ``(event, created)``.
@@ -804,6 +810,14 @@ def attach_inline_in_transaction(
         raise CliError(f"item not found: {item_id}", code="not_found", exit_code=EXIT_NOT_FOUND)
     for event in lg.events(item_id=item_id, kind=DOC_KIND):
         if event.payload.get("role") == role and event.payload.get("sha256") == sha256:
+            if _inline_status(event)[0] != STATUS_OK:
+                raise CliError(
+                    f"a {role} document with this sha256 is already on {item_id} "
+                    f"(event {event.id}) without its bytes stored inline; this form "
+                    "reuses inline documents only; nothing was written",
+                    code=DOC_NOT_INLINE,
+                    exit_code=EXIT_REFUSED,
+                )
             return event, False
     payload: dict[str, Any] = {
         "role": role,

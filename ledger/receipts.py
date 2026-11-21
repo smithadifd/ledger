@@ -19,7 +19,9 @@ receipts of that item; and appends the receipt. Any refusal or error leaves
 neither event. A ``review-receipt`` document alone is not a receipt: a
 reader goes from a receipt's ``doc_sha256`` to its document, never from a
 document to a receipt, so ``ledger doc add --role review-receipt`` writes no
-receipt, and this writer reuses such a document when its bytes match.
+receipt, and this writer reuses such a document when its bytes match and
+are stored inline; one added ``--by-path`` is refused ``doc_not_inline``,
+since its file can go missing while the receipt names its digest.
 
 ``write_grant_cite`` records that the past-cap review-round grant
 (``grant:review-round-past-cap``) was STANDING, through
@@ -36,7 +38,8 @@ with a code: ``bad_pr_target``, ``pr_item_missing``, ``pr_item_ambiguous``,
 ``receipt_carried_mismatch``, ``receipt_supersedes_required`` and
 ``receipt_supersedes_mismatch``. A payload that breaks its schema is the
 store's ``ValidationError``; the document step refuses ``doc_credential_shape``
-for a credential shape in the bytes.
+for a credential shape in the bytes and ``doc_not_inline`` for an identical
+document on the item stored by path.
 """
 from __future__ import annotations
 
@@ -301,8 +304,9 @@ def write_receipt(
     string in it, the item id and the attribution stamps. Then in ONE write
     transaction: the item is ``pr_item``'s for the payload's pull request
     (else ``receipt_item_mismatch`` or ``pr_item``'s refusal); the document is
-    attached (or an identical ``review-receipt`` document on the item is
-    reused) and ``doc_sha256`` is the digest the ledger computed for it; an
+    attached (or an identical inline ``review-receipt`` document on the item
+    is reused; one stored by path is ``doc_not_inline``) and ``doc_sha256``
+    is the digest the ledger computed for it; an
     exact retry (the same idempotency key) returns the stored event and
     writes nothing; otherwise ``prior_receipt``, ``carried_from`` and the
     supersedes chain are checked and the receipt is appended. A refusal or
