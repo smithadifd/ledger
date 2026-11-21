@@ -885,21 +885,29 @@ writer holds a shared lock on `.search.db.lock` beside the index (created
 empty with mode 0600, never removed) while its temp exists. After its own
 publish, the next refresh (this verb when the index is not current,
 `--rebuild`, `search`, or `doctor`) asks for an exclusive lock on that file
-without waiting; only when no writer is running does it remove each regular
-file whose name matches `.search.db.<id>.partial` exactly. A held lock, a
-lock file that is a symlink or cannot be opened, a name that only contains
-the pattern, a leftover of another file, a symlink or a directory leaves
-every file in place. A removal error is one line on stderr and does not
-fail the refresh or lose the new index. The ledger database, its backups and
-the lock file are not removed: a candidate that is the database's own file
-(same device and inode, so a hard link too) or whose name begins with the
-database's file name is skipped, even when the `--db` file is itself named
-like a partial, and one that cannot be compared with it is left in place.
-Files matching `.search.db.<id>.partial` beside the search index are the
-ledger's own temporaries and may be removed, so never name a backup or any
-other file that way.
-A writer from a version before the lock file
-takes no lock, so a refresh during an upgrade can remove that writer's temp.
+without waiting; only when no writer is running does it look at each file
+whose name matches `.search.db.<id>.partial` exactly. It removes one only
+when it positively identifies it as an index temp: a regular file with no
+`-journal`, `-wal` or `-shm` file beside it that is empty, or a SQLite file
+whose tables (read without creating any side file) are all ones the index
+writer creates, and that is still the same file with the same size just
+before the unlink. Anything else with that name, such as a copy made by
+`ledger backup --to`, another ledger, a file holding an `events` table or a
+view, a symlink, a directory, or a short, non-SQLite or unreadable file, is
+left byte for byte as it was, and every refresh prints one
+`search index cleanup skipped PATH: REASON` line on stderr for it until it
+is moved; the refresh still succeeds. A held lock, a lock file that is a
+symlink or cannot be opened, a name that only contains the pattern, or a
+leftover of another file leaves every file in place and prints nothing. A
+removal error is one line on stderr and does not fail the refresh or lose
+the new index. The ledger database and the lock file are never removed: a
+candidate that is the database's own file (same device and inode, so a hard
+link too) or whose name begins with the database's file name is skipped,
+even when the `--db` file is itself named like a partial, and one that
+cannot be compared with it is left in place. A killed rebuild whose temp has
+a `-journal` beside it is reported, not removed; check it and remove both by
+hand. A writer from a version before the lock file takes no lock, so a
+refresh during an upgrade can remove that writer's temp.
 
 **`search-miss --query Q --expected EVENT_OR_ITEM [--note T]`** Log a search
 that failed to surface something you later found another way. It appends one

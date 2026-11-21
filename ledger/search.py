@@ -90,20 +90,38 @@ and never removed or replaced) from before its temp is created until
 that temp is published or removed. After its own publish, and after it
 has released its shared lock, a refresh asks for an exclusive
 non-blocking flock on the lock file. Only when that is granted, so no
-writer is running, does it list the directory and remove each regular
-file whose name matches that pattern exactly. A refused lock, a lock
-file that is a symlink, is not a regular file or cannot be opened, a
-platform without fcntl, a listing or stat error, a symlink, a directory,
-or a name that only contains the pattern leaves every file in place. A
-removal error is one line on stderr and does not fail the refresh or
-lose the new index. A matching name is never the ledger database: a
-candidate that is the database's own file (same device and inode, so a
+writer is running, does it list the directory and look at each file
+whose name matches that pattern exactly. A refused lock, a lock file
+that is a symlink, is not a regular file or cannot be opened, a
+platform without fcntl, a listing error, or a name that only contains
+the pattern leaves every file in place and prints nothing. A candidate
+that is the ledger database's own file (same device and inode, so a
 hard link under another name too) or whose name begins with the
-database's file name is skipped, whatever the database is named, and a
-candidate that cannot be compared with the database is left in place.
-A writer from a version before the lock file takes
-no lock, so a refresh during an upgrade can remove that writer's temp;
-that writer's refresh then fails and the next refresh rebuilds.
+database's file name is skipped without a word, and when the database
+cannot be stat'ed nothing is removed.
+
+Every other candidate is removed only when it is positively identified
+as a disposable index temp: a regular file with no SQLite side file
+(``-journal``, ``-wal``, ``-shm``) beside it that is either empty, or
+starts with the 16-byte SQLite header and has a schema whose tables are
+all ones the writer creates (``_index_table_names``, read from
+``SCHEMA_SQL`` itself; an index or trigger on one of them is allowed, any
+other table, a view or anything else is not). The schema is read through
+a ``mode=ro&immutable=1`` connection, which takes no lock and creates no
+side file. Just before the unlink the candidate is checked again: still
+no side file, and the same device, inode and size. Anything else (a
+ledger, a ledger backup, a file holding an ``events`` table, a symlink, a
+directory, a short or non-SQLite file, a stat, read or SQLite error, a
+side file, a change) is left byte for byte as it was, with one
+``search index cleanup skipped PATH: REASON`` line on stderr on every
+refresh until it is moved. A removal error is one line on stderr too.
+None of these fails the refresh or loses the new index. A side file
+keeps a candidate because a WAL database's tables can sit in its
+``-wal`` file alone: a ledger just created and still open reads as an
+empty schema from its main file. A writer from a version before the
+lock file takes no lock, so a refresh during an upgrade can remove that
+writer's temp when no side file is beside it at that moment; that
+writer's refresh then fails and the next refresh rebuilds.
 
 ``index_status`` also gives a ``severity`` a reader can colour by: ``ok`` for
 ``current``; ``info`` for ``behind``, ``stale`` or ``missing``, which the next
@@ -1203,25 +1221,162 @@ def _is_index_partial_name(name: str) -> bool:
     return bool(name[len(prefix) : len(name) - len(suffix)])
 
 
+# The first 16 bytes of every SQLite database file.
+_SQLITE_HEADER = b"SQLite format 3\x00"
+# Files SQLite keeps beside a database while a connection is open, or after
+# a crash. A WAL database's tables can sit in its -wal file alone, so the
+# database's own bytes do not show what it holds.
+_SQLITE_SIDE_SUFFIXES = ("-journal", "-wal", "-shm")
+
+
+def _index_table_names() -> frozenset[str]:
+    """The table names the index writer creates, read from ``SCHEMA_SQL`` itself.
+
+    The writer's own statements run in a private in-memory database, so the
+    fts5 shadow tables are named as SQLite names them and the list is never
+    typed a second time.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        for statement in SCHEMA_SQL:
+            conn.execute(statement)
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        return frozenset(row[0] for row in rows)
+    finally:
+        conn.close()
+
+
+def _side_file_reason(path: Path) -> str | None:
+    """Why a SQLite side file beside ``path`` keeps it, or ``None`` when there is none.
+
+    A side file that cannot be checked for keeps it too.
+    """
+    for suffix in _SQLITE_SIDE_SUFFIXES:
+        side = path.with_name(path.name + suffix)
+        try:
+            os.lstat(side)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f"cannot check for {side.name} beside it: {exc}"
+        return f"{side.name} is beside it, so a connection is open or was cut off"
+    return None
+
+
+def _why_not_index_temp(path: Path, found: os.stat_result) -> str | None:
+    """Why ``path`` is not a disposable index temp, or ``None`` when it is one.
+
+    ``found`` is the candidate's ``lstat``, a regular file. It is one only
+    when no SQLite side file is beside it and either it is empty (``mkstemp``
+    made it and the writer stopped before SQLite wrote a page), or its first
+    16 bytes are the SQLite header and every row of its schema is a table
+    the writer creates, or an index or trigger on one. The schema is read
+    through a ``mode=ro&immutable=1`` connection, which takes no lock and
+    creates no side file. Any other answer, and any error on the way, is
+    the reason returned.
+    """
+    side = _side_file_reason(path)
+    if side is not None:
+        return side
+    if found.st_size == 0:
+        return None
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        return f"cannot open it: {exc}"
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (found.st_dev, found.st_ino):
+            return "it changed while it was being read"
+        head = b""
+        while len(head) < len(_SQLITE_HEADER):
+            chunk = os.read(fd, len(_SQLITE_HEADER) - len(head))
+            if not chunk:
+                break
+            head += chunk
+    except OSError as exc:
+        return f"cannot read it: {exc}"
+    finally:
+        _close_quietly(fd)
+    if len(head) < len(_SQLITE_HEADER):
+        return f"short read: {len(head)} of {len(_SQLITE_HEADER)} header bytes"
+    if head != _SQLITE_HEADER:
+        return "not a SQLite file"
+    uri = Path(os.path.abspath(path)).as_uri() + "?mode=ro&immutable=1"
+    try:
+        allowed = _index_table_names()
+        conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+        try:
+            rows = conn.execute("SELECT type, name, tbl_name FROM sqlite_master").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return f"cannot read its SQLite schema: {exc}"
+    for kind, name, table in rows:
+        if kind == "table":
+            if name not in allowed:
+                return f"it holds table {name}, which the index writer never creates"
+        elif kind in ("index", "trigger"):
+            if table not in allowed:
+                return f"it holds {kind} {name} on {table}, which the index writer never creates"
+        else:
+            return f"it holds {kind} {name}, which the index writer never creates"
+    return None
+
+
+def _changed_before_unlink(path: Path, found: os.stat_result) -> str | None:
+    """Why ``path`` must stay after all, checked just before the unlink.
+
+    A SQLite side file beside it, or a device, inode or size that differs
+    from the ``lstat`` the identification read, keeps it.
+    """
+    side = _side_file_reason(path)
+    if side is not None:
+        return side
+    try:
+        now = os.lstat(path)
+    except OSError as exc:
+        return f"cannot stat it again before removal: {exc}"
+    if (now.st_dev, now.st_ino, now.st_size) != (found.st_dev, found.st_ino, found.st_size):
+        return "it changed after it was identified"
+    return None
+
+
+def _one_stderr_line(line: str) -> None:
+    print(" ".join(line.splitlines()), file=sys.stderr)
+
+
 def _remove_stale_index_partials(index: Path, database: Path) -> None:
     """Remove leftover writer temps beside ``index`` when no writer is running.
 
     Called after this writer's own publish and after its ``LOCK_SH``
     descriptor is closed. It opens a new descriptor on the index lock file
     and asks for ``LOCK_EX | LOCK_NB``. Only when that is granted does it
-    list the directory and unlink each regular file (by ``lstat``) whose
-    name matches ``_is_index_partial_name``, then close the descriptor. A
-    refused lock, a lock file it cannot open, no fcntl, a listing error or
-    a stat error removes nothing and prints nothing. A removal error is one
-    line on stderr and is not raised.
+    list the directory and look at each name that matches
+    ``_is_index_partial_name``, then close the descriptor. A refused lock,
+    a lock file it cannot open, no fcntl or a listing error removes nothing
+    and prints nothing.
 
     ``database`` is the resolved ledger database, which lives in the same
     directory and may itself carry a name that matches the pattern. A
     candidate whose name begins with the database's file name (its side
     files and copies named after it), or that is the database's own file
     (same device and inode, so a hard link under any other name too), is
-    skipped. When the database cannot be stat'ed, no candidate can be
-    compared with it, so nothing is removed.
+    skipped without a word. When the database cannot be stat'ed, no
+    candidate can be compared with it, so nothing is removed.
+
+    Every other candidate is unlinked only when ``_why_not_index_temp``
+    positively identifies it as a disposable index temp and
+    ``_changed_before_unlink`` finds it unchanged. A stat error, a file that
+    is not regular, and every reason either returns leave the file as it
+    was and print one ``search index cleanup skipped PATH: REASON`` line on
+    stderr. A removal error is one line on stderr. Nothing here is raised.
     """
     fd = _open_index_lock(index)
     if fd is None:
@@ -1249,17 +1404,24 @@ def _remove_stale_index_partials(index: Path, database: Path) -> None:
             path = directory / name
             try:
                 found = os.lstat(path)
-            except OSError:
+            except OSError as exc:
+                _one_stderr_line(f"search index cleanup skipped {path}: cannot stat it: {exc}")
                 continue
             if not stat.S_ISREG(found.st_mode):
+                _one_stderr_line(f"search index cleanup skipped {path}: not a regular file")
                 continue
             if (found.st_dev, found.st_ino) == ledger_identity:
+                continue
+            reason = _why_not_index_temp(path, found)
+            if reason is None:
+                reason = _changed_before_unlink(path, found)
+            if reason is not None:
+                _one_stderr_line(f"search index cleanup skipped {path}: {reason}")
                 continue
             try:
                 os.unlink(path)
             except OSError as exc:
-                line = f"cannot remove leftover search index partial {path}: {exc}"
-                print(line.replace("\n", " "), file=sys.stderr)
+                _one_stderr_line(f"cannot remove leftover search index partial {path}: {exc}")
     finally:
         _close_quietly(fd)
 

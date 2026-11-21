@@ -395,12 +395,25 @@ def test_an_index_without_roots_says_only_the_ledger_is_indexed_and_exits_0(db, 
 # --- leftover writer temps ---------------------------------------------------
 
 
-def _stale_index_partial(
-    directory: Path, middle: str, payload: bytes = b"stale-index"
-) -> Path:
-    """A regular file whose name matches the index writer's temp pattern."""
+def _write_index_schema(path: Path, statements) -> None:
+    """A SQLite file at ``path`` built by running ``statements`` and closing."""
+    conn = sqlite3.connect(path)
+    try:
+        for statement in statements:
+            conn.execute(statement)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _stale_index_partial(directory: Path, middle: str) -> Path:
+    """What a killed rebuild leaves, under the index writer's temp name.
+
+    A SQLite file holding the tables the writer's own schema statements
+    (``search_mod.SCHEMA_SQL``) create, with no side file beside it.
+    """
     path = directory / f".search.db.{middle}.partial"
-    path.write_bytes(payload)
+    _write_index_schema(path, search_mod.SCHEMA_SQL)
     os.utime(path, ns=(1, 1))
     return path
 
@@ -437,6 +450,7 @@ def test_a_planted_stale_index_partial_is_removed_on_the_next_append_refresh(
     other_dir = db.parent / "other"
     other_dir.mkdir()
     decoy_elsewhere = _stale_index_partial(other_dir, "stale1")
+    elsewhere_bytes = decoy_elsewhere.read_bytes()
     link = db.parent / ".search.db.link1.partial"
     link.symlink_to(leftover)
     named_dir = db.parent / ".search.db.dir1.partial"
@@ -456,7 +470,7 @@ def test_a_planted_stale_index_partial_is_removed_on_the_next_append_refresh(
     assert decoy_backup.read_bytes() == b"backup-temp"
     assert decoy_contains.read_bytes() == b"contains-pattern"
     assert decoy_no_dot.read_bytes() == b"no-dot"
-    assert decoy_elsewhere.read_bytes() == b"stale-index"
+    assert decoy_elsewhere.read_bytes() == elsewhere_bytes
     assert link.is_symlink()
     assert named_dir.is_dir()
     assert empty_middle.read_bytes() == b"empty-middle"
@@ -491,6 +505,7 @@ def test_a_partial_removal_error_is_one_stderr_line_and_keeps_the_new_index(
     db, monkeypatch
 ):
     leftover = _stale_index_partial(db.parent, "stale5")
+    planted = leftover.read_bytes()
     real_unlink = os.unlink
 
     def flaky(path, *args, **kwargs):
@@ -502,7 +517,7 @@ def test_a_partial_removal_error_is_one_stderr_line_and_keeps_the_new_index(
     code, out, err = invoke(monkeypatch, ["--db", str(db), "index"])
     assert code == EXIT_OK, err
     assert leftover.is_file()
-    assert leftover.read_bytes() == b"stale-index"
+    assert leftover.read_bytes() == planted
     lines = [ln for ln in err.splitlines() if ln]
     assert len(lines) == 1, err
     assert lines[0].startswith("cannot remove leftover search index partial ")
@@ -560,12 +575,13 @@ def test_search_refresh_removes_a_planted_stale_index_partial(db, monkeypatch):
 
 def test_cleanup_leaves_a_partial_when_fcntl_is_unavailable(db, monkeypatch):
     leftover = _stale_index_partial(db.parent, "nofcntl")
+    planted = leftover.read_bytes()
     monkeypatch.setattr(search_mod, "fcntl", None)
     ledger_before = db.read_bytes()
     code, body = run_json(monkeypatch, db, "index")
     assert code == EXIT_OK, body
     assert leftover.is_file()
-    assert leftover.read_bytes() == b"stale-index"
+    assert leftover.read_bytes() == planted
     assert db.read_bytes() == ledger_before
     assert search_mod.index_status(db)["status"] == "current"
     assert _index(db).is_file()
@@ -575,6 +591,7 @@ def test_a_lock_error_leaves_the_partial_and_the_refresh_still_publishes(
     db, monkeypatch
 ):
     leftover = _stale_index_partial(db.parent, "lockerr")
+    planted = leftover.read_bytes()
 
     def no_locks(_fd, _flags):
         raise OSError(errno.ENOLCK, "No locks available")
@@ -583,7 +600,7 @@ def test_a_lock_error_leaves_the_partial_and_the_refresh_still_publishes(
     ledger_before = db.read_bytes()
     code, body = run_json(monkeypatch, db, "index")
     assert code == EXIT_OK, body
-    assert leftover.read_bytes() == b"stale-index"
+    assert leftover.read_bytes() == planted
     assert db.read_bytes() == ledger_before
     assert search_mod.index_status(db)["status"] == "current"
 
@@ -595,11 +612,12 @@ def test_a_symlinked_lock_file_leaves_the_partial_and_the_refresh_still_publishe
     target.write_bytes(b"not-a-lock")
     _lock_path(db).symlink_to(target)
     leftover = _stale_index_partial(db.parent, "symlock")
+    planted = leftover.read_bytes()
     ledger_before = db.read_bytes()
     code, body = run_json(monkeypatch, db, "index")
     assert code == EXIT_OK, body
     assert leftover.is_file(), "a refresh removed a leftover through a symlinked lock file"
-    assert leftover.read_bytes() == b"stale-index"
+    assert leftover.read_bytes() == planted
     assert _lock_path(db).is_symlink()
     assert target.read_bytes() == b"not-a-lock"
     assert db.read_bytes() == ledger_before
@@ -609,10 +627,11 @@ def test_a_symlinked_lock_file_leaves_the_partial_and_the_refresh_still_publishe
 def test_a_lock_path_that_is_not_a_regular_file_leaves_the_partial(db, monkeypatch):
     _lock_path(db).mkdir()
     leftover = _stale_index_partial(db.parent, "dirlock")
+    planted = leftover.read_bytes()
     code, body = run_json(monkeypatch, db, "index")
     assert code == EXIT_OK, body
     assert leftover.is_file(), "a refresh removed a leftover with a directory at the lock path"
-    assert leftover.read_bytes() == b"stale-index"
+    assert leftover.read_bytes() == planted
     assert _lock_path(db).is_dir()
     assert search_mod.index_status(db)["status"] == "current"
 
@@ -805,6 +824,7 @@ def test_a_ledger_database_that_cannot_be_compared_leaves_every_partial(
     db, monkeypatch
 ):
     leftover = _stale_index_partial(db.parent, "stale13")
+    planted = leftover.read_bytes()
     real_replace = search_mod._replace_index
     real_lstat = os.lstat
     broken = {"on": False}
@@ -824,5 +844,294 @@ def test_a_ledger_database_that_cannot_be_compared_leaves_every_partial(
     broken["on"] = False
     assert code == EXIT_OK, body
     assert leftover.is_file(), "a refresh removed a partial it could not compare with the ledger"
-    assert leftover.read_bytes() == b"stale-index"
+    assert leftover.read_bytes() == planted
     assert search_mod.index_status(db)["status"] == "current"
+
+
+# --- only a positively identified index temp is removed ----------------------
+
+
+_SIDE_SUFFIXES = ("-journal", "-wal", "-shm")
+
+
+def _no_side_files(path: Path) -> None:
+    for suffix in _SIDE_SUFFIXES:
+        side = path.with_name(path.name + suffix)
+        assert not os.path.lexists(side), f"the refresh left {side.name} beside {path.name}"
+
+
+def _skip_lines(err: str, path: Path) -> list[str]:
+    """The cleanup's skip lines on stderr that name ``path``."""
+    return [
+        line
+        for line in err.splitlines()
+        if line.startswith("search index cleanup skipped ") and path.name in line
+    ]
+
+
+def _refresh_by_append(db: Path, monkeypatch, key: str) -> list[str]:
+    """Build the index, append one event, and return the argv of the refresh."""
+    run_json(monkeypatch, db, "index")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "the ibis note"}, key)
+    return ["--db", str(db), "index"]
+
+
+def test_a_cli_backup_named_like_a_partial_survives_rebuild_and_refresh(db, monkeypatch):
+    snapshot = db.parent / ".search.db.snapshot.partial"
+    code, _out, err = invoke(monkeypatch, ["--db", str(db), "backup", "--to", str(snapshot)])
+    assert code == EXIT_OK, err
+    before = snapshot.read_bytes()
+    leftover = _stale_index_partial(db.parent, "stale14")
+    code, _out, err = invoke(monkeypatch, ["--db", str(db), "index", "--rebuild"])
+    assert code == EXIT_OK, err
+    assert snapshot.is_file(), "index --rebuild removed a ledger backup"
+    assert snapshot.read_bytes() == before, "index --rebuild changed a ledger backup"
+    _no_side_files(snapshot)
+    lines = [line for line in err.splitlines() if line]
+    assert len(lines) == 1, err
+    assert _skip_lines(err, snapshot) == lines, err
+    assert not leftover.exists()
+    argv = _refresh_by_append(db, monkeypatch, "k-backup-1")
+    leftover = _stale_index_partial(db.parent, "stale15")
+    code, _out, err = invoke(monkeypatch, argv)
+    assert code == EXIT_OK, err
+    assert snapshot.is_file(), "an append refresh removed a ledger backup"
+    assert snapshot.read_bytes() == before, "an append refresh changed a ledger backup"
+    _no_side_files(snapshot)
+    assert len(_skip_lines(err, snapshot)) == 1, err
+    assert not leftover.exists()
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+def test_another_ledger_named_like_a_partial_survives_and_keeps_its_events(db, monkeypatch):
+    other = db.parent / ".search.db.other.partial"
+    with open_ledger(other) as lg:
+        _append(lg, "item.created", "T-other",
+                {"type": "ticket", "title": "Other ledger item"}, "k-other-1")
+        _append(lg, "item.note", "T-other", {"text": "the plover note"}, "k-other-2")
+    _no_side_files(other)
+    before = other.read_bytes()
+    code, _out, err = invoke(monkeypatch, ["--db", str(db), "index", "--rebuild"])
+    assert code == EXIT_OK, err
+    assert other.is_file(), "index --rebuild removed another ledger"
+    assert other.read_bytes() == before, "index --rebuild changed another ledger"
+    _no_side_files(other)
+    assert len(_skip_lines(err, other)) == 1, err
+    argv = _refresh_by_append(db, monkeypatch, "k-other-refresh")
+    code, _out, err = invoke(monkeypatch, argv)
+    assert code == EXIT_OK, err
+    assert other.is_file(), "an append refresh removed another ledger"
+    assert other.read_bytes() == before, "an append refresh changed another ledger"
+    _no_side_files(other)
+    assert len(_skip_lines(err, other)) == 1, err
+    assert search_mod.index_status(db)["status"] == "current"
+    assert _event_keys(other) == ["k-other-1", "k-other-2"]
+
+
+def test_a_new_ledger_still_open_under_a_partial_name_is_kept(db, monkeypatch):
+    # A WAL ledger just created and still open keeps its tables in its -wal
+    # file; its main file reads as an empty schema, so only the side file
+    # beside it shows that it is not an index temp.
+    live = db.parent / ".search.db.fresh.partial"
+    with open_ledger(live) as lg:
+        _append(lg, "item.created", "T-fresh",
+                {"type": "ticket", "title": "Fresh ledger item"}, "k-fresh-1")
+        code, _out, err = invoke(monkeypatch, ["--db", str(db), "index", "--rebuild"])
+        assert code == EXIT_OK, err
+        assert live.is_file(), "index --rebuild removed a ledger that is open"
+        lines = _skip_lines(err, live)
+        assert len(lines) == 1, err
+        assert "-wal is beside it" in lines[0] or "-journal is beside it" in lines[0], lines
+    assert _event_keys(live) == ["k-fresh-1"]
+
+
+def _schema_only(*statements: str):
+    def build(path: Path) -> None:
+        _write_index_schema(path, statements)
+    return build
+
+
+_GENUINE_TEMPS = {
+    "zero-length": lambda path: path.write_bytes(b""),
+    "empty-schema": _schema_only("CREATE TABLE scratch (a)", "DROP TABLE scratch"),
+    "some-tables": _schema_only(*search_mod.SCHEMA_SQL[:2]),
+    "all-tables": _schema_only(
+        *search_mod.SCHEMA_SQL,
+        "INSERT INTO manifest (key, value) VALUES ('manifest', '{}')",
+    ),
+    "index-and-trigger": _schema_only(
+        *search_mod.SCHEMA_SQL,
+        "CREATE INDEX extra_meta ON doc_meta (item_id)",
+        "CREATE TRIGGER extra_trigger AFTER INSERT ON manifest BEGIN SELECT 1; END",
+    ),
+}
+
+
+@pytest.mark.parametrize("refresh", ["rebuild", "append"])
+@pytest.mark.parametrize("shape", sorted(_GENUINE_TEMPS))
+def test_a_genuine_index_temp_is_removed(db, monkeypatch, shape, refresh):
+    if refresh == "append":
+        argv = _refresh_by_append(db, monkeypatch, f"k-genuine-{shape}")
+    else:
+        argv = ["--db", str(db), "index", "--rebuild"]
+    temp = db.parent / f".search.db.{shape}.partial"
+    _GENUINE_TEMPS[shape](temp)
+    _no_side_files(temp)
+    code, _out, err = invoke(monkeypatch, argv)
+    assert code == EXIT_OK, err
+    assert not temp.exists(), f"a refresh kept a genuine index temp ({shape}): {err}"
+    assert temp.name not in err
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+_FOREIGN_OBJECTS = {
+    "events-table": (
+        "CREATE TABLE events (id INTEGER PRIMARY KEY, kind TEXT NOT NULL)",
+        "INSERT INTO events (kind) VALUES ('item.created')",
+    ),
+    "view": ("CREATE VIEW v_items AS SELECT item_id FROM doc_meta",),
+    "other-table": ("CREATE TABLE notes (body TEXT)",),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_FOREIGN_OBJECTS))
+def test_an_index_shaped_file_with_a_foreign_object_is_kept(db, monkeypatch, shape):
+    path = db.parent / f".search.db.{shape}.partial"
+    _write_index_schema(path, (*search_mod.SCHEMA_SQL, *_FOREIGN_OBJECTS[shape]))
+    before = path.read_bytes()
+    code, _out, err = invoke(monkeypatch, ["--db", str(db), "index", "--rebuild"])
+    assert code == EXIT_OK, err
+    assert path.is_file(), f"a refresh removed an index-shaped file holding a foreign {shape}"
+    assert path.read_bytes() == before
+    _no_side_files(path)
+    lines = _skip_lines(err, path)
+    assert len(lines) == 1, err
+    assert "which the index writer never creates" in lines[0], lines
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+_NOT_INDEX_FILES = {
+    "one-byte": (b"x", "short read: 1 of 16 header bytes"),
+    "short-text": (b"stale-index", "short read: 11 of 16 header bytes"),
+    "text": (b"operator notes, not a database at all\n", "not a SQLite file"),
+    "bad-body": (b"SQLite format 3\x00" + b"\xff" * 200, "cannot read its SQLite schema"),
+}
+
+
+@pytest.mark.parametrize("shape", sorted(_NOT_INDEX_FILES))
+def test_a_file_that_is_not_an_index_temp_is_kept_with_one_line(db, monkeypatch, shape):
+    payload, reason = _NOT_INDEX_FILES[shape]
+    path = db.parent / f".search.db.{shape}.partial"
+    path.write_bytes(payload)
+    code, _out, err = invoke(monkeypatch, ["--db", str(db), "index", "--rebuild"])
+    assert code == EXIT_OK, err
+    assert path.is_file(), f"a refresh removed a {shape} file"
+    assert path.read_bytes() == payload
+    _no_side_files(path)
+    lines = _skip_lines(err, path)
+    assert len(lines) == 1, err
+    assert reason in lines[0], lines
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+def test_a_symlink_or_directory_named_like_a_partial_is_kept_with_one_line(db, monkeypatch):
+    target = _stale_index_partial(db.parent.parent, "target")
+    planted = target.read_bytes()
+    link = db.parent / ".search.db.link2.partial"
+    link.symlink_to(target)
+    named_dir = db.parent / ".search.db.dir2.partial"
+    named_dir.mkdir()
+    code, _out, err = invoke(monkeypatch, ["--db", str(db), "index", "--rebuild"])
+    assert code == EXIT_OK, err
+    assert link.is_symlink()
+    assert named_dir.is_dir()
+    assert target.read_bytes() == planted
+    for path in (link, named_dir):
+        lines = _skip_lines(err, path)
+        assert len(lines) == 1, err
+        assert lines[0].endswith(": not a regular file"), lines
+
+
+def test_a_candidate_that_cannot_be_stat_ed_is_kept_with_one_line(db, monkeypatch):
+    leftover = _stale_index_partial(db.parent, "nostat")
+    planted = leftover.read_bytes()
+    real_lstat = os.lstat
+
+    def boom(path, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == leftover.name:
+            raise OSError(errno.EACCES, "Permission denied")
+        return real_lstat(path, *args, **kwargs)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(os, "lstat", boom)
+        code, _out, err = invoke(monkeypatch, ["--db", str(db), "index", "--rebuild"])
+    assert code == EXIT_OK, err
+    assert leftover.read_bytes() == planted
+    lines = _skip_lines(err, leftover)
+    assert len(lines) == 1, err
+    assert ": cannot stat it: " in lines[0], lines
+
+
+@pytest.mark.parametrize("change", ["grown", "side-file"])
+def test_a_candidate_that_changes_after_identification_is_kept(db, monkeypatch, change):
+    leftover = _stale_index_partial(db.parent, f"change-{change}")
+    real = search_mod._why_not_index_temp
+
+    def then_change(path, found):
+        reason = real(path, found)
+        if Path(path).name == leftover.name:
+            if change == "grown":
+                with open(path, "ab") as handle:
+                    handle.write(b"appended after it was identified")
+            else:
+                Path(f"{path}-journal").write_bytes(b"")
+        return reason
+
+    monkeypatch.setattr(search_mod, "_why_not_index_temp", then_change)
+    code, _out, err = invoke(monkeypatch, ["--db", str(db), "index", "--rebuild"])
+    assert code == EXIT_OK, err
+    assert leftover.is_file(), f"a refresh removed a candidate that changed ({change})"
+    lines = _skip_lines(err, leftover)
+    assert len(lines) == 1, err
+    if change == "grown":
+        assert lines[0].endswith(": it changed after it was identified"), lines
+    else:
+        assert "-journal is beside it" in lines[0], lines
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+@pytest.mark.parametrize("suffix", ["-journal", "-wal", "-shm"], ids=["journal", "wal", "shm"])
+@pytest.mark.parametrize("empty", [True, False], ids=["zero-length", "index-schema"])
+def test_identification_refuses_a_candidate_with_a_side_file(tmp_path, suffix, empty):
+    # The check before the unlink would also catch a side file that stays;
+    # this pins the identification's own check, which keeps a candidate
+    # whose side file is there while it is read and gone by the unlink.
+    path = tmp_path / ".search.db.side.partial"
+    if empty:
+        path.write_bytes(b"")
+    else:
+        _write_index_schema(path, search_mod.SCHEMA_SQL)
+    assert search_mod._why_not_index_temp(path, os.lstat(path)) is None
+    Path(f"{path}{suffix}").write_bytes(b"")
+    reason = search_mod._why_not_index_temp(path, os.lstat(path))
+    assert reason is not None, f"a candidate with {suffix} beside it was identified"
+    assert f"{path.name}{suffix} is beside it" in reason, reason
+
+
+def test_the_allow_list_is_the_writer_schema():
+    conn = sqlite3.connect(":memory:")
+    try:
+        for statement in search_mod.SCHEMA_SQL:
+            conn.execute(statement)
+        tables = {
+            row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        }
+    finally:
+        conn.close()
+    allowed = search_mod._index_table_names()
+    assert allowed == tables
+    assert {"fts_corpus", "fts_corpus_data", "fts_corpus_idx", "fts_corpus_content",
+            "fts_corpus_docsize", "fts_corpus_config", "doc_path", "doc_meta",
+            "item_link", "manifest"} == set(allowed)
+    assert "events" not in allowed

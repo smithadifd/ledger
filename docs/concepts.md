@@ -490,16 +490,18 @@ beside the index, `.search.db.lock` (created empty with mode 0600, never
 removed), from before it creates its `.search.db.<id>.partial` temp until
 that temp is published or removed. After a successful refresh has released
 its own shared lock, it asks for an exclusive lock on that file without
-waiting; only when no writer is running does it remove the leftover
-`.search.db.<id>.partial` files of rebuilds that did not finish (regular
-files whose name matches exactly). A held lock, a lock file that is a
-symlink or cannot be opened, a symlink, a directory or a near-miss name
-leaves every file in place, and a removal error is one line on stderr and
-does not fail the refresh. Files matching `.search.db.<id>.partial` beside
-the search index are the ledger's own temporaries and may be removed, so
-never name a backup or any other file that way. A writer from a version
-before the lock file
-takes no lock, so a refresh during an upgrade can remove that writer's
+waiting; only when no writer is running does it look at the files whose
+name matches `.search.db.<id>.partial` exactly, and it removes only those
+it positively identifies as the leftover of a rebuild that did not finish:
+an empty file, or a SQLite file whose tables are all ones the index writer
+creates, with no SQLite side file beside it. Everything else with that name
+(a ledger, a ledger backup, a file holding an `events` table, a symlink, a
+directory, a short or non-SQLite file) is left byte for byte as it was,
+with one stderr line on each refresh naming it and the reason. A held lock
+or a lock file that is a symlink or cannot be opened leaves every file in
+place, and a removal error is one line on stderr; neither fails the
+refresh. A writer from a version before the lock file takes no lock, so a
+refresh during an upgrade can remove that writer's
 temp. Each report also carries a `severity` to colour it by:
 
 | severity | when |
