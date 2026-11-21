@@ -89,6 +89,8 @@ def test_no_verb_replaces_a_ledger_at_the_index_path(tmp_path, monkeypatch, shap
     new = set(os.listdir(tmp_path)) - names
     if not guarded:
         new.discard(search.SEARCH_DB_NAME)  # the index a case-sensitive system builds
+    # The index writers' shared lock file: empty, created before a temp, never removed.
+    new.discard(f".{search.SEARCH_DB_NAME}.lock")
     assert sorted(n for n in new if not n.endswith(SIDE_FILES)) == []
     for target, code, body in runs:
         if guarded and verb[0] != "doctor":
