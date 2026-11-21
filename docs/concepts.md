@@ -495,7 +495,10 @@ waiting; only when no writer is running does it remove the leftover
 files whose name matches exactly). A held lock, a lock file that is a
 symlink or cannot be opened, a symlink, a directory or a near-miss name
 leaves every file in place, and a removal error is one line on stderr and
-does not fail the refresh. A writer from a version before the lock file
+does not fail the refresh. Files matching `.search.db.<id>.partial` beside
+the search index are the ledger's own temporaries and may be removed, so
+never name a backup or any other file that way. A writer from a version
+before the lock file
 takes no lock, so a refresh during an upgrade can remove that writer's
 temp. Each report also carries a `severity` to colour it by:
 

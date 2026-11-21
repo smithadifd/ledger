@@ -895,6 +895,9 @@ the lock file are not removed: a candidate that is the database's own file
 (same device and inode, so a hard link too) or whose name begins with the
 database's file name is skipped, even when the `--db` file is itself named
 like a partial, and one that cannot be compared with it is left in place.
+Files matching `.search.db.<id>.partial` beside the search index are the
+ledger's own temporaries and may be removed, so never name a backup or any
+other file that way.
 A writer from a version before the lock file
 takes no lock, so a refresh during an upgrade can remove that writer's temp.
 
