@@ -22,10 +22,18 @@ anchor raises ``Unattributable`` instead of reading on:
 The ``-shm`` read follows two stored pointers before its anchor runs, so a
 wrong struct layout there can crash the process instead of refusing; it runs
 only after the main anchor has confirmed the ``unixFile`` layout.
+
+Only the main interpreter installs the hook, on its first checked connect, and
+the hook stays registered for the life of the process: SQLite must never call a
+freed callback, and nothing cancels it. The callback holds a reference that
+interpreter teardown never releases, and it reads nothing from this module when
+SQLite calls it, so a connect inside an exit handler or during teardown still
+reaches a live callback that records its handle. Any other interpreter refuses
+the install before anything is registered with SQLite, so no callback owned by
+an interpreter that can be destroyed is ever registered.
 """
 from __future__ import annotations
 
-import atexit
 import ctypes
 import sqlite3
 import threading
@@ -121,19 +129,29 @@ _ENTRY = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p, ctypes
 _local = threading.local()
 
 
-def _entry(db, _errmsg, _api) -> int:
-    """Record a new handle on the armed thread. Never calls SQLite, never raises."""
-    try:
-        captured = getattr(_local, "captured", None)
-        if captured is not None:
-            captured.append(db)
-    except BaseException:  # a lost handle refuses the connect; never unwind into SQLite
-        pass
-    return SQLITE_OK
+def _make_entry(local: threading.local, ok: int, lookup=getattr, error=BaseException):
+    """Build the callback body with everything it reads bound now.
+
+    Teardown sets this module's globals to ``None`` while the hook is still
+    registered, so the body reads no module global (and no builtin) when SQLite
+    calls it: the thread-local, the return code, ``getattr`` and the exception
+    class it catches are closure cells.
+    """
+
+    def entry(db, _errmsg, _api):
+        """Record a new handle on the armed thread. Never calls SQLite, never raises."""
+        try:
+            captured = lookup(local, "captured", None)
+            if captured is not None:
+                captured.append(db)
+        except error:  # a lost handle refuses the connect; never unwind into SQLite
+            pass
+        return ok
+
+    return entry
 
 
-# A module global, so the callback SQLite holds is never collected.
-_CALLBACK = _ENTRY(_entry)
+_CALLBACK = _ENTRY(_make_entry(_local, SQLITE_OK))
 
 
 @dataclass(frozen=True)
@@ -182,7 +200,48 @@ def _load_library() -> ctypes.CDLL:
     raise OSError("SQLite C API not found (" + "; ".join(errors) + "). " + _NOT_FOUND_HINT)
 
 
+def _in_main_interpreter() -> bool:
+    """Whether this code runs in the process's main interpreter.
+
+    Compares interpreter states, never threads: every thread of the main
+    interpreter is in it, and a subinterpreter running on the main thread is
+    not. Raises when either state cannot be read.
+    """
+    state = ctypes.PYFUNCTYPE(ctypes.c_void_p)
+    current = state(("PyInterpreterState_Get", ctypes.pythonapi))()
+    main = state(("PyInterpreterState_Main", ctypes.pythonapi))()
+    if not current or not main:
+        raise OSError(f"interpreter state unavailable (current {current}, main {main})")
+    return current == main
+
+
+def _keep_alive(obj: object) -> None:
+    """Take a reference to ``obj`` that is never released.
+
+    A reference held by this module, ``sys``, ``builtins`` or any other module
+    is cleared by interpreter teardown; a leaked reference count is not.
+    """
+    ctypes.PYFUNCTYPE(None, ctypes.py_object)(("Py_IncRef", ctypes.pythonapi))(obj)
+
+
 def _install() -> _Hook:
+    # A callback registered by a subinterpreter is freed when that interpreter
+    # is destroyed, while SQLite's extension list is process-wide, so only the
+    # main interpreter installs. Checked before anything is registered with
+    # SQLite; a check that cannot be made refuses.
+    try:
+        in_main = _in_main_interpreter()
+    except Exception as exc:
+        return _Hook(
+            None,
+            "cannot tell whether this is the main interpreter, the only one that "
+            f"installs the capture hook: {type(exc).__name__}: {exc}",
+        )
+    if not in_main:
+        return _Hook(
+            None,
+            "the capture hook installs only in the main interpreter, and this is another interpreter",
+        )
     try:
         lib = _load_library()
     except OSError as exc:
@@ -193,16 +252,17 @@ def _install() -> _Hook:
             None,
             f"resolved SQLite {version}, but the sqlite3 module uses {sqlite3.sqlite_version}",
         )
+    # The hook is never cancelled, so the callback must outlive every caller,
+    # exit handlers and teardown included: the leaked reference is taken before
+    # SQLite holds the pointer.
+    try:
+        _keep_alive(_CALLBACK)
+    except Exception as exc:
+        return _Hook(None, f"cannot keep the capture callback alive: {type(exc).__name__}: {exc}")
     pointer = ctypes.cast(_CALLBACK, ctypes.c_void_p)
     rc = lib.sqlite3_auto_extension(pointer)
     if rc != SQLITE_OK:
         return _Hook(None, f"sqlite3_auto_extension returned {rc}")
-    # Cancelled at exit, before interpreter teardown frees the callback or the
-    # interpreter that owns it (a subinterpreter runs this at its destruction):
-    # SQLite must never call a freed callback. Exit handlers run last-registered
-    # first, so one registered before this install opens no ledger: it finds no
-    # capture and is refused.
-    atexit.register(lib.sqlite3_cancel_auto_extension, pointer)
     failure: str | None
     try:
         with capturing() as captured:
@@ -221,10 +281,11 @@ def _install() -> _Hook:
 
 
 def ensure_hook() -> ctypes.CDLL:
-    """Install the capture hook once per process; raise ``Unattributable`` if it is unavailable.
+    """Install the capture hook once; raise ``Unattributable`` if it is unavailable.
 
     The first call installs and self-tests the hook under a lock; its result,
-    including a failure, is kept for the life of the process.
+    including a failure, is kept for the life of the interpreter. Only the main
+    interpreter installs; in any other interpreter the result is a refusal.
     """
     global _hook
     with _install_lock:

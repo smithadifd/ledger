@@ -32,7 +32,6 @@ from .schema import (
     validate_payload,
 )
 from .store import (
-    RESERVED_KIND_PREFIX,
     Event,
     Ledger,
     LedgerError,
@@ -42,6 +41,7 @@ from .store import (
     check_expected_system,
     check_system_claim,
     open_ledger,
+    restore_needs_accept_flag,
 )
 from .store import _refuse_newer_schema_in_transaction
 
@@ -184,8 +184,9 @@ class RestoreResult:
 
 
 def replay_events(lg: Ledger, events: list[Event]) -> None:
-    """INSERT non-reserved exported rows as-is. Does not recompute hashes."""
-    reserved = next((event for event in events if event.kind.startswith(RESERVED_KIND_PREFIX)), None)
+    """INSERT exported rows as-is. Does not recompute hashes. Refuses a batch
+    holding a loop or review receipt event (``restore_needs_accept_flag``)."""
+    reserved = next((event for event in events if restore_needs_accept_flag(event.kind)), None)
     if reserved is not None:
         raise LedgerError(f"replay refuses reserved event: {reserved.kind}")
     _replay_events(lg, events)
@@ -313,13 +314,15 @@ def restore_export(
     if export_system is not None:
         check_expected_system(export_system, system, f"restore of {export_path}")
     reserved_events = [
-        event for event in events if event.kind.startswith(RESERVED_KIND_PREFIX)
+        event for event in events if restore_needs_accept_flag(event.kind)
     ]
     export_digest: str | None = None
     if reserved_events:
         if not accept_loop_events:
+            kinds = ", ".join(sorted({event.kind for event in reserved_events}))
             raise LedgerError(
-                "restore contains loop-owned events; pass --accept-loop-events to restore them"
+                f"restore contains loop-owned or review receipt events (kinds: {kinds}); "
+                "pass --accept-loop-events to restore them"
             )
         export_digest = verify_stream_digest(export_path, events)
     dest_path = resolve_db_path(dest)
