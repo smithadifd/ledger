@@ -56,6 +56,26 @@ def _election_rows(rows: list[dict]) -> list[dict]:
     return [row for row in rows if row.get("as") != "note"]
 
 
+def test_long_decided_note_fits_budget_once(tmp_path: Path) -> None:
+    lg = open_ledger(_db(tmp_path))
+    _create(lg, PARENT, "ticket", "quiet-parent")
+    ruling_text = "decided: " + " ".join(["retain"] * 180)
+    ruling = _append(lg, "item.note", {"text": ruling_text}, PARENT, "ruling-1")
+    card = project_card(lg, PARENT)
+    text = format_card(card)
+    lg.close()
+    assert ruling_text in _decisions_body(text)
+    assert text.count(ruling_text) == 1
+    assert _notes_body(text) == "(none)"
+    assert card.truncated == ()
+    assert word_count(text) <= WORD_LIMIT
+    data = card.as_dict()
+    assert data["notes"] == [{"event_id": ruling.id, "text": ruling_text}]
+    assert data["decisions"] == [
+        {"event_id": ruling.id, "as": "note", "text": ruling_text},
+    ]
+
+
 def test_over_budget_card_keeps_decided_notes_and_lists_them_under_decisions(
     tmp_path: Path,
 ) -> None:
@@ -104,10 +124,10 @@ def test_not_over_budget_notes_keep_event_order(tmp_path: Path) -> None:
     notes = _notes_body(text)
     assert notes.splitlines() == [
         f"- event={first.id}: alpha note",
-        f"- event={ruling.id}: {RULING}",
         f"- event={last.id}: omega note",
     ]
     assert f"- event={ruling.id} note: {RULING}" in _decisions_body(text)
+    assert text.count(RULING) == 1
 
 
 def test_a_decided_note_never_satisfies_a_pick_or_election_check(tmp_path: Path) -> None:
@@ -145,6 +165,7 @@ def test_a_decided_note_never_satisfies_a_pick_or_election_check(tmp_path: Path)
     lg.close()
 
 
+@pytest.mark.parametrize("full", [False, True])
 @pytest.mark.parametrize(
     "text",
     [
@@ -154,17 +175,21 @@ def test_a_decided_note_never_satisfies_a_pick_or_election_check(tmp_path: Path)
         "decided:keep the one store",
     ],
 )
-def test_accepted_decided_prefix_is_listed_under_decisions(tmp_path: Path, text: str) -> None:
+def test_accepted_decided_prefix_is_listed_under_decisions(
+    tmp_path: Path, text: str, full: bool,
+) -> None:
     lg = open_ledger(_db(tmp_path))
     _create(lg, PARENT, "ticket", "quiet-parent")
     note = _append(lg, "item.note", {"text": text}, PARENT, "n-1")
-    card = project_card(lg, PARENT)
+    card = project_card(lg, PARENT, full=full)
     rendered = format_card(card)
     lg.close()
     event = _event(note.id, "item.note", PARENT, {"text": text})
     assert decided_note_text(event) == text
     assert text.lstrip().startswith(DECIDED_PREFIX)
     assert f"- event={note.id} note: {_one_line(text)}" in _decisions_body(rendered)
+    assert rendered.count(_one_line(text)) == 1
+    assert _notes_body(rendered) == "(none)"
 
 
 @pytest.mark.parametrize(

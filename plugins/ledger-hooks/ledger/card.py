@@ -894,7 +894,11 @@ def _fmt_links(rows: tuple[dict[str, Any], ...]) -> str:
 
 
 def _fmt_notes(rows: tuple[dict[str, Any], ...]) -> str:
-    lines = [f"- event={row['event_id']}: {_one_line(row['text'])}" for row in rows]
+    lines = [
+        f"- event={row['event_id']}: {_one_line(row['text'])}"
+        for row in rows
+        if not _is_decided_note(row)
+    ]
     return _fmt_list(lines)
 
 
