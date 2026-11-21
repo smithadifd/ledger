@@ -1,14 +1,15 @@
 # Upgrading across many releases
 
 This page is for a machine whose ledger is 0.1.8 or older, moving to the
-current release, 0.5.0. Four changes in between can stop a machine that works
-today, and 0.2.0, 0.2.1, 0.3.0, 0.4.0 and 0.5.0 add a few more things to check.
-Do the checks in section 1, install the tag in section 2, run the three upgrade
-commands in section 3, and run the check after each. A machine already on
-0.1.22, 0.2.0 or 0.2.1 has already passed the changes in 1.1 to 1.4 and needs
-only 1.5, 1.6 and 1.7; a machine on 0.3.x needs only 1.6 and 1.7; a machine on
-0.4.0 needs only 1.7. For a later tag, change the tag in the commands and read
-the [CHANGELOG](../CHANGELOG.md) entries after 0.5.0.
+current release, 0.6.0. Four changes in between can stop a machine that works
+today, and 0.2.0, 0.2.1, 0.3.0, 0.4.0, 0.5.0 and 0.6.0 add a few more things to
+check. Do the checks in section 1, install the tag in section 2, run the three
+upgrade commands in section 3, and run the check after each. A machine already
+on 0.1.22, 0.2.0 or 0.2.1 has already passed the changes in 1.1 to 1.4 and needs
+only 1.5, 1.6, 1.7 and 1.8; a machine on 0.3.x needs only 1.6, 1.7 and 1.8; a
+machine on 0.4.0 needs only 1.7 and 1.8; a machine on 0.5.0 needs only 1.8. For
+a later tag, change the tag in the commands and read the
+[CHANGELOG](../CHANGELOG.md) entries after 0.6.0.
 
 To see which release you have, run `pipx list`. `ledger --version` only exists
 from 0.1.16; on an older release it fails with `the following arguments are
@@ -247,7 +248,7 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entries have the detail.
   later. Add the marketplace with the pinned command:
 
   ```sh
-  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.5.0
+  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.6.0
   ```
 
   The `#vX.Y.Z` suffix pins the plugin to that release, and an add without it
@@ -282,14 +283,14 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entry has the detail.
   ```sh
   claude plugin uninstall ledger-hooks@ledger-plugins
   claude plugin marketplace remove ledger-plugins
-  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.5.0
+  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.6.0
   claude plugin install ledger-hooks@ledger-plugins
   ```
 
   The same plugin also takes the `ledger_db`, `ledger_operator` and
   `ledger_harness` options from 0.4.0; an already-set environment value wins,
   so an existing `env` block keeps working unchanged. Prove the re-pin:
-  `claude plugin list` shows `ledger-hooks@ledger-plugins` at version 0.5.0.
+  `claude plugin list` shows `ledger-hooks@ledger-plugins` at version 0.6.0.
 
 - **`backup --to` refuses an existing destination (0.4.0).** Before 0.4.0,
   `ledger backup --to FILE` replaced whatever file sat at FILE and exited 0.
@@ -367,12 +368,12 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entry has the detail.
   ```sh
   claude plugin uninstall ledger-hooks@ledger-plugins
   claude plugin marketplace remove ledger-plugins
-  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.5.0
+  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.6.0
   claude plugin install ledger-hooks@ledger-plugins
   ```
 
   Restart the session. Prove the re-pin: `claude plugin list` shows
-  `ledger-hooks@ledger-plugins` at version 0.5.0.
+  `ledger-hooks@ledger-plugins` at version 0.6.0.
 
 - **An expired claim reads `open` (0.5.0).** In `query`, `ready` and `card`, a
   claim whose lease has expired shows the status `open`, in the text and in
@@ -423,9 +424,73 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entry has the detail.
   grep -rn 'too-long\|bad-type' FOLDER
   ```
 
+### 1.8 What 0.6.0 adds
+
+None of the changes below alters the database schema or needs a migration.
+Each item applies only to a machine that does the thing it names; check the ones
+that fit yours. The [CHANGELOG](../CHANGELOG.md) entry has the detail.
+
+- **The search index format is now 4 (0.6.0).** An index built by an earlier
+  version reads `stale`, and the first `search`, `index` or `doctor` after the
+  upgrade rebuilds it; nothing else is needed, and the database is not changed.
+  The new index also holds each `decided:` note, each recorded decision, each
+  item's current spec and each stop point as a document of its own, and a word
+  with a dot between two word characters (`release.notes`) is matched as a
+  phrase, so a query can return different hits than before. `--type` takes
+  `spec` and `stop`.
+
+- **`search` text output changes (0.6.0).** Each title prints at most 100
+  characters, an item hit is followed by up to two `mentioned in:` lines, and
+  when `--limit` cuts the result the last line is `+more (raise --limit or
+  narrow with --type/--item)`. `--json` keeps its shape. A script that parses
+  the text output line by line must accept the new lines; one that reads
+  `--json` needs nothing. Find the calls, with FOLDER your scripts folder:
+
+  ```sh
+  grep -rn 'ledger search' FOLDER
+  ```
+
+- **`card` shows a `decided:` note under Decisions only (0.6.0).** In the
+  Markdown card such a note is listed once, under Decisions as
+  `event=N note: ...`, and no longer also under Notes, and a card over its word
+  budget drops it after every other note. A script that reads `decided:` notes
+  from the Notes section of the text must read Decisions instead.
+
+- **Two new verbs and a file beside the database (0.6.0).** `search-miss`
+  appends one line to `<database file name>.search-misses.jsonl`, beside the
+  database, and `search-audit` reads that file and the search index; neither
+  writes an event. The file is data in the database folder and stays there
+  when you uninstall.
+
+- **Two reserved event kinds record review rounds (0.6.0).** Only the ledger's
+  own receipt writer writes `review.receipt` and `review.grant-cite`; `append`,
+  `append-many` and the library's `append` and `append_many` refuse them with
+  `reserved-kind:<kind>` (exit 3), and `restore` refuses an export that holds
+  either kind unless `--accept-loop-events` is given. A copy older than 0.6.0
+  does not know the kinds: measured with 0.5.0 on a database holding one
+  receipt, `verify` refuses `unknown-kind:review.receipt` (exit 3), while
+  `export` and `card` still exit 0. Once any caller writes receipts into a
+  database, upgrade every copy that opens it (the list in 3.1).
+
+- **The plugin's bundled `ledger` is the 0.6.0 command (0.6.0).** This applies
+  if the `ledger-hooks` plugin is installed. Its hook scripts did not change,
+  but the `bin/ledger` they run is the CLI of this release, with everything
+  above. A plugin installed from a pinned marketplace stays on its old tag
+  until you re-pin it, with the same four commands as 1.6:
+
+  ```sh
+  claude plugin uninstall ledger-hooks@ledger-plugins
+  claude plugin marketplace remove ledger-plugins
+  claude plugin marketplace add https://github.com/smithadifd/ledger.git#v0.6.0
+  claude plugin install ledger-hooks@ledger-plugins
+  ```
+
+  Restart the session. Prove the re-pin: `claude plugin list` shows
+  `ledger-hooks@ledger-plugins` at version 0.6.0.
+
 ## 2. Which tag to install
 
-Install `@v0.5.0`. Never pin 0.1.14. It shipped with a descriptor check that
+Install `@v0.6.0`. Never pin 0.1.14. It shipped with a descriptor check that
 compared the whole process's open descriptors before and after each connect, so
 another thread's open in that window, or SQLite reusing a descriptor it already
 held, refused a valid connect (`db_fd_unknown`, and sometimes `db_not_regular`,
@@ -462,13 +527,13 @@ would decide which one runs. Choose one:
   folder that holds that `bin/ledger`:
 
   ```sh
-  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.5.0"
+  <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.6.0"
   ```
 
 - Or remove that venv, then run the pipx line below.
 
 Either way, `command -v ledger` then shows one path and `ledger --version`
-prints `ledger 0.5.0`.
+prints `ledger 0.6.0`.
 
 If `command -v ledger` prints nothing, the ledger you use is not on `PATH`: a
 vendored copy, or a wrapper script that runs one from a folder of its own.
@@ -483,11 +548,11 @@ step 3, skip the `pipx install` line and go on to the checks after it.
 
    ```sh
    "$PY" -m venv <venv>
-   <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.5.0"
+   <venv>/bin/pip install "git+https://github.com/smithadifd/ledger.git@v0.6.0"
    <venv>/bin/ledger --version
    ```
 
-   The last line prints `ledger 0.5.0`.
+   The last line prints `ledger 0.6.0`.
 2. Link it onto `PATH`, in a folder that is already on it (`~/.local/bin` for a
    pipx user):
 
@@ -512,7 +577,7 @@ step 3, skip the `pipx install` line and go on to the checks after it.
    write here, even on a repeat.
 
 ```sh
-pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.5.0
+pipx install --force --python "$PY" git+https://github.com/smithadifd/ledger@v0.6.0
 ```
 
 This is the [README's upgrade command](../README.md#upgrade) with the Python you
@@ -524,7 +589,7 @@ ledger --version
 ledger doctor
 ```
 
-`ledger --version` prints `ledger 0.5.0`. `ledger doctor` opens the database
+`ledger --version` prints `ledger 0.6.0`. `ledger doctor` opens the database
 that `--db` or `LEDGER_DB` names, so it also proves 1.1 and 1.2 on the real
 file: it exits 0 and prints the path, the schema version and the search-index
 state. A refusal from section 1 shows up here. If your shell says `ledger:
@@ -547,7 +612,7 @@ plugin's session-start hook uses.
 
 Prove it: `claude plugin list` shows `sdlc@skills` and its version, which is
 the newest in that repository's `CHANGELOG.md`. With `ledger_cli` set, a new
-session's first lines show `ledger 0.5.0` and the ledger's brief, or one
+session's first lines show `ledger 0.6.0` and the ledger's brief, or one
 `ledger session-start: ...` line naming what failed.
 
 ### 3.3 The ledger mod
@@ -561,4 +626,4 @@ claude plugin update ledger
 Then restart the session. Prove it: `claude plugin list` shows `ledger@mods` and
 its version, which is the newest in that repository's `CHANGELOG.md`, and
 `/ledger` opens its pane in a new session. The pane reads the ledger with
-`--json`; it needs ledger 0.1.5 or newer, so it needs nothing more of 0.5.0.
+`--json`; it needs ledger 0.1.5 or newer, so it needs nothing more of 0.6.0.
