@@ -879,7 +879,20 @@ so a typo never reads as no mentions; an item no other item mentions exits 1 wit
 on other items name ID`. Words and `--mentions` together are a usage error. It refreshes the
 index first, as `search` does, and writes no event.
 
-**`index [--rebuild]`** Build `search.db` beside the database.
+**`index [--rebuild]`** Build `search.db` beside the database. A rebuild that
+did not finish can leave a `.search.db.<id>.partial` file beside it. Every
+writer holds a shared lock on `.search.db.lock` beside the index (created
+empty with mode 0600, never removed) while its temp exists. After its own
+publish, the next refresh (this verb when the index is not current,
+`--rebuild`, `search`, or `doctor`) asks for an exclusive lock on that file
+without waiting; only when no writer is running does it remove each regular
+file whose name matches `.search.db.<id>.partial` exactly. A held lock, a
+lock file that is a symlink or cannot be opened, a name that only contains
+the pattern, a leftover of another file, a symlink or a directory leaves
+every file in place. A removal error is one line on stderr and does not
+fail the refresh or lose the new index. The ledger database, its backups and
+the lock file are not removed. A writer from a version before the lock file
+takes no lock, so a refresh during an upgrade can remove that writer's temp.
 
 **`search-miss --query Q --expected EVENT_OR_ITEM [--note T]`** Log a search
 that failed to surface something you later found another way. It appends one

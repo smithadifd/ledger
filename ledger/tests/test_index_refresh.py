@@ -5,10 +5,17 @@ synthetic and built under tmp_path.
 """
 from __future__ import annotations
 
+import errno
+import fcntl
 import json
 import os
+import signal
 import sqlite3
 import stat
+import subprocess
+import sys
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -30,6 +37,92 @@ from test_search import (  # noqa: F401
 
 def _index(db: Path) -> Path:
     return db.parent / "search.db"
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _lock_path(db: Path) -> Path:
+    """The index writers' shared lock file beside the index."""
+    return db.parent / ".search.db.lock"
+
+
+def _fresh_lock_granted(db: Path, flags: int) -> bool:
+    """Whether a new descriptor on the lock file gets ``flags`` right now.
+
+    flock belongs to the open file, so this descriptor conflicts with any
+    other one, in this process or another, that holds an incompatible lock.
+    """
+    fd = os.open(_lock_path(db), os.O_RDONLY)
+    try:
+        try:
+            fcntl.flock(fd, flags)
+        except BlockingIOError:
+            return False
+        return True
+    finally:
+        os.close(fd)
+
+
+# A writer in its own process: a real full rebuild that stops just before
+# its publish, holding its shared lock and its temp, until ``go`` appears.
+_PAUSED_WRITER = (
+    "import sys, time\n"
+    "from pathlib import Path\n"
+    "from ledger import search as search_mod\n"
+    "db = Path(sys.argv[1])\n"
+    "ready = Path(sys.argv[2])\n"
+    "go = Path(sys.argv[3])\n"
+    "real = search_mod._replace_index\n"
+    "def paused(tmp, index, ledger):\n"
+    "    note = ready.with_name(ready.name + '.tmp')\n"
+    "    note.write_text(str(tmp), encoding='utf-8')\n"
+    "    note.replace(ready)\n"
+    "    deadline = time.time() + 60\n"
+    "    while not go.exists():\n"
+    "        if time.time() > deadline:\n"
+    "            raise SystemExit(3)\n"
+    "        time.sleep(0.01)\n"
+    "    real(tmp, index, ledger)\n"
+    "search_mod._replace_index = paused\n"
+    "search_mod.build_index(db)\n"
+)
+
+
+def _start_paused_writer(db: Path) -> tuple[subprocess.Popen, Path, Path]:
+    """Start ``_PAUSED_WRITER`` and wait until it holds its temp.
+
+    Returns the child, its temp and the file that lets it publish.
+    """
+    ready = db.parent / "writer-ready"
+    go = db.parent / "writer-go"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    child = subprocess.Popen(
+        [sys.executable, "-c", _PAUSED_WRITER, str(db), str(ready), str(go)],
+        cwd=str(REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    deadline = time.time() + 60
+    while not ready.exists():
+        if child.poll() is not None:
+            _out, err = child.communicate()
+            raise AssertionError(f"writer exited early {child.returncode}: {err!r}")
+        if time.time() > deadline:
+            child.kill()
+            child.wait(timeout=10)
+            raise AssertionError("writer did not reach its publish")
+        time.sleep(0.02)
+    return child, Path(ready.read_text(encoding="utf-8")), go
+
+
+def _stop(child: subprocess.Popen) -> None:
+    if child.poll() is None:
+        child.kill()
+        child.wait(timeout=10)
 
 
 def _snapshot(db: Path) -> dict:
@@ -297,3 +390,334 @@ def test_an_index_without_roots_says_only_the_ledger_is_indexed_and_exits_0(db, 
         f"absolute paths in {config}"
     )
     assert "no markdown roots" not in out
+
+
+# --- leftover writer temps ---------------------------------------------------
+
+
+def _stale_index_partial(
+    directory: Path, middle: str, payload: bytes = b"stale-index"
+) -> Path:
+    """A regular file whose name matches the index writer's temp pattern."""
+    path = directory / f".search.db.{middle}.partial"
+    path.write_bytes(payload)
+    os.utime(path, ns=(1, 1))
+    return path
+
+
+def test_a_planted_stale_index_partial_is_removed_on_rebuild(db, monkeypatch):
+    leftover = _stale_index_partial(db.parent, "stale3")
+    decoy_backup = db.parent / f".{db.name}.stale3.partial"
+    decoy_backup.write_bytes(b"backup-temp")
+    os.utime(decoy_backup, ns=(1, 1))
+    ledger_before = db.read_bytes()
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert not leftover.exists()
+    assert decoy_backup.read_bytes() == b"backup-temp"
+    assert db.read_bytes() == ledger_before
+    assert search_mod.index_status(db)["status"] == "current"
+    assert (db.parent / "search.db").is_file()
+
+
+def test_a_planted_stale_index_partial_is_removed_on_the_next_append_refresh(
+    db, monkeypatch
+):
+    run_json(monkeypatch, db, "index")
+    leftover = _stale_index_partial(db.parent, "stale1")
+    decoy_backup = db.parent / f".{db.name}.stale1.partial"
+    decoy_backup.write_bytes(b"backup-temp")
+    os.utime(decoy_backup, ns=(1, 1))
+    decoy_contains = db.parent / "note.search.db.stale1.partial"
+    decoy_contains.write_bytes(b"contains-pattern")
+    os.utime(decoy_contains, ns=(1, 1))
+    decoy_no_dot = db.parent / "search.db.stale1.partial"
+    decoy_no_dot.write_bytes(b"no-dot")
+    os.utime(decoy_no_dot, ns=(1, 1))
+    other_dir = db.parent / "other"
+    other_dir.mkdir()
+    decoy_elsewhere = _stale_index_partial(other_dir, "stale1")
+    link = db.parent / ".search.db.link1.partial"
+    link.symlink_to(leftover)
+    named_dir = db.parent / ".search.db.dir1.partial"
+    named_dir.mkdir()
+    empty_middle = db.parent / ".search.db.partial"
+    empty_middle.write_bytes(b"empty-middle")
+    os.utime(empty_middle, ns=(1, 1))
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "the ibis note"}, "k-partial-1")
+    ledger_before = db.read_bytes()
+    code, out, err = invoke(monkeypatch, ["--db", str(db), "index"])
+    assert code == EXIT_OK, err
+    remaining = {p.name for p in db.parent.iterdir()}
+    assert leftover.name not in remaining
+    assert decoy_backup.is_file(), "a refresh removed another file's partial"
+    assert db.is_file(), "a refresh removed the ledger database"
+    assert decoy_backup.read_bytes() == b"backup-temp"
+    assert decoy_contains.read_bytes() == b"contains-pattern"
+    assert decoy_no_dot.read_bytes() == b"no-dot"
+    assert decoy_elsewhere.read_bytes() == b"stale-index"
+    assert link.is_symlink()
+    assert named_dir.is_dir()
+    assert empty_middle.read_bytes() == b"empty-middle"
+    assert db.read_bytes() == ledger_before
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+def test_the_running_rebuild_keeps_its_own_partial_until_it_is_published(
+    db, monkeypatch
+):
+    leftover = _stale_index_partial(db.parent, "stale4")
+    seen: dict = {}
+    real = search_mod._replace_index
+
+    def wrap(tmp, index, ledger):
+        seen["own_name"] = tmp.name
+        seen["own_existed"] = tmp.is_file()
+        seen["stale_during"] = leftover.is_file()
+        assert tmp.name != leftover.name
+        real(tmp, index, ledger)
+
+    monkeypatch.setattr(search_mod, "_replace_index", wrap)
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert seen["own_existed"] is True
+    assert seen["stale_during"] is True
+    assert not leftover.exists()
+    assert not (db.parent / seen["own_name"]).exists()
+
+
+def test_a_partial_removal_error_is_one_stderr_line_and_keeps_the_new_index(
+    db, monkeypatch
+):
+    leftover = _stale_index_partial(db.parent, "stale5")
+    real_unlink = os.unlink
+
+    def flaky(path, *args, **kwargs):
+        if Path(path) == leftover:
+            raise OSError(13, "Permission denied")
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", flaky)
+    code, out, err = invoke(monkeypatch, ["--db", str(db), "index"])
+    assert code == EXIT_OK, err
+    assert leftover.is_file()
+    assert leftover.read_bytes() == b"stale-index"
+    lines = [ln for ln in err.splitlines() if ln]
+    assert len(lines) == 1, err
+    assert lines[0].startswith("cannot remove leftover search index partial ")
+    assert leftover.name in lines[0]
+    assert "\n" not in lines[0]
+    assert search_mod.index_status(db)["status"] == "current"
+    assert _index(db).is_file()
+
+
+def test_a_listing_error_during_cleanup_leaves_the_partial_and_the_index(
+    db, monkeypatch
+):
+    leftover = _stale_index_partial(db.parent, "stale8")
+    real_replace = search_mod._replace_index
+    real_listdir = os.listdir
+
+    def replace_then_break(tmp, index, ledger):
+        real_replace(tmp, index, ledger)
+
+        def boom(path):
+            if Path(path) == db.parent:
+                raise OSError(13, "Permission denied")
+            return real_listdir(path)
+
+        monkeypatch.setattr(os, "listdir", boom)
+
+    monkeypatch.setattr(search_mod, "_replace_index", replace_then_break)
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert leftover.is_file()
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+def test_doctor_refresh_removes_a_planted_stale_index_partial(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    leftover = _stale_index_partial(db.parent, "stale6")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "the ibis note"}, "k-partial-6")
+    code, body = run_json(monkeypatch, db, "doctor")
+    assert code == EXIT_OK, body
+    assert not leftover.exists()
+    assert body["data"]["search"]["status"] == "current"
+
+
+def test_search_refresh_removes_a_planted_stale_index_partial(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    leftover = _stale_index_partial(db.parent, "stale7")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "the ibis note"}, "k-partial-7")
+    code, body = run_json(monkeypatch, db, "search", "ibis")
+    assert code == EXIT_OK, body
+    assert not leftover.exists()
+    assert body["data"]["cards"][0]["id"] == "T-feed"
+
+
+def test_cleanup_leaves_a_partial_when_fcntl_is_unavailable(db, monkeypatch):
+    leftover = _stale_index_partial(db.parent, "nofcntl")
+    monkeypatch.setattr(search_mod, "fcntl", None)
+    ledger_before = db.read_bytes()
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert leftover.is_file()
+    assert leftover.read_bytes() == b"stale-index"
+    assert db.read_bytes() == ledger_before
+    assert search_mod.index_status(db)["status"] == "current"
+    assert _index(db).is_file()
+
+
+def test_a_lock_error_leaves_the_partial_and_the_refresh_still_publishes(
+    db, monkeypatch
+):
+    leftover = _stale_index_partial(db.parent, "lockerr")
+
+    def no_locks(_fd, _flags):
+        raise OSError(errno.ENOLCK, "No locks available")
+
+    monkeypatch.setattr(search_mod.fcntl, "flock", no_locks)
+    ledger_before = db.read_bytes()
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert leftover.read_bytes() == b"stale-index"
+    assert db.read_bytes() == ledger_before
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+def test_a_symlinked_lock_file_leaves_the_partial_and_the_refresh_still_publishes(
+    db, monkeypatch
+):
+    target = db.parent / "lock-target"
+    target.write_bytes(b"not-a-lock")
+    _lock_path(db).symlink_to(target)
+    leftover = _stale_index_partial(db.parent, "symlock")
+    ledger_before = db.read_bytes()
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert leftover.is_file(), "a refresh removed a leftover through a symlinked lock file"
+    assert leftover.read_bytes() == b"stale-index"
+    assert _lock_path(db).is_symlink()
+    assert target.read_bytes() == b"not-a-lock"
+    assert db.read_bytes() == ledger_before
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+def test_a_lock_path_that_is_not_a_regular_file_leaves_the_partial(db, monkeypatch):
+    _lock_path(db).mkdir()
+    leftover = _stale_index_partial(db.parent, "dirlock")
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert leftover.is_file(), "a refresh removed a leftover with a directory at the lock path"
+    assert leftover.read_bytes() == b"stale-index"
+    assert _lock_path(db).is_dir()
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+@pytest.mark.parametrize("path", ["rebuild", "append"])
+def test_the_writer_holds_its_shared_lock_before_its_temp_is_created(
+    db, monkeypatch, path
+):
+    if path == "append":
+        run_json(monkeypatch, db, "index")
+        with open_ledger(db) as lg:
+            _append(lg, "item.note", "T-feed", {"text": "the ibis note"}, "k-lock-order")
+        args = ("index",)
+    else:
+        args = ("index", "--rebuild")
+    real = tempfile.mkstemp
+    seen: list[str] = []
+
+    def watch(*a, **kw):
+        if kw.get("prefix") == ".search.db." and kw.get("suffix") == ".partial":
+            if not _lock_path(db).is_file():
+                seen.append("no lock file")
+            elif _fresh_lock_granted(db, fcntl.LOCK_EX | fcntl.LOCK_NB):
+                seen.append("exclusive lock granted")
+            else:
+                seen.append("held")
+        return real(*a, **kw)
+
+    monkeypatch.setattr(tempfile, "mkstemp", watch)
+    code, body = run_json(monkeypatch, db, *args)
+    assert code == EXIT_OK, body
+    assert seen == ["held"], seen
+    assert search_mod.index_status(db)["status"] == "current"
+    assert stat.S_IMODE(_index(db).stat().st_mode) & 0o077 == 0
+
+
+def test_the_lock_file_keeps_its_inode_and_mode_across_refreshes(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    lock = _lock_path(db)
+    first = os.lstat(lock)
+    assert stat.S_ISREG(first.st_mode)
+    assert stat.S_IMODE(first.st_mode) & 0o077 == 0
+    leftover = _stale_index_partial(db.parent, "perm1")
+    code, body = run_json(monkeypatch, db, "index", "--rebuild")
+    assert code == EXIT_OK, body
+    assert not leftover.exists()
+    assert lock.exists(), "a refresh removed the lock file"
+    after = os.lstat(lock)
+    assert (after.st_dev, after.st_ino) == (first.st_dev, first.st_ino)
+    assert stat.S_ISREG(after.st_mode)
+
+
+def test_the_cleanup_lists_the_directory_only_while_it_holds_the_exclusive_lock(
+    db, monkeypatch
+):
+    run_json(monkeypatch, db, "index")
+    leftover = _stale_index_partial(db.parent, "list1")
+    real_listdir = os.listdir
+    seen: list[bool] = []
+
+    def watch(path=None):
+        if path is not None and Path(path) == db.parent:
+            seen.append(not _fresh_lock_granted(db, fcntl.LOCK_SH | fcntl.LOCK_NB))
+        return real_listdir(path)
+
+    monkeypatch.setattr(os, "listdir", watch)
+    code, body = run_json(monkeypatch, db, "index", "--rebuild")
+    assert code == EXIT_OK, body
+    assert seen, "the cleanup never listed the directory"
+    assert all(seen), seen
+    assert not leftover.exists()
+
+
+def test_a_live_writer_keeps_its_partial_until_it_is_killed(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    child, tmp, _go = _start_paused_writer(db)
+    try:
+        assert tmp.is_file()
+        code, body = run_json(monkeypatch, db, "index", "--rebuild")
+        assert code == EXIT_OK, body
+        assert tmp.is_file(), "a refresh removed a live writer's partial"
+    finally:
+        if child.poll() is None:
+            os.kill(child.pid, signal.SIGKILL)
+        child.wait(timeout=10)
+    assert child.returncode == -signal.SIGKILL
+    assert tmp.is_file()
+    code, body = run_json(monkeypatch, db, "index", "--rebuild")
+    assert code == EXIT_OK, body
+    assert not tmp.exists()
+    assert search_mod.index_status(db)["status"] == "current"
+
+
+def test_two_overlapping_rebuilds_both_publish(db, monkeypatch):
+    run_json(monkeypatch, db, "index")
+    child, tmp, go = _start_paused_writer(db)
+    try:
+        code, body = run_json(monkeypatch, db, "index", "--rebuild")
+        assert code == EXIT_OK, body
+        assert tmp.is_file(), "rebuild B removed writer A's live temp"
+        go.write_text("go", encoding="utf-8")
+        _out, err = child.communicate(timeout=60)
+        assert child.returncode == 0, err
+    finally:
+        _stop(child)
+    assert not tmp.exists()
+    assert search_mod.index_status(db)["status"] == "current"
+    assert stat.S_IMODE(_index(db).stat().st_mode) & 0o077 == 0

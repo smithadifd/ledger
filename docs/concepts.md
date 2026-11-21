@@ -485,7 +485,19 @@ The index stores a manifest of what it was built from; `doctor` reports it
 indexed on the next search) or `current`. `search` and `ledger index` bring a
 `behind` index up to date by appending the new events, without re-reading
 markdown; a missing or stale index, or `ledger index --rebuild`, is rebuilt
-from scratch. Each report also carries a `severity` to colour it by:
+from scratch. Every index writer holds a shared lock on one lock file
+beside the index, `.search.db.lock` (created empty with mode 0600, never
+removed), from before it creates its `.search.db.<id>.partial` temp until
+that temp is published or removed. After a successful refresh has released
+its own shared lock, it asks for an exclusive lock on that file without
+waiting; only when no writer is running does it remove the leftover
+`.search.db.<id>.partial` files of rebuilds that did not finish (regular
+files whose name matches exactly). A held lock, a lock file that is a
+symlink or cannot be opened, a symlink, a directory or a near-miss name
+leaves every file in place, and a removal error is one line on stderr and
+does not fail the refresh. A writer from a version before the lock file
+takes no lock, so a refresh during an upgrade can remove that writer's
+temp. Each report also carries a `severity` to colour it by:
 
 | severity | when |
 |----------|------|
