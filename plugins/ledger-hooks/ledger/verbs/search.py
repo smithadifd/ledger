@@ -15,6 +15,9 @@ from ledger.verbs import (
 )
 
 DEFAULT_SEARCH_LIMIT = 10
+TITLE_CAP = 100
+TITLE_ELLIPSIS = "…"
+MORE_HINT = "(raise --limit or narrow with --type/--item)"
 SINCE_HELP = (
     "YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|+HH:MM], inclusive, UTC unless it has an offset; compares "
     "an event's recorded time, an item's newest event, a file's mtime"
@@ -79,19 +82,46 @@ def when_option(value: str | None, flag: str, *, end_of_day: bool):
         ) from None
 
 
-def _text(cards: list[dict]) -> str:
+def _capped_title(title: str) -> str:
+    """At most ``TITLE_CAP`` characters, ending with an ellipsis when longer.
+
+    Cap is applied after ``_one_line``, so the printed title is never more
+    than ``TITLE_CAP`` characters. JSON keeps the stored title.
+    """
+    shown = _one_line(title)
+    if len(shown) <= TITLE_CAP:
+        return shown
+    return shown[: TITLE_CAP - len(TITLE_ELLIPSIS)] + TITLE_ELLIPSIS
+
+
+def _more_line(truncated: bool) -> str | None:
+    """The cut line, or ``None`` when results were not cut by ``--limit``.
+
+    The search fetches one extra row to set ``truncated``, so the count
+    past the limit is unknown. Fail-closed: print ``+more`` rather than
+    inventing N or omitting the line.
+    """
+    if not truncated:
+        return None
+    return f"+more {MORE_HINT}"
+
+
+def _text(cards: list[dict], *, truncated: bool) -> str:
     lines = []
     for card in cards:
         # Stored titles and snippets are escaped, so neither a control
         # sequence nor a TAB or line break in them reaches the terminal.
         lines.append(
             f"{card['score']:.3f}\t{_one_line(card['doc_type'])}\t"
-            f"{_one_line(card['id'])}\t{_one_line(card['title'])}"
+            f"{_one_line(card['id'])}\t{_capped_title(card['title'])}"
         )
         if card["snippet"]:
             lines.append(f"\t{_one_line(card['snippet'])}")
         if "caveat" in card:
             lines.append(f"\t({_one_line(card['caveat'])})")
+    more = _more_line(truncated)
+    if more is not None:
+        lines.append(more)
     return "\n".join(lines)
 
 
@@ -119,7 +149,7 @@ def run(args, ctx: Context) -> Result:
         raise CliError(str(exc), code="search", exit_code=EXIT_REFUSED) from exc
     if not data["cards"]:
         raise CliError("no matching documents", code="empty", exit_code=EXIT_NOT_FOUND)
-    return Result(data=data, text=_text(data["cards"]))
+    return Result(data=data, text=_text(data["cards"], truncated=data["truncated"]))
 
 
 VERB = Verb(

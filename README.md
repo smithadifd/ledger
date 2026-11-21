@@ -542,7 +542,7 @@ captured and `pick` refuses (`capture_missing`).
 | `context` | print a bounded orientation pack for an item or initiative and its linked items | no |
 | `grants` | render trust grants from their election records, or `--check` that one is standing | no |
 | `export-item` | print one item's events (ephemeral ones decay after close) | no |
-| `search` | full-text search over items, decisions, utterances and markdown roots | no |
+| `search` | full-text search over items, decisions, utterances and markdown roots; text output caps titles at 100 characters and says when more matches sit past the limit | no |
 | `index` | build or rebuild the derived search index | no |
 | `lint-quotes` | check every election's quotes against its utterance | no |
 | `verify` | verify the hash chain and every payload, then replay the `child-of` forest and fail with exit 4 on the first break; `--system` checks the claim | no |
