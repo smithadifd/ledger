@@ -879,7 +879,15 @@ so a typo never reads as no mentions; an item no other item mentions exits 1 wit
 on other items name ID`. Words and `--mentions` together are a usage error. It refreshes the
 index first, as `search` does, and writes no event.
 
-**`index [--rebuild]`** Build `search.db` beside the database.
+**`index [--rebuild]`** Build `search.db` beside the database. A rebuild that
+did not finish can leave a `.search.db.<id>.partial` file beside it; the next
+refresh (this verb when the index is not current, `--rebuild`, `search`, or
+`doctor`) removes each leftover that matches that name exactly, is a regular
+file, is not this rebuild's own temp, and is older than this rebuild. A name
+that only contains the pattern, a leftover of another file, a symlink, or a
+file whose type cannot be read is left as it is. A removal error is one line
+on stderr and does not fail the refresh or lose the new index. The ledger
+database and its backups are not touched.
 
 **`search-miss --query Q --expected EVENT_OR_ITEM [--note T]`** Log a search
 that failed to surface something you later found another way. It appends one

@@ -82,6 +82,15 @@ is correct only because the manifest's sources (paths, mtimes and sizes),
 roots, format, ranker and database all still match. Anything else, or any
 error on the way, takes the full rebuild instead.
 
+A rebuild that does not finish can leave its temp file beside the index,
+named with the same prefix and suffix the writer uses. The next successful
+refresh removes each leftover that is a regular file, matches that name
+exactly, is not this writer's own temp, and is older than this rebuild.
+A symlink, a directory, a name that only contains the pattern, a leftover
+of another file, or a file whose type cannot be read is left as it is.
+A removal error is one line on stderr and does not fail the refresh or
+lose the new index.
+
 ``index_status`` also gives a ``severity`` a reader can colour by: ``ok`` for
 ``current``; ``info`` for ``behind``, ``stale`` or ``missing``, which the next
 search or ``ledger index`` brings up to date on its own; ``warn`` when the
@@ -102,6 +111,7 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import tempfile
 from collections import Counter
 from dataclasses import dataclass
@@ -1068,6 +1078,66 @@ def _delete_doc(conn: sqlite3.Connection, rowid: int) -> None:
         conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (rowid,))
 
 
+def _index_partial_parts() -> tuple[str, str]:
+    """The prefix and suffix ``tempfile.mkstemp`` uses for this index's temp file.
+
+    A leftover matches only when its name starts with the prefix, ends with
+    the suffix, and has a non-empty middle: the same shape the writer creates.
+    """
+    return f".{SEARCH_DB_NAME}.", ".partial"
+
+
+def _create_index_partial(directory: Path) -> Path:
+    prefix, suffix = _index_partial_parts()
+    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=directory)
+    os.close(fd)
+    return Path(tmp_name)
+
+
+def _is_index_partial_name(name: str) -> bool:
+    prefix, suffix = _index_partial_parts()
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        return False
+    return bool(name[len(prefix) : len(name) - len(suffix)])
+
+
+def _remove_stale_index_partials(
+    index: Path, keep: Path, older_than_ns: int
+) -> None:
+    """Remove leftover writer temps in ``index``'s directory.
+
+    Only a regular file whose name matches ``_is_index_partial_name``, that
+    is not ``keep``, and whose ``lstat`` mtime is older than
+    ``older_than_ns``. Anything else, and any ``stat`` or listing error, is
+    left in place. A removal error is one line on stderr and is not raised.
+    """
+    directory = index.parent
+    try:
+        names = os.listdir(directory)
+    except OSError:
+        return
+    keep_name = keep.name
+    for name in names:
+        if name == keep_name:
+            continue
+        if not _is_index_partial_name(name):
+            continue
+        path = directory / name
+        try:
+            found = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISREG(found.st_mode):
+            continue
+        if found.st_mtime_ns >= older_than_ns:
+            continue
+        try:
+            os.unlink(path)
+        except OSError as exc:
+            line = f"cannot remove leftover search index partial {path}: {exc}"
+            print(line.replace("\n", " "), file=sys.stderr)
+
+
 def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> dict[str, Any]:
     """Rebuild ``search.db`` from scratch and swap it in atomically."""
     resolved = resolve_db_path(db)
@@ -1087,9 +1157,8 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
                 path, doc_type, roots, mtime_ns=stat[0] if stat else None))
         except OSError:
             manifest["sources"].pop(str(path), None)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{SEARCH_DB_NAME}.", suffix=".partial", dir=index.parent)
-    os.close(fd)
-    tmp = Path(tmp_name)
+    tmp = _create_index_partial(index.parent)
+    older_than_ns = os.lstat(tmp).st_mtime_ns
     try:
         conn = sqlite3.connect(tmp)
         try:
@@ -1108,6 +1177,7 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
         finally:
             conn.close()
         _replace_index(tmp, index, resolved)
+        _remove_stale_index_partials(index, keep=tmp, older_than_ns=older_than_ns)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -1216,11 +1286,8 @@ def _append_trailing(
         return None
     tmp: Path | None = None
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{SEARCH_DB_NAME}.", suffix=".partial", dir=index.parent
-        )
-        os.close(fd)
-        tmp = Path(tmp_name)
+        tmp = _create_index_partial(index.parent)
+        older_than_ns = os.lstat(tmp).st_mtime_ns
         conn = sqlite3.connect(tmp)
         try:
             source.backup(conn)
@@ -1232,6 +1299,7 @@ def _append_trailing(
         finally:
             conn.close()
         _replace_index(tmp, index, resolved)
+        _remove_stale_index_partials(index, keep=tmp, older_than_ns=older_than_ns)
         tmp = None
     finally:
         source.close()

@@ -485,7 +485,12 @@ The index stores a manifest of what it was built from; `doctor` reports it
 indexed on the next search) or `current`. `search` and `ledger index` bring a
 `behind` index up to date by appending the new events, without re-reading
 markdown; a missing or stale index, or `ledger index --rebuild`, is rebuilt
-from scratch. Each report also carries a `severity` to colour it by:
+from scratch. After a successful refresh, leftover `.search.db.<id>.partial`
+files from a rebuild that did not finish are removed when they match that
+name exactly, are regular files, are not this rebuild's own temp, and are
+older than this rebuild; a symlink, a directory, a near-miss name, or a
+file whose type cannot be read is left as it is, and a removal error is one
+line on stderr and does not fail the refresh. Each report also carries a `severity` to colour it by:
 
 | severity | when |
 |----------|------|
