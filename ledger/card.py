@@ -159,10 +159,38 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 from . import lease
 from .export import decay_boundary, decayed
 from .schema import SPEC_KIND
+from .search import DECIDED_PREFIX
 from .store import Ledger
 
 WORD_LIMIT = 400
 FOOTER = "This card is a projection; the events are the authority"
+
+
+def _is_decided_note(row: Mapping[str, Any]) -> bool:
+    """True when note ``text``, after leading whitespace, starts with
+    ``DECIDED_PREFIX`` exactly (the same grammar search uses)."""
+    text = row.get("text")
+    return isinstance(text, str) and text.lstrip().startswith(DECIDED_PREFIX)
+
+
+def _decided_note_rows(notes: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    """``item.note`` rows listed under Decisions as notes, never elections."""
+    return [
+        {"event_id": row["event_id"], "as": "note", "text": row["text"]}
+        for row in notes
+        if _is_decided_note(row)
+    ]
+
+
+def _election_rows(
+    decisions: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """Rows a pick or election check may count: never a decided: note."""
+    return tuple(
+        row
+        for row in decisions
+        if row.get("as") != "note" and "chosen" in row
+    )
 # Links are capped oldest first in this stage, never dropped whole at once.
 DROP_ORDER = ("links", "notes")
 # A bounded card shows at most this many links, the newest, then a count.
@@ -477,7 +505,8 @@ class Card:
             "revision": {"id": self.revision_id, "hash": self.revision_hash},
             "source_event_ids": list(self.source_event_ids),
             "source_event_ids_omitted": self.source_omitted,
-            "decisions": [dict(row) for row in self.decisions],
+            "decisions": [dict(row) for row in self.decisions]
+            + _decided_note_rows(self.notes),
             "open_questions": [dict(row) for row in self.open_questions],
             "next_step": self.next_step,
             "links": [dict(row) for row in self.links],
@@ -651,7 +680,10 @@ def _fmt_list(lines: list[str]) -> str:
     return "\n".join(lines) if lines else "(none)"
 
 
-def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
+def _fmt_decisions(
+    rows: tuple[dict[str, Any], ...],
+    notes: tuple[dict[str, Any], ...] = (),
+) -> str:
     lines = [
         (
             f"- event={row['event_id']} quote_ref={_one_line(row['quote_ref'])}: "
@@ -659,6 +691,10 @@ def _fmt_decisions(rows: tuple[dict[str, Any], ...]) -> str:
         )
         for row in rows
     ]
+    for note in _decided_note_rows(notes):
+        lines.append(
+            f"- event={note['event_id']} note: {_one_line(note['text'])}"
+        )
     return _fmt_list(lines)
 
 
@@ -1154,7 +1190,9 @@ def _render_card(card: Card, order: list[str]) -> str:
     parts += [
         "",
         "## Decisions",
-        _with_marker(_fmt_decisions(card.decisions), card, "decisions", order),
+        _with_marker(
+            _fmt_decisions(card.decisions, card.notes), card, "decisions", order
+        ),
         "",
         "## Open questions",
         _with_marker(
@@ -1236,16 +1274,18 @@ def _record_omission(
 
 
 def _latest_choice(decisions: tuple[dict[str, Any], ...]) -> str | None:
-    if not decisions:
+    rows = _election_rows(decisions)
+    if not rows:
         return None
-    return max(decisions, key=lambda row: int(row["event_id"]))["chosen"]
+    return max(rows, key=lambda row: int(row["event_id"]))["chosen"]
 
 
 def _next_step_ids(card: Card) -> set[int]:
     """Events the next step reads: every open ask and the latest election."""
     ids = {int(row["asked_event_id"]) for row in card.open_questions}
-    if card.decisions:
-        ids.add(max(int(row["event_id"]) for row in card.decisions))
+    elected = _election_rows(card.decisions)
+    if elected:
+        ids.add(max(int(row["event_id"]) for row in elected))
     return ids
 
 
@@ -1254,8 +1294,9 @@ def _key_step_ids(card: Card) -> set[int]:
     ids: set[int] = set()
     if card.open_questions:
         ids.add(max(int(row["asked_event_id"]) for row in card.open_questions))
-    if card.decisions:
-        ids.add(max(int(row["event_id"]) for row in card.decisions))
+    elected = _election_rows(card.decisions)
+    if elected:
+        ids.add(max(int(row["event_id"]) for row in elected))
     return ids
 
 
@@ -1356,9 +1397,9 @@ def bound_card(card: Card) -> Card:
        so the header always names each row the card shows.
     2. Trim owner, claim and title to what the cap needs, never below
        FIELD_MIN_WORDS words, each with a "(+K words cut)" marker.
-    3. Cap links (oldest first), then drop notes; shorten ask fields; cap
-       decisions, blockers, then questions; and as a last resort trim the
-       title and next step.
+    3. Cap links (oldest first), then drop ordinary notes, then decided:
+       notes oldest first; shorten ask fields; cap decisions, blockers,
+       then questions; and as a last resort trim the title and next step.
 
     Before any of these, links are capped to the newest LINK_LIMIT.
     """
@@ -1442,6 +1483,11 @@ def bound_card(card: Card) -> Card:
                 # the oldest link is not always first: drop the lowest event id.
                 row = min(items, key=lambda row: row["event_id"])
                 items.remove(row)
+            elif section == "notes":
+                ordinary = [row for row in items if not _is_decided_note(row)]
+                pool = ordinary if ordinary else items
+                row = min(pool, key=lambda row: int(row["event_id"]))
+                items.remove(row)
             else:
                 row = items.pop(0)
             cut_rows(section, [row])
@@ -1482,6 +1528,19 @@ def bound_card(card: Card) -> Card:
                 links.remove(row)
                 cut_rows("links", [row])
                 current = apply(links=tuple(links))
+            continue
+        if section == "notes":
+            remaining = list(items)
+            ordinary = [row for row in remaining if not _is_decided_note(row)]
+            if ordinary:
+                cut_rows("notes", ordinary)
+                remaining = [row for row in remaining if _is_decided_note(row)]
+                current = apply(notes=tuple(remaining))
+            while remaining and _card_word_count(current, card) > WORD_LIMIT:
+                row = min(remaining, key=lambda row: int(row["event_id"]))
+                remaining.remove(row)
+                cut_rows("notes", [row])
+                current = apply(notes=tuple(remaining))
             continue
         cut_rows(section, items)
         current = apply(**{section: ()})
