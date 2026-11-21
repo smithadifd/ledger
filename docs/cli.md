@@ -846,6 +846,14 @@ A `decided:` note is a `decision` of its own as well as part of its item, and
 a dotted word (`release.notes`) is matched as a phrase. Rebuilds
 the index first when it is missing, stale or behind new events, and refuses by name (exit 3)
 when it cannot rewrite the index, rather than answering from it.
+Text output prints one row per card (score, type, id, title) and an indented snippet, and caps
+each title at 100 characters with an ellipsis when longer. When more matches exist than
+`--limit` (default 10), the last line is `+more (raise --limit or narrow with --type/--item)`
+rather than a count, because the search does not return how many sit past the limit.
+`--json` is unchanged: `data` holds `cards`, `filters`, `limit`, `query`, `ranker`, `refreshed`
+and `truncated`; `truncated` is true when more matches exist, and each card keeps its stored
+`title` plus `score`, `doc_type`, `id`, `snippet`, and when present `path`, `item_id`, `status`,
+`date` and `caveat`.
 
 **`index [--rebuild]`** Build `search.db` beside the database.
 
