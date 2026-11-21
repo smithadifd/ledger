@@ -82,6 +82,47 @@ is correct only because the manifest's sources (paths, mtimes and sizes),
 roots, format, ranker and database all still match. Anything else, or any
 error on the way, takes the full rebuild instead.
 
+A rebuild that does not finish can leave its temp file beside the index,
+named with the same prefix and suffix the writer uses. Every writer holds
+a shared flock on one lock file beside the index (``.search.db.lock``,
+created with mode 0600 when absent, opened without following a symlink,
+and never removed or replaced) from before its temp is created until
+that temp is published or removed. After its own publish, and after it
+has released its shared lock, a refresh asks for an exclusive
+non-blocking flock on the lock file. Only when that is granted, so no
+writer is running, does it list the directory and look at each file
+whose name matches that pattern exactly. A refused lock, a lock file
+that is a symlink, is not a regular file or cannot be opened, a
+platform without fcntl, a listing error, or a name that only contains
+the pattern leaves every file in place and prints nothing. A candidate
+that is the ledger database's own file (same device and inode, so a
+hard link under another name too) or whose name begins with the
+database's file name is skipped without a word, and when the database
+cannot be stat'ed nothing is removed.
+
+Every other candidate is removed only when it is positively identified
+as a disposable index temp: a regular file with no SQLite side file
+(``-journal``, ``-wal``, ``-shm``) beside it that is either empty, or
+starts with the 16-byte SQLite header and has a schema whose tables are
+all ones the writer creates (``_index_table_names``, read from
+``SCHEMA_SQL`` itself; an index or trigger on one of them is allowed, any
+other table, a view or anything else is not). The schema is read through
+a ``mode=ro&immutable=1`` connection, which takes no lock and creates no
+side file. Just before the unlink the candidate is checked again: still
+no side file, and the same device, inode and size. Anything else (a
+ledger, a ledger backup, a file holding an ``events`` table, a symlink, a
+directory, a short or non-SQLite file, a stat, read or SQLite error, a
+side file, a change) is left byte for byte as it was, with one
+``search index cleanup skipped PATH: REASON`` line on stderr on every
+refresh until it is moved. A removal error is one line on stderr too.
+None of these fails the refresh or loses the new index. A side file
+keeps a candidate because a WAL database's tables can sit in its
+``-wal`` file alone: a ledger just created and still open reads as an
+empty schema from its main file. A writer from a version before the
+lock file takes no lock, so a refresh during an upgrade can remove that
+writer's temp when no side file is beside it at that moment; that
+writer's refresh then fails and the next refresh rebuilds.
+
 ``index_status`` also gives a ``severity`` a reader can colour by: ``ok`` for
 ``current``; ``info`` for ``behind``, ``stale`` or ``missing``, which the next
 search or ``ledger index`` brings up to date on its own; ``warn`` when the
@@ -102,8 +143,16 @@ import os
 import re
 import sqlite3
 import stat
+import sys
 import tempfile
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1068,6 +1117,315 @@ def _delete_doc(conn: sqlite3.Connection, rowid: int) -> None:
         conn.execute(f"DELETE FROM {table} WHERE rowid = ?", (rowid,))
 
 
+def _index_partial_parts() -> tuple[str, str]:
+    """The prefix and suffix ``tempfile.mkstemp`` uses for this index's temp file.
+
+    A leftover matches only when its name starts with the prefix, ends with
+    the suffix, and has a non-empty middle: the same shape the writer creates.
+    """
+    return f".{SEARCH_DB_NAME}.", ".partial"
+
+
+def _index_lock_path(index: Path) -> Path:
+    """The one lock file beside ``index`` that every index writer shares.
+
+    Its name never matches the partial pattern. It is never removed or
+    replaced, so every writer and every cleanup lock the same inode.
+    """
+    return index.parent / f".{SEARCH_DB_NAME}.lock"
+
+
+def _close_quietly(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _open_index_lock(index: Path) -> int | None:
+    """A new descriptor on the index lock file, created with mode 0600 if absent.
+
+    ``None`` when fcntl or ``O_NOFOLLOW`` is missing, the open fails (a
+    symlink at the lock path fails it), or what is there is not a regular
+    file. ``O_NONBLOCK`` keeps a FIFO at the lock path from blocking the
+    open. Each call opens its own descriptor: flock belongs to the open
+    file, so a descriptor this process still holds conflicts with a new one.
+    """
+    if fcntl is None:
+        return None
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        return None
+    flags = (
+        os.O_RDONLY
+        | os.O_CREAT
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        fd = os.open(_index_lock_path(index), flags, 0o600)
+    except OSError:
+        return None
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError:
+        regular = False
+    if not regular:
+        _close_quietly(fd)
+        return None
+    return fd
+
+
+@contextmanager
+def _index_writer_lock(index: Path) -> Iterator[None]:
+    """Hold a blocking ``LOCK_SH`` on the index lock file for the block.
+
+    A writer creates, builds and publishes (or removes) its temp inside the
+    block, so the cleanup's ``LOCK_EX`` is refused while any writer's temp
+    exists. The descriptor is closed, which releases the lock, when the
+    block ends. When the lock file cannot be opened or locked the writer
+    runs without the lock, as on a platform without fcntl.
+    """
+    fd = _open_index_lock(index)
+    if fd is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+        except OSError:
+            _close_quietly(fd)
+            fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            _close_quietly(fd)
+
+
+def _create_index_partial(directory: Path) -> Path:
+    """Create the writer's temp with ``mkstemp`` and the partial prefix and suffix.
+
+    Called only inside ``_index_writer_lock``. ``mkstemp`` creates the file
+    with mode 0600 and SQLite opens that file, so the published index keeps
+    the mode.
+    """
+    prefix, suffix = _index_partial_parts()
+    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=directory)
+    os.close(fd)
+    return Path(tmp_name)
+
+
+def _is_index_partial_name(name: str) -> bool:
+    prefix, suffix = _index_partial_parts()
+    if not name.startswith(prefix) or not name.endswith(suffix):
+        return False
+    return bool(name[len(prefix) : len(name) - len(suffix)])
+
+
+# The first 16 bytes of every SQLite database file.
+_SQLITE_HEADER = b"SQLite format 3\x00"
+# Files SQLite keeps beside a database while a connection is open, or after
+# a crash. A WAL database's tables can sit in its -wal file alone, so the
+# database's own bytes do not show what it holds.
+_SQLITE_SIDE_SUFFIXES = ("-journal", "-wal", "-shm")
+
+
+def _index_table_names() -> frozenset[str]:
+    """The table names the index writer creates, read from ``SCHEMA_SQL`` itself.
+
+    The writer's own statements run in a private in-memory database, so the
+    fts5 shadow tables are named as SQLite names them and the list is never
+    typed a second time.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        for statement in SCHEMA_SQL:
+            conn.execute(statement)
+        rows = conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        return frozenset(row[0] for row in rows)
+    finally:
+        conn.close()
+
+
+def _side_file_reason(path: Path) -> str | None:
+    """Why a SQLite side file beside ``path`` keeps it, or ``None`` when there is none.
+
+    A side file that cannot be checked for keeps it too.
+    """
+    for suffix in _SQLITE_SIDE_SUFFIXES:
+        side = path.with_name(path.name + suffix)
+        try:
+            os.lstat(side)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f"cannot check for {side.name} beside it: {exc}"
+        return f"{side.name} is beside it, so a connection is open or was cut off"
+    return None
+
+
+def _why_not_index_temp(path: Path, found: os.stat_result) -> str | None:
+    """Why ``path`` is not a disposable index temp, or ``None`` when it is one.
+
+    ``found`` is the candidate's ``lstat``, a regular file. It is one only
+    when no SQLite side file is beside it and either it is empty (``mkstemp``
+    made it and the writer stopped before SQLite wrote a page), or its first
+    16 bytes are the SQLite header and every row of its schema is a table
+    the writer creates, or an index or trigger on one. The schema is read
+    through a ``mode=ro&immutable=1`` connection, which takes no lock and
+    creates no side file. Any other answer, and any error on the way, is
+    the reason returned.
+    """
+    side = _side_file_reason(path)
+    if side is not None:
+        return side
+    if found.st_size == 0:
+        return None
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        return f"cannot open it: {exc}"
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (found.st_dev, found.st_ino):
+            return "it changed while it was being read"
+        head = b""
+        while len(head) < len(_SQLITE_HEADER):
+            chunk = os.read(fd, len(_SQLITE_HEADER) - len(head))
+            if not chunk:
+                break
+            head += chunk
+    except OSError as exc:
+        return f"cannot read it: {exc}"
+    finally:
+        _close_quietly(fd)
+    if len(head) < len(_SQLITE_HEADER):
+        return f"short read: {len(head)} of {len(_SQLITE_HEADER)} header bytes"
+    if head != _SQLITE_HEADER:
+        return "not a SQLite file"
+    uri = Path(os.path.abspath(path)).as_uri() + "?mode=ro&immutable=1"
+    try:
+        allowed = _index_table_names()
+        conn = sqlite3.connect(uri, uri=True, isolation_level=None)
+        try:
+            rows = conn.execute("SELECT type, name, tbl_name FROM sqlite_master").fetchall()
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        return f"cannot read its SQLite schema: {exc}"
+    for kind, name, table in rows:
+        if kind == "table":
+            if name not in allowed:
+                return f"it holds table {name}, which the index writer never creates"
+        elif kind in ("index", "trigger"):
+            if table not in allowed:
+                return f"it holds {kind} {name} on {table}, which the index writer never creates"
+        else:
+            return f"it holds {kind} {name}, which the index writer never creates"
+    return None
+
+
+def _changed_before_unlink(path: Path, found: os.stat_result) -> str | None:
+    """Why ``path`` must stay after all, checked just before the unlink.
+
+    A SQLite side file beside it, or a device, inode or size that differs
+    from the ``lstat`` the identification read, keeps it.
+    """
+    side = _side_file_reason(path)
+    if side is not None:
+        return side
+    try:
+        now = os.lstat(path)
+    except OSError as exc:
+        return f"cannot stat it again before removal: {exc}"
+    if (now.st_dev, now.st_ino, now.st_size) != (found.st_dev, found.st_ino, found.st_size):
+        return "it changed after it was identified"
+    return None
+
+
+def _one_stderr_line(line: str) -> None:
+    print(" ".join(line.splitlines()), file=sys.stderr)
+
+
+def _remove_stale_index_partials(index: Path, database: Path) -> None:
+    """Remove leftover writer temps beside ``index`` when no writer is running.
+
+    Called after this writer's own publish and after its ``LOCK_SH``
+    descriptor is closed. It opens a new descriptor on the index lock file
+    and asks for ``LOCK_EX | LOCK_NB``. Only when that is granted does it
+    list the directory and look at each name that matches
+    ``_is_index_partial_name``, then close the descriptor. A refused lock,
+    a lock file it cannot open, no fcntl or a listing error removes nothing
+    and prints nothing.
+
+    ``database`` is the resolved ledger database, which lives in the same
+    directory and may itself carry a name that matches the pattern. A
+    candidate whose name begins with the database's file name (its side
+    files and copies named after it), or that is the database's own file
+    (same device and inode, so a hard link under any other name too), is
+    skipped without a word. When the database cannot be stat'ed, no
+    candidate can be compared with it, so nothing is removed.
+
+    Every other candidate is unlinked only when ``_why_not_index_temp``
+    positively identifies it as a disposable index temp and
+    ``_changed_before_unlink`` finds it unchanged. A stat error, a file that
+    is not regular, and every reason either returns leave the file as it
+    was and print one ``search index cleanup skipped PATH: REASON`` line on
+    stderr. A removal error is one line on stderr. Nothing here is raised.
+    """
+    fd = _open_index_lock(index)
+    if fd is None:
+        return
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return
+        directory = index.parent
+        try:
+            names = os.listdir(directory)
+        except OSError:
+            return
+        try:
+            ledger_file = os.lstat(database)
+        except OSError:
+            return
+        ledger_identity = (ledger_file.st_dev, ledger_file.st_ino)
+        for name in names:
+            if not _is_index_partial_name(name):
+                continue
+            if name.startswith(database.name):
+                continue
+            path = directory / name
+            try:
+                found = os.lstat(path)
+            except OSError as exc:
+                _one_stderr_line(f"search index cleanup skipped {path}: cannot stat it: {exc}")
+                continue
+            if not stat.S_ISREG(found.st_mode):
+                _one_stderr_line(f"search index cleanup skipped {path}: not a regular file")
+                continue
+            if (found.st_dev, found.st_ino) == ledger_identity:
+                continue
+            reason = _why_not_index_temp(path, found)
+            if reason is None:
+                reason = _changed_before_unlink(path, found)
+            if reason is not None:
+                _one_stderr_line(f"search index cleanup skipped {path}: {reason}")
+                continue
+            try:
+                os.unlink(path)
+            except OSError as exc:
+                _one_stderr_line(f"cannot remove leftover search index partial {path}: {exc}")
+    finally:
+        _close_quietly(fd)
+
+
 def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> dict[str, Any]:
     """Rebuild ``search.db`` from scratch and swap it in atomically."""
     resolved = resolve_db_path(db)
@@ -1087,30 +1445,32 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
                 path, doc_type, roots, mtime_ns=stat[0] if stat else None))
         except OSError:
             manifest["sources"].pop(str(path), None)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{SEARCH_DB_NAME}.", suffix=".partial", dir=index.parent)
-    os.close(fd)
-    tmp = Path(tmp_name)
-    try:
-        conn = sqlite3.connect(tmp)
+    with _index_writer_lock(index):
+        tmp = _create_index_partial(index.parent)
         try:
-            for statement in SCHEMA_SQL:
-                conn.execute(statement)
-            for rowid, doc in enumerate(corpus, start=1):
-                _insert_doc(conn, rowid, doc)
-            conn.executemany(
-                "INSERT INTO item_link (item_id, initiative) VALUES (?, ?)", sorted(links)
-            )
-            conn.execute(
-                "INSERT INTO manifest (key, value) VALUES ('manifest', ?)",
-                (json.dumps(manifest, sort_keys=True),),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        _replace_index(tmp, index, resolved)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
+            conn = sqlite3.connect(tmp)
+            try:
+                for statement in SCHEMA_SQL:
+                    conn.execute(statement)
+                for rowid, doc in enumerate(corpus, start=1):
+                    _insert_doc(conn, rowid, doc)
+                conn.executemany(
+                    "INSERT INTO item_link (item_id, initiative) VALUES (?, ?)", sorted(links)
+                )
+                conn.execute(
+                    "INSERT INTO manifest (key, value) VALUES ('manifest', ?)",
+                    (json.dumps(manifest, sort_keys=True),),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            _replace_index(tmp, index, resolved)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    # The shared lock is released: a cleanup that ran inside it would refuse
+    # its own exclusive lock and never remove anything.
+    _remove_stale_index_partials(index, resolved)
     counts: dict[str, int] = {}
     for doc in corpus:
         counts[doc.doc_type] = counts.get(doc.doc_type, 0) + 1
@@ -1216,27 +1576,27 @@ def _append_trailing(
         return None
     tmp: Path | None = None
     try:
-        fd, tmp_name = tempfile.mkstemp(
-            prefix=f".{SEARCH_DB_NAME}.", suffix=".partial", dir=index.parent
-        )
-        os.close(fd)
-        tmp = Path(tmp_name)
-        conn = sqlite3.connect(tmp)
-        try:
-            source.backup(conn)
-            source.close()
-            summary = _append_into(conn, resolved, fallback_root)
-            if summary is None:
-                return None
-            conn.commit()
-        finally:
-            conn.close()
-        _replace_index(tmp, index, resolved)
-        tmp = None
+        with _index_writer_lock(index):
+            try:
+                tmp = _create_index_partial(index.parent)
+                conn = sqlite3.connect(tmp)
+                try:
+                    source.backup(conn)
+                    source.close()
+                    summary = _append_into(conn, resolved, fallback_root)
+                    if summary is None:
+                        return None
+                    conn.commit()
+                finally:
+                    conn.close()
+                _replace_index(tmp, index, resolved)
+                tmp = None
+            finally:
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
     finally:
         source.close()
-        if tmp is not None:
-            tmp.unlink(missing_ok=True)
+    _remove_stale_index_partials(index, resolved)
     return {"path": str(index), **summary}
 
 
