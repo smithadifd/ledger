@@ -83,17 +83,22 @@ roots, format, ranker and database all still match. Anything else, or any
 error on the way, takes the full rebuild instead.
 
 A rebuild that does not finish can leave its temp file beside the index,
-named with the same prefix and suffix the writer uses. Each writer holds
-an exclusive non-blocking flock on its temp from creation until that
-temp is published or removed. The next successful refresh removes each
-leftover that is a regular file, matches that name exactly, is not this
-writer's own temp, is older than this rebuild, and is not held by a
-running writer. A symlink, a directory, a name that only contains the
-pattern, a leftover of another file, a file whose type cannot be read,
-or a leftover a running writer still holds, or a leftover the cleanup
-cannot open, is left as it is.
-A removal error is one line on stderr and does not fail the refresh or
-lose the new index.
+named with the same prefix and suffix the writer uses. Every writer holds
+a shared flock on one lock file beside the index (``.search.db.lock``,
+created with mode 0600 when absent, opened without following a symlink,
+and never removed or replaced) from before its temp is created until
+that temp is published or removed. After its own publish, and after it
+has released its shared lock, a refresh asks for an exclusive
+non-blocking flock on the lock file. Only when that is granted, so no
+writer is running, does it list the directory and remove each regular
+file whose name matches that pattern exactly. A refused lock, a lock
+file that is a symlink, is not a regular file or cannot be opened, a
+platform without fcntl, a listing or stat error, a symlink, a directory,
+or a name that only contains the pattern leaves every file in place. A
+removal error is one line on stderr and does not fail the refresh or
+lose the new index. A writer from a version before the lock file takes
+no lock, so a refresh during an upgrade can remove that writer's temp;
+that writer's refresh then fails and the next refresh rebuilds.
 
 ``index_status`` also gives a ``severity`` a reader can colour by: ``ok`` for
 ``current``; ``info`` for ``behind``, ``stale`` or ``missing``, which the next
@@ -124,6 +129,7 @@ except ImportError:
     fcntl = None  # type: ignore[assignment]
 
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -1097,70 +1103,92 @@ def _index_partial_parts() -> tuple[str, str]:
     return f".{SEARCH_DB_NAME}.", ".partial"
 
 
-def _lock_index_partial_fd(fd: int) -> bool:
-    """Take ``LOCK_EX | LOCK_NB`` on ``fd``.
+def _index_lock_path(index: Path) -> Path:
+    """The one lock file beside ``index`` that every index writer shares.
 
-    False when fcntl is missing or the lock call fails for any reason: the
-    caller leaves the file in place.
+    Its name never matches the partial pattern. It is never removed or
+    replaced, so every writer and every cleanup lock the same inode.
     """
-    if fcntl is None:
-        return False
-    try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        return False
-    return True
+    return index.parent / f".{SEARCH_DB_NAME}.lock"
 
 
-def _close_index_partial_fd(fd: int) -> None:
+def _close_quietly(fd: int) -> None:
     try:
         os.close(fd)
     except OSError:
         pass
 
 
-def _rename_creating_to_partial(creating: Path, directory: Path) -> Path:
-    """Give a locked creating file its partial name. Rename keeps the inode.
+def _open_index_lock(index: Path) -> int | None:
+    """A new descriptor on the index lock file, created with mode 0600 if absent.
 
-    The dest name is fresh (the same random shape mkstemp uses). Publish of
-    the finished index still uses ``os.link``.
+    ``None`` when fcntl or ``O_NOFOLLOW`` is missing, the open fails (a
+    symlink at the lock path fails it), or what is there is not a regular
+    file. ``O_NONBLOCK`` keeps a FIFO at the lock path from blocking the
+    open. Each call opens its own descriptor: flock belongs to the open
+    file, so a descriptor this process still holds conflicts with a new one.
+    """
+    if fcntl is None:
+        return None
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        return None
+    flags = (
+        os.O_RDONLY
+        | os.O_CREAT
+        | nofollow
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        fd = os.open(_index_lock_path(index), flags, 0o600)
+    except OSError:
+        return None
+    try:
+        regular = stat.S_ISREG(os.fstat(fd).st_mode)
+    except OSError:
+        regular = False
+    if not regular:
+        _close_quietly(fd)
+        return None
+    return fd
+
+
+@contextmanager
+def _index_writer_lock(index: Path) -> Iterator[None]:
+    """Hold a blocking ``LOCK_SH`` on the index lock file for the block.
+
+    A writer creates, builds and publishes (or removes) its temp inside the
+    block, so the cleanup's ``LOCK_EX`` is refused while any writer's temp
+    exists. The descriptor is closed, which releases the lock, when the
+    block ends. When the lock file cannot be opened or locked the writer
+    runs without the lock, as on a platform without fcntl.
+    """
+    fd = _open_index_lock(index)
+    if fd is not None:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH)
+        except OSError:
+            _close_quietly(fd)
+            fd = None
+    try:
+        yield
+    finally:
+        if fd is not None:
+            _close_quietly(fd)
+
+
+def _create_index_partial(directory: Path) -> Path:
+    """Create the writer's temp with ``mkstemp`` and the partial prefix and suffix.
+
+    Called only inside ``_index_writer_lock``. ``mkstemp`` creates the file
+    with mode 0600 and SQLite opens that file, so the published index keeps
+    the mode.
     """
     prefix, suffix = _index_partial_parts()
-    for _ in range(64):
-        dest = directory / f"{prefix}{os.urandom(4).hex()}{suffix}"
-        try:
-            os.rename(os.fspath(creating), os.fspath(dest))
-        except FileExistsError:
-            continue
-        return dest
-    raise OSError("cannot allocate a search index partial name")
-
-
-def _create_index_partial(directory: Path) -> tuple[Path, int]:
-    prefix, _suffix = _index_partial_parts()
-    fd, creating_name = tempfile.mkstemp(
-        prefix=prefix, suffix=".creating", dir=directory
-    )
-    creating = Path(creating_name)
-    try:
-        if fcntl is not None:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        tmp = _rename_creating_to_partial(creating, directory)
-    except BaseException:
-        _close_index_partial_fd(fd)
-        creating.unlink(missing_ok=True)
-        raise
-    return tmp, fd
-
-
-def _connect_index_partial(tmp: Path) -> sqlite3.Connection:
-    """Open the writer's temp without SQLite's own file locks.
-
-    The writer already holds an exclusive flock on this inode. On platforms
-    where flock is fcntl, SQLite's locks on the same file fail with
-    ``database is locked``.
-    """
-    return sqlite3.connect(tmp.as_uri() + "?nolock=1", uri=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=directory)
+    os.close(fd)
+    return Path(tmp_name)
 
 
 def _is_index_partial_name(name: str) -> bool:
@@ -1170,62 +1198,48 @@ def _is_index_partial_name(name: str) -> bool:
     return bool(name[len(prefix) : len(name) - len(suffix)])
 
 
-def _open_index_partial_for_cleanup(path: Path) -> int | None:
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    if not nofollow:
-        return None
-    try:
-        return os.open(path, os.O_RDONLY | nofollow)
-    except OSError:
-        return None
+def _remove_stale_index_partials(index: Path) -> None:
+    """Remove leftover writer temps beside ``index`` when no writer is running.
 
-
-def _remove_stale_index_partials(
-    index: Path, keep: Path, older_than_ns: int
-) -> None:
-    """Remove leftover writer temps in ``index``'s directory.
-
-    Only a regular file whose name matches ``_is_index_partial_name``, that
-    is not ``keep``, whose ``lstat`` mtime is older than ``older_than_ns``,
-    and whose exclusive non-blocking flock this process can take. A live
-    writer's lock, an open that cannot avoid following a symlink, a lock
-    or open failure, or a platform without fcntl, leaves the file. Unlink
-    while holding the lock, then close. A removal error is one line on
-    stderr and is not raised.
+    Called after this writer's own publish and after its ``LOCK_SH``
+    descriptor is closed. It opens a new descriptor on the index lock file
+    and asks for ``LOCK_EX | LOCK_NB``. Only when that is granted does it
+    list the directory and unlink each regular file (by ``lstat``) whose
+    name matches ``_is_index_partial_name``, then close the descriptor. A
+    refused lock, a lock file it cannot open, no fcntl, a listing error or
+    a stat error removes nothing and prints nothing. A removal error is one
+    line on stderr and is not raised.
     """
-    directory = index.parent
-    try:
-        names = os.listdir(directory)
-    except OSError:
+    fd = _open_index_lock(index)
+    if fd is None:
         return
-    keep_name = keep.name
-    for name in names:
-        if name == keep_name:
-            continue
-        if not _is_index_partial_name(name):
-            continue
-        path = directory / name
+    try:
         try:
-            found = os.lstat(path)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
-            continue
-        if not stat.S_ISREG(found.st_mode):
-            continue
-        if found.st_mtime_ns >= older_than_ns:
-            continue
-        fd = _open_index_partial_for_cleanup(path)
-        if fd is None:
-            continue
+            return
+        directory = index.parent
         try:
-            if not _lock_index_partial_fd(fd):
+            names = os.listdir(directory)
+        except OSError:
+            return
+        for name in names:
+            if not _is_index_partial_name(name):
+                continue
+            path = directory / name
+            try:
+                found = os.lstat(path)
+            except OSError:
+                continue
+            if not stat.S_ISREG(found.st_mode):
                 continue
             try:
                 os.unlink(path)
             except OSError as exc:
                 line = f"cannot remove leftover search index partial {path}: {exc}"
                 print(line.replace("\n", " "), file=sys.stderr)
-        finally:
-            _close_index_partial_fd(fd)
+    finally:
+        _close_quietly(fd)
 
 
 def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> dict[str, Any]:
@@ -1247,32 +1261,32 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
                 path, doc_type, roots, mtime_ns=stat[0] if stat else None))
         except OSError:
             manifest["sources"].pop(str(path), None)
-    tmp, lock_fd = _create_index_partial(index.parent)
-    older_than_ns = os.lstat(tmp).st_mtime_ns
-    try:
-        conn = _connect_index_partial(tmp)
+    with _index_writer_lock(index):
+        tmp = _create_index_partial(index.parent)
         try:
-            for statement in SCHEMA_SQL:
-                conn.execute(statement)
-            for rowid, doc in enumerate(corpus, start=1):
-                _insert_doc(conn, rowid, doc)
-            conn.executemany(
-                "INSERT INTO item_link (item_id, initiative) VALUES (?, ?)", sorted(links)
-            )
-            conn.execute(
-                "INSERT INTO manifest (key, value) VALUES ('manifest', ?)",
-                (json.dumps(manifest, sort_keys=True),),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        _replace_index(tmp, index, resolved)
-        _remove_stale_index_partials(index, keep=tmp, older_than_ns=older_than_ns)
-    except BaseException:
-        tmp.unlink(missing_ok=True)
-        raise
-    finally:
-        _close_index_partial_fd(lock_fd)
+            conn = sqlite3.connect(tmp)
+            try:
+                for statement in SCHEMA_SQL:
+                    conn.execute(statement)
+                for rowid, doc in enumerate(corpus, start=1):
+                    _insert_doc(conn, rowid, doc)
+                conn.executemany(
+                    "INSERT INTO item_link (item_id, initiative) VALUES (?, ?)", sorted(links)
+                )
+                conn.execute(
+                    "INSERT INTO manifest (key, value) VALUES ('manifest', ?)",
+                    (json.dumps(manifest, sort_keys=True),),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            _replace_index(tmp, index, resolved)
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
+    # The shared lock is released: a cleanup that ran inside it would refuse
+    # its own exclusive lock and never remove anything.
+    _remove_stale_index_partials(index)
     counts: dict[str, int] = {}
     for doc in corpus:
         counts[doc.doc_type] = counts.get(doc.doc_type, 0) + 1
@@ -1377,29 +1391,28 @@ def _append_trailing(
     except SearchError:
         return None
     tmp: Path | None = None
-    lock_fd: int | None = None
     try:
-        tmp, lock_fd = _create_index_partial(index.parent)
-        older_than_ns = os.lstat(tmp).st_mtime_ns
-        conn = _connect_index_partial(tmp)
-        try:
-            source.backup(conn)
-            source.close()
-            summary = _append_into(conn, resolved, fallback_root)
-            if summary is None:
-                return None
-            conn.commit()
-        finally:
-            conn.close()
-        _replace_index(tmp, index, resolved)
-        _remove_stale_index_partials(index, keep=tmp, older_than_ns=older_than_ns)
-        tmp = None
+        with _index_writer_lock(index):
+            try:
+                tmp = _create_index_partial(index.parent)
+                conn = sqlite3.connect(tmp)
+                try:
+                    source.backup(conn)
+                    source.close()
+                    summary = _append_into(conn, resolved, fallback_root)
+                    if summary is None:
+                        return None
+                    conn.commit()
+                finally:
+                    conn.close()
+                _replace_index(tmp, index, resolved)
+                tmp = None
+            finally:
+                if tmp is not None:
+                    tmp.unlink(missing_ok=True)
     finally:
         source.close()
-        if tmp is not None:
-            tmp.unlink(missing_ok=True)
-        if lock_fd is not None:
-            _close_index_partial_fd(lock_fd)
+    _remove_stale_index_partials(index)
     return {"path": str(index), **summary}
 
 
