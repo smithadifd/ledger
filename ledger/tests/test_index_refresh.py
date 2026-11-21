@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from ledger import search as search_mod
-from ledger.store import open_ledger
+from ledger.store import open_ledger, open_ledger_readonly
 from ledger.verbs import EXIT_OK, EXIT_REFUSED
 
 from test_search import (  # noqa: F401
@@ -721,3 +721,108 @@ def test_two_overlapping_rebuilds_both_publish(db, monkeypatch):
     assert not tmp.exists()
     assert search_mod.index_status(db)["status"] == "current"
     assert stat.S_IMODE(_index(db).stat().st_mode) & 0o077 == 0
+
+
+# --- the ledger database is never a leftover ---------------------------------
+
+
+def _event_keys(path: Path) -> list[str]:
+    """The idempotency keys of every event in the ledger at ``path``."""
+    with open_ledger_readonly(path) as lg:
+        return [event.idempotency_key for event in lg.events()]
+
+
+def test_a_ledger_database_named_like_a_partial_survives_rebuild_and_refresh(
+    db, monkeypatch
+):
+    live = db.parent / ".search.db.livedata.partial"
+    with open_ledger(live) as lg:
+        _append(lg, "item.created", "T-live",
+                {"type": "ticket", "title": "Live ledger item"}, "k-live-1")
+        _append(lg, "item.note", "T-live", {"text": "the heron note"}, "k-live-2")
+    keys = _event_keys(live)
+    leftover = _stale_index_partial(db.parent, "stale9")
+    code, body = run_json(monkeypatch, live, "index", "--rebuild")
+    assert code == EXIT_OK, body
+    assert live.is_file(), "index --rebuild removed the ledger database"
+    assert _event_keys(live) == keys
+    assert not leftover.exists()
+    with open_ledger(live) as lg:
+        _append(lg, "item.note", "T-live", {"text": "the egret note"}, "k-live-3")
+    leftover = _stale_index_partial(db.parent, "stale10")
+    code, body = run_json(monkeypatch, live, "index")
+    assert code == EXIT_OK, body
+    assert live.is_file(), "an append refresh removed the ledger database"
+    assert _event_keys(live) == [*keys, "k-live-3"]
+    assert not leftover.exists()
+    assert search_mod.index_status(live)["status"] == "current"
+
+
+def test_a_hard_link_to_the_ledger_database_under_a_partial_name_survives(
+    db, monkeypatch
+):
+    # The ledger refuses to open a database with more than one link, so the
+    # link appears after the refresh has read the ledger and published its
+    # index, just before the cleanup lists the directory: another name for
+    # the same file that the name rule alone cannot recognise.
+    alias = db.parent / ".search.db.alias1.partial"
+    keys = _event_keys(db)
+    leftover = _stale_index_partial(db.parent, "stale11")
+    real_replace = search_mod._replace_index
+
+    def replace_then_link(tmp, index, ledger):
+        real_replace(tmp, index, ledger)
+        os.link(db, alias)
+
+    monkeypatch.setattr(search_mod, "_replace_index", replace_then_link)
+    code, body = run_json(monkeypatch, db, "index", "--rebuild")
+    assert code == EXIT_OK, body
+    assert alias.is_file(), "index --rebuild removed a hard link to the ledger database"
+    assert os.path.samefile(alias, db)
+    assert not leftover.exists()
+    alias.unlink()
+    assert _event_keys(db) == keys
+
+
+def test_a_partial_named_after_the_ledger_database_is_kept(db, monkeypatch):
+    live = db.parent / ".search.db.livedata"
+    with open_ledger(live) as lg:
+        _append(lg, "item.created", "T-live",
+                {"type": "ticket", "title": "Live ledger item"}, "k-live-4")
+    copy = db.parent / ".search.db.livedata.copy.partial"
+    copy.write_bytes(b"hand-copy")
+    os.utime(copy, ns=(1, 1))
+    leftover = _stale_index_partial(db.parent, "stale12")
+    code, body = run_json(monkeypatch, live, "index", "--rebuild")
+    assert code == EXIT_OK, body
+    assert copy.is_file(), "index --rebuild removed a file named after the ledger database"
+    assert copy.read_bytes() == b"hand-copy"
+    assert live.is_file()
+    assert not leftover.exists()
+
+
+def test_a_ledger_database_that_cannot_be_compared_leaves_every_partial(
+    db, monkeypatch
+):
+    leftover = _stale_index_partial(db.parent, "stale13")
+    real_replace = search_mod._replace_index
+    real_lstat = os.lstat
+    broken = {"on": False}
+
+    def boom(path, *args, **kwargs):
+        if broken["on"] and os.path.basename(os.fspath(path)) == db.name:
+            raise OSError(13, "Permission denied")
+        return real_lstat(path, *args, **kwargs)
+
+    def replace_then_break(tmp, index, ledger):
+        real_replace(tmp, index, ledger)
+        broken["on"] = True
+
+    monkeypatch.setattr(os, "lstat", boom)
+    monkeypatch.setattr(search_mod, "_replace_index", replace_then_break)
+    code, body = run_json(monkeypatch, db, "index")
+    broken["on"] = False
+    assert code == EXIT_OK, body
+    assert leftover.is_file(), "a refresh removed a partial it could not compare with the ledger"
+    assert leftover.read_bytes() == b"stale-index"
+    assert search_mod.index_status(db)["status"] == "current"

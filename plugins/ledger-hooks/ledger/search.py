@@ -96,7 +96,12 @@ file that is a symlink, is not a regular file or cannot be opened, a
 platform without fcntl, a listing or stat error, a symlink, a directory,
 or a name that only contains the pattern leaves every file in place. A
 removal error is one line on stderr and does not fail the refresh or
-lose the new index. A writer from a version before the lock file takes
+lose the new index. A matching name is never the ledger database: a
+candidate that is the database's own file (same device and inode, so a
+hard link under another name too) or whose name begins with the
+database's file name is skipped, whatever the database is named, and a
+candidate that cannot be compared with the database is left in place.
+A writer from a version before the lock file takes
 no lock, so a refresh during an upgrade can remove that writer's temp;
 that writer's refresh then fails and the next refresh rebuilds.
 
@@ -1198,7 +1203,7 @@ def _is_index_partial_name(name: str) -> bool:
     return bool(name[len(prefix) : len(name) - len(suffix)])
 
 
-def _remove_stale_index_partials(index: Path) -> None:
+def _remove_stale_index_partials(index: Path, database: Path) -> None:
     """Remove leftover writer temps beside ``index`` when no writer is running.
 
     Called after this writer's own publish and after its ``LOCK_SH``
@@ -1209,6 +1214,14 @@ def _remove_stale_index_partials(index: Path) -> None:
     refused lock, a lock file it cannot open, no fcntl, a listing error or
     a stat error removes nothing and prints nothing. A removal error is one
     line on stderr and is not raised.
+
+    ``database`` is the resolved ledger database, which lives in the same
+    directory and may itself carry a name that matches the pattern. A
+    candidate whose name begins with the database's file name (its side
+    files and copies named after it), or that is the database's own file
+    (same device and inode, so a hard link under any other name too), is
+    skipped. When the database cannot be stat'ed, no candidate can be
+    compared with it, so nothing is removed.
     """
     fd = _open_index_lock(index)
     if fd is None:
@@ -1223,8 +1236,15 @@ def _remove_stale_index_partials(index: Path) -> None:
             names = os.listdir(directory)
         except OSError:
             return
+        try:
+            ledger_file = os.lstat(database)
+        except OSError:
+            return
+        ledger_identity = (ledger_file.st_dev, ledger_file.st_ino)
         for name in names:
             if not _is_index_partial_name(name):
+                continue
+            if name.startswith(database.name):
                 continue
             path = directory / name
             try:
@@ -1232,6 +1252,8 @@ def _remove_stale_index_partials(index: Path) -> None:
             except OSError:
                 continue
             if not stat.S_ISREG(found.st_mode):
+                continue
+            if (found.st_dev, found.st_ino) == ledger_identity:
                 continue
             try:
                 os.unlink(path)
@@ -1286,7 +1308,7 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
             raise
     # The shared lock is released: a cleanup that ran inside it would refuse
     # its own exclusive lock and never remove anything.
-    _remove_stale_index_partials(index)
+    _remove_stale_index_partials(index, resolved)
     counts: dict[str, int] = {}
     for doc in corpus:
         counts[doc.doc_type] = counts.get(doc.doc_type, 0) + 1
@@ -1412,7 +1434,7 @@ def _append_trailing(
                     tmp.unlink(missing_ok=True)
     finally:
         source.close()
-    _remove_stale_index_partials(index)
+    _remove_stale_index_partials(index, resolved)
     return {"path": str(index), **summary}
 
 

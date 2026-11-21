@@ -891,7 +891,11 @@ lock file that is a symlink or cannot be opened, a name that only contains
 the pattern, a leftover of another file, a symlink or a directory leaves
 every file in place. A removal error is one line on stderr and does not
 fail the refresh or lose the new index. The ledger database, its backups and
-the lock file are not removed. A writer from a version before the lock file
+the lock file are not removed: a candidate that is the database's own file
+(same device and inode, so a hard link too) or whose name begins with the
+database's file name is skipped, even when the `--db` file is itself named
+like a partial, and one that cannot be compared with it is left in place.
+A writer from a version before the lock file
 takes no lock, so a refresh during an upgrade can remove that writer's temp.
 
 **`search-miss --query Q --expected EVENT_OR_ITEM [--note T]`** Log a search
