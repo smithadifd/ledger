@@ -1,11 +1,11 @@
-"""No sequence of generic CLI write verbs, without `restore --accept-loop-events`, writes a `review.receipt` or a `review.grant-cite`. In-process callers are trusted; the boundary defended is the CLI/process boundary.
+"""No sequence of generic CLI write verbs, without `restore --accept-loop-events`, writes a reserved review record. In-process callers are trusted; the boundary defended is the CLI/process boundary.
 
-The writer for the two review receipt kinds. The store reserves both by
+The writer for the reserved review kinds. The store reserves them by
 name: ``ledger append``, ``append-many``, the library's ``append`` and
 ``append_many`` and every other internal writer refuse them, and restore
 takes them only with ``--accept-loop-events`` after the export's stream
-digest is checked. Only ``write_receipt`` and ``write_grant_cite`` here
-append them, through the store's ``_append_receipt_event``.
+digest is checked. The writers here append them through the store's
+``_append_receipt_event``.
 
 ``write_receipt`` records one review round of one pull request. In one
 write transaction it finds the one item whose ``pr`` link names the pull
@@ -30,6 +30,19 @@ and names the election that decided it. It re-raises ``standing``'s refusal
 otherwise. A cite grants nothing by itself; a withdrawal later leaves it in
 the log, and ``standing`` then refuses.
 
+``write_merge_intent`` and ``write_merge_done`` record a merge on a
+PR-linked item without making it loop-managed. Their closed payload is
+``{key, pr, head}``: a key ``merge:example/repo#12:HEAD``, a full PR URL,
+and a 40-hex lowercase head, all agreeing. In one write transaction the
+writer resolves the live PR links and reads the events for this item/key.
+Absent -> started -> finished appends one event at each step. Retries
+return the existing event (and state) without writing; an intent after done
+returns finished. Done without intent refuses ``merge_intent_missing``.
+After a stop following intent, the caller must reconcile the external merge
+before writing done; these records do not prove that a remote merge happened.
+Concurrent receipts writers serialize their state reads and writes. No loop
+writer or loop-managed state is involved.
+
 Refusals the writer makes are ``CliError`` (exit code ``EXIT_REFUSED``)
 with a code: ``bad_pr_target``, ``pr_item_missing``, ``pr_item_ambiguous``,
 ``receipt_item_mismatch``, ``receipt_doc_sha256_given``,
@@ -46,6 +59,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from typing import Any, Mapping
 
 from .credscan import scan as scan_credentials
@@ -53,6 +67,8 @@ from .credscan import shape_names
 from .schema import (
     DOC_INLINE_LIMIT,
     GRANT_CITE_KIND,
+    MERGE_DONE_KIND,
+    MERGE_INTENT_KIND,
     RECEIPT_DOC_ROLE,
     RECEIPT_KIND,
     validate_item_id,
@@ -63,7 +79,7 @@ from .verbs import EXIT_REFUSED, CliError
 from .verbs.doc import attach_inline_in_transaction
 from .verbs.grants import REVIEW_ROUND_GRANT_ID, standing
 
-# The store appends the two receipt kinds only for a caller holding this.
+# The store appends reserved review records only for a caller holding this.
 _RECEIPT_WRITER_CAPABILITY = object()
 RECEIPT_DOC_MIME = "application/json"
 # A pull request as the writer and pr_item take it: exactly the URL form
@@ -402,12 +418,97 @@ def write_grant_cite(
     return event
 
 
+@dataclass(frozen=True)
+class MergeRecord:
+    event: Event
+    state: str
+    created: bool
+
+
+def _write_merge(
+    lg: Ledger,
+    item_id: str,
+    fields: Mapping[str, Any],
+    kind: str,
+    *,
+    actor: str | None,
+    harness: str | None,
+    model: str | None,
+    session: str | None,
+) -> MergeRecord:
+    payload = dict(fields)
+    validate_payload(kind, payload)
+    validate_item_id(kind, item_id)
+    stamps = {"actor": actor, "harness": harness, "model": model, "session": session}
+    _refuse_credentials(payload, item_id, stamps)
+    with lg.transaction():
+        repo, pr = payload["pr"].removeprefix("https://github.com/").rsplit("/pull/", 1)
+        _require_pr_item(lg, item_id, repo, int(pr))
+        intent = None
+        done = None
+        for event in lg.events(item_id=item_id):
+            if event.payload.get("key") != payload["key"]:
+                continue
+            if event.kind == MERGE_INTENT_KIND:
+                intent = event
+            elif event.kind == MERGE_DONE_KIND:
+                done = event
+        if done is not None:
+            return MergeRecord(done, "finished", False)
+        if kind == MERGE_INTENT_KIND and intent is not None:
+            return MergeRecord(intent, "started", False)
+        if kind == MERGE_DONE_KIND and intent is None:
+            raise _refuse("merge_intent_missing", "merge done requires an intent on this item/key")
+        event = lg._append_receipt_event(
+            _RECEIPT_WRITER_CAPABILITY,
+            kind=kind,
+            payload=payload,
+            item_id=item_id,
+            idempotency_key=f"{kind}:{item_id}:{payload['key']}",
+            **stamps,
+        )
+        return MergeRecord(event, "finished" if kind == MERGE_DONE_KIND else "started", True)
+
+
+def write_merge_intent(
+    lg: Ledger,
+    item_id: str,
+    fields: Mapping[str, Any],
+    *,
+    actor: str | None = None,
+    harness: str | None = None,
+    model: str | None = None,
+    session: str | None = None,
+) -> MergeRecord:
+    """Start a merge, or return its existing started/finished record."""
+    return _write_merge(lg, item_id, fields, MERGE_INTENT_KIND,
+                        actor=actor, harness=harness, model=model, session=session)
+
+
+def write_merge_done(
+    lg: Ledger,
+    item_id: str,
+    fields: Mapping[str, Any],
+    *,
+    actor: str | None = None,
+    harness: str | None = None,
+    model: str | None = None,
+    session: str | None = None,
+) -> MergeRecord:
+    """Finish a started merge, or return its existing finished record."""
+    return _write_merge(lg, item_id, fields, MERGE_DONE_KIND,
+                        actor=actor, harness=harness, model=model, session=session)
+
+
 __all__ = [
+    "MergeRecord",
     "RECEIPT_DOC_MIME",
     "cite_key",
     "pr_item",
     "pr_url",
     "receipt_key",
     "write_grant_cite",
+    "write_merge_done",
+    "write_merge_intent",
     "write_receipt",
 ]

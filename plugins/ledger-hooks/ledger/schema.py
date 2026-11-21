@@ -207,14 +207,16 @@ DURABLE = "durable"
 EPHEMERAL = "ephemeral"
 SYSTEM_CLAIM_KIND = "ledger.system"
 
-# The review receipts. Only the receipt writer (ledger/receipts.py) writes
-# them: the store reserves both kinds, and restore takes them only with
+# The review records. Only the receipt writer (ledger/receipts.py) writes
+# them: the store reserves these kinds, and restore takes them only with
 # --accept-loop-events. A review.receipt records one review round of one pull
 # request, on the one item whose pr link names it; a review.grant-cite records
 # that the past-cap review-round grant stood when a round past the cap ran.
 RECEIPT_KIND = "review.receipt"
 GRANT_CITE_KIND = "review.grant-cite"
-RECEIPT_KINDS = (RECEIPT_KIND, GRANT_CITE_KIND)
+MERGE_INTENT_KIND = "review.merge-intent"
+MERGE_DONE_KIND = "review.merge-done"
+RECEIPT_KINDS = (RECEIPT_KIND, GRANT_CITE_KIND, MERGE_INTENT_KIND, MERGE_DONE_KIND)
 RECEIPT_VERDICTS = ("approved", "changes_requested", "unparseable", "crashed")
 # The verdicts that carry served_model, family, open_bugs and findings; the
 # other two carry neither count, so a reader testing open_bugs == 0 cannot
@@ -254,6 +256,22 @@ _IMPORTED_FROM = {
     },
     "optional": {},
 }
+
+# Merge records carry a full PR URL; stored links may also use the short
+# form, resolved by receipts.pr_item. Keys use casefolded repository names.
+_MERGE_FIELDS = {
+    "key": {"type": "string",
+            "pattern": r"merge:[a-z0-9_.-]+/[a-z0-9_.-]+#[1-9][0-9]*:[0-9a-f]{40}"},
+    "pr": {"type": "string",
+           "pattern": r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*"},
+    "head": _RECEIPT_COMMIT,
+}
+
+
+def _check_merge(payload: Mapping[str, Any]) -> None:
+    repo, pr = payload["pr"].removeprefix("https://github.com/").rsplit("/pull/", 1)
+    if payload["key"] != f"merge:{repo.casefold()}#{pr}:{payload['head']}":
+        _fail("merge-key-mismatch")
 
 
 def _check_receipt(payload: Mapping[str, Any]) -> None:
@@ -786,6 +804,18 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
         },
         "optional": {},
     },
+    (MERGE_INTENT_KIND, 1): {
+        "item_id": "required",
+        "required": _MERGE_FIELDS,
+        "optional": {},
+        "check": _check_merge,
+    },
+    (MERGE_DONE_KIND, 1): {
+        "item_id": "required",
+        "required": _MERGE_FIELDS,
+        "optional": {},
+        "check": _check_merge,
+    },
 }
 
 # One place declares how long each kind lives in item exports and cards.
@@ -822,6 +852,8 @@ DURABILITY: dict[str, str] = {
     SYSTEM_CLAIM_KIND: DURABLE,
     RECEIPT_KIND: DURABLE,
     GRANT_CITE_KIND: DURABLE,
+    MERGE_INTENT_KIND: DURABLE,
+    MERGE_DONE_KIND: DURABLE,
 }
 
 

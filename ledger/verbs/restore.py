@@ -23,7 +23,7 @@ def add_arguments(parser) -> None:
         "--accept-loop-events",
         action="store_true",
         help="explicitly allow loop-owned events and review receipts (review.receipt, "
-        "review.grant-cite) after an export integrity check",
+        "review.grant-cite, review.merge-intent, review.merge-done) after an export integrity check",
     )
 
 

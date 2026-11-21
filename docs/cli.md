@@ -1171,7 +1171,8 @@ database's own document root (`<name>.documents` beside the database `--db`
 names), never the source's, so `doc verify` reports them `missing` until you
 copy the old document root's tree there; then run `doc verify` to check
 every file against its stored sha256. An export holding loop events
-(`loop.*`) or review receipts (`review.receipt`, `review.grant-cite`) is
+(`loop.*`) or reserved review records (`review.receipt`, `review.grant-cite`,
+`review.merge-intent`, `review.merge-done`) is
 refused, naming their kinds, unless `--accept-loop-events` is given; with it,
 the export's stream digest is checked, stderr names the kinds accepted, and a
 `session.opened` record of the restore is appended.

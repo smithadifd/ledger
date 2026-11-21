@@ -111,8 +111,9 @@ can write a reserved kind, close a loop-managed item or link its PR.
 In-process callers that import `ledger.loop` are trusted. `restore` refuses
 an export that contains loop events unless `--accept-loop-events` is passed.
 
-The review receipt kinds `review.receipt` and `review.grant-cite` are reserved
-the same way, by exact name (`review.recorded` stays an ordinary kind), and
+The review kinds `review.receipt`, `review.grant-cite`, `review.merge-intent`
+and `review.merge-done` are reserved the same way, by exact name
+(`review.recorded` stays an ordinary kind), and
 written only through the in-process receipt writer in `ledger/receipts.py`:
 `write_receipt` records one review round of one pull request on the one item
 whose `pr` link names it (`pr_item`), with its `review-receipt` document
@@ -121,7 +122,7 @@ item stored by path is refused `doc_not_inline`) and the document's
 ledger-computed sha256 as `doc_sha256`; `write_grant_cite` records that `grant:review-round-past-cap`
 was standing (`ledger.verbs.grants.standing`) when it wrote. A
 `review-receipt` document added with `doc add` is not a receipt. `restore`
-refuses an export holding either kind unless the same `--accept-loop-events`
+refuses an export holding any of these kinds unless the same `--accept-loop-events`
 is passed, which also checks the export's stream digest.
 
 ## Routing keys on items

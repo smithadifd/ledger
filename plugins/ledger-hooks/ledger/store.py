@@ -67,8 +67,8 @@ RESERVED_KIND_PREFIX = "loop."
 # Kinds one writer owns: claim_system writes the system claim, set_spec
 # (verbs/spec.py) writes item.spec, the document writers (verbs/doc.py) write
 # doc.attached, register_entity and set_entity_state (verbs/entity.py) write
-# the entity kinds, and the receipt writer (receipts.py) writes
-# review.receipt and review.grant-cite. Generic appends refuse them. Each
+# the entity kinds, and the receipt writer (receipts.py) writes the
+# reserved review records. Generic appends refuse them. Each
 # kind is reserved by its exact name: review.recorded stays a generic kind.
 ENTITY_KINDS = (ENTITY_REGISTERED_KIND, ENTITY_STATE_KIND)
 RESERVED_KINDS = (SYSTEM_CLAIM_KIND, SPEC_KIND, DOC_KIND, *ENTITY_KINDS, *RECEIPT_KINDS)
@@ -892,14 +892,14 @@ class Ledger:
         return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
 
     def _append_receipt_event(self, capability: object, **kwargs: Any) -> Event:
-        """Append a ``review.receipt`` or ``review.grant-cite`` only for the
-        receipt writer (receipts.py), which checked the item, the links and
-        the document in the caller's transaction."""
+        """Append a reserved review record only for the receipt writer
+        (receipts.py), which checked the item and payload in the caller's
+        transaction."""
         from .receipts import _RECEIPT_WRITER_CAPABILITY
 
         if capability is not _RECEIPT_WRITER_CAPABILITY:
             raise ValidationError("receipt-writer-capability-required")
-        # The receipt writer owns the two receipt kinds only.
+        # The receipt writer owns the reserved review kinds only.
         if kwargs.get("kind") not in RECEIPT_KINDS:
             raise ValidationError(f"reserved-kind:{kwargs.get('kind')}")
         return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
