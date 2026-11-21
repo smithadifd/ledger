@@ -681,7 +681,10 @@ items whose lease expired; those read `open`, with `recorded_status`,
 
 **`card ITEM [--md PATH] [--full]`** A bounded resume card: header (revision and
 source event ids), fields, decisions, open questions with their options, the
-next step, links, blockers, notes and resume sections. `--md` also writes a
+next step, links, blockers, notes and resume sections. A `decided:` note
+(text that, after leading whitespace, starts with exactly `decided:`) is
+dropped last when the card is over budget, and listed under Decisions as a
+note with its event id, never as an election. `--md` also writes a
 markdown copy. A claim whose lease expired shows `status: open` and, under
 it, an `expired claim:` line naming the old holder, the lease stamp and the
 recorded status; `--json` carries `status`, `recorded_status`,
