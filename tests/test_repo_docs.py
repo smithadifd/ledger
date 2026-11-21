@@ -525,6 +525,9 @@ def test_the_docs_name_the_claim_system_verb_and_its_rule() -> None:
 def test_concepts_documents_note_search_and_severity() -> None:
     text = (ROOT / "docs" / "concepts.md").read_text(encoding="utf-8")
     section = text.split("## The search index", 1)[1].split("\n## ", 1)[0]
-    assert "A note is searched as part of its item, not as its own document" in _squash(section)
+    assert "A note is searched as part of its item" in _squash(section)
+    # A decided: note is the one exception: also a decision document of its own.
+    assert "starts with exactly `decided:` is also a `decision` document of its own" in (
+        _squash(section))
     for severity in ("`ok`", "`info`", "`warn`"):
         assert f"| {severity} |" in section

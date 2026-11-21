@@ -11,7 +11,14 @@ the index never writes the ledger database.
 What is indexed, one FTS5 row per document:
 
 - ``item``: each current item (``v_items``) with its notes and links.
-- ``decision``: each ``decision.asked`` and ``decision.elected`` event.
+- ``decision``: each ``decision.asked``, ``decision.elected`` and
+  ``decision.recorded`` event, and each ``item.note`` whose text, after
+  leading whitespace, starts with the exact lowercase prefix ``decided:``
+  (``DECIDED_PREFIX``). Such a note stays in its item's document too; as a
+  decision it is titled by its first ``DECISION_TITLE_CHARS`` characters,
+  so a ruling on a busy item ranks on its own words.
+- ``spec``: each item's current spec (its newest ``item.spec`` event).
+- ``stop``: each ``item.stopped`` event's ``point``.
 - ``utterance``: each ``utterance.captured`` event whose payload says
   ``origin: person``, and no other.
 - ``standard`` / ``adr``: ``standards/*.md`` and ``decisions/*.md`` under each
@@ -97,13 +104,15 @@ SEARCH_DB_NAME = "search.db"
 CONFIG_NAME = "config.json"
 # Format 2: doc_type became UNINDEXED, so an index built at format 1 is stale.
 # Format 3: the doc_meta and item_link tables behind the search filters.
-INDEX_FORMAT = 3
+# Format 4: decided: notes, decision.recorded, specs and stop points became
+# documents, so an index built at format 3 lacks them and is rebuilt.
+INDEX_FORMAT = 4
 # The one ranker. The manifest records it, so an index built by any other
 # ranker (or by a version that recorded none) is stale and gets rebuilt.
 RANKER = "bm25"
-DOC_TYPES = ("item", "decision", "utterance", "standard", "adr", "doc")
+DOC_TYPES = ("item", "decision", "spec", "stop", "utterance", "standard", "adr", "doc")
 # The document types built from the event log; the rest come from markdown.
-LEDGER_DOC_TYPES = ("item", "decision", "utterance")
+LEDGER_DOC_TYPES = ("item", "decision", "spec", "stop", "utterance")
 # How a reader colours an index status. ``ok``: current. ``info``: the next
 # search or ``ledger index`` brings it up to date on its own. Any status not
 # named here (``unknown`` included) is ``warn``.
@@ -133,12 +142,21 @@ SCHEMA_SQL = (
 )
 SNIPPET_TOKENS = 16
 UTTERANCE_TITLE_CHARS = 80
+# An item.note whose text, after leading whitespace, starts with exactly
+# this (lowercase, the colon included) is also a decision document.
+DECIDED_PREFIX = "decided:"
+DECISION_TITLE_CHARS = 80
+STOP_TITLE_CHARS = 80
 _LINK_KIND_PREFIXES = ("item.", "decision.")
 _MD_PATH = re.compile(r"(?:~/|/)?(?:[\w.@+-]+/)*[\w.@+-]+\.md(?![\w-])")
 # Up to three literal spaces of indent (CommonMark); a tab or other
 # whitespace before the run is not indent. export.py ``_FENCE`` mirrors it.
 _FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
-_TERM = re.compile(r"[\w][\w'-]*", re.UNICODE)
+# A word, with hyphens and apostrophes inside it, and a dot only between two
+# word characters: ``release.notes`` is one term, matched as a phrase of its
+# parts as ``feed-condenser`` is, and a sentence's final dot is not part of
+# the word before it.
+_TERM = re.compile(r"[\w](?:[\w'-]|(?<=\w)\.(?=\w))*", re.UNICODE)
 _BARE_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_TIME = re.compile(
     r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})?$"
@@ -300,6 +318,21 @@ def is_person_utterance(event: Event) -> bool:
     return event.kind == "utterance.captured" and event.payload.get("origin") == "person"
 
 
+def decided_note_text(event: Event) -> str | None:
+    """The text of an ``item.note`` that records a decision, else None.
+
+    A note is a decision when its ``text`` is a string that, after leading
+    whitespace, starts with ``DECIDED_PREFIX`` exactly: ``Decided:``,
+    ``decided :`` or a note with no text field is not one.
+    """
+    if event.kind != "item.note" or event.item_id is None:
+        return None
+    text = event.payload.get("text")
+    if not isinstance(text, str) or not text.lstrip().startswith(DECIDED_PREFIX):
+        return None
+    return text
+
+
 def _join(parts: Iterable[Any]) -> str:
     return "\n".join(str(part) for part in parts if part not in (None, ""))
 
@@ -399,8 +432,13 @@ def ledger_docs(items: Sequence[Mapping[str, Any]], events: Sequence[Event]) -> 
         )
         for row in items
     ]
+    # Each item's current spec: its newest item.spec event.
+    specs: dict[str, Event] = {}
     for event in events:
         payload = event.payload
+        if event.kind == "item.spec" and event.item_id is not None:
+            specs[event.item_id] = event
+            continue
         meta = {
             "item_id": event.item_id,
             "status": statuses.get(event.item_id) if event.item_id is not None else None,
@@ -436,6 +474,30 @@ def ledger_docs(items: Sequence[Mapping[str, Any]], events: Sequence[Event]) -> 
                 ]),
                 **meta,
             ))
+        elif event.kind == "decision.recorded" and event.item_id is not None:
+            effect = payload.get("effect")
+            if isinstance(effect, str) and effect:
+                raw_tags = payload.get("tags")
+                tags = [tag.get("id") for tag in raw_tags
+                        if isinstance(tag, Mapping)] if isinstance(raw_tags, list) else []
+                corpus.append(Doc(
+                    "decision",
+                    f"{event.item_id}:{event.id}",
+                    effect,
+                    _join([payload.get("verbatim"), payload.get("who"),
+                           payload.get("relayed_by"), *tags]),
+                    **meta,
+                ))
+        elif event.kind == "item.stopped" and event.item_id is not None:
+            point = payload.get("point")
+            if isinstance(point, str) and point.strip():
+                corpus.append(Doc(
+                    "stop",
+                    f"{event.item_id}:{event.id}",
+                    point.strip()[:STOP_TITLE_CHARS],
+                    point,
+                    **meta,
+                ))
         elif is_person_utterance(event):
             text = payload.get("text", "")
             first = text.strip().splitlines()[0] if text.strip() else ""
@@ -446,6 +508,31 @@ def ledger_docs(items: Sequence[Mapping[str, Any]], events: Sequence[Event]) -> 
                 text,
                 **meta,
             ))
+        else:
+            decided = decided_note_text(event)
+            if decided is not None:
+                corpus.append(Doc(
+                    "decision",
+                    f"{event.item_id}:{event.id}",
+                    decided.lstrip()[:DECISION_TITLE_CHARS],
+                    decided,
+                    **meta,
+                ))
+    for item_id, event in specs.items():
+        body = event.payload.get("body_md")
+        if not isinstance(body, str) or not body:
+            continue
+        title = event.payload.get("title")
+        corpus.append(Doc(
+            "spec",
+            f"{item_id}:{event.id}",
+            title if isinstance(title, str) and title else item_id,
+            _join([body, event.payload.get("acceptance")]),
+            item_id=item_id,
+            status=statuses.get(item_id),
+            date=event.recorded_at,
+            ts=_event_micros(event.recorded_at),
+        ))
     return corpus
 
 
@@ -1154,7 +1241,8 @@ def match_expression(query: str) -> str:
 
     Common English words are dropped unless nothing else is left. A
     hyphenated word stays one quoted phrase, so ``feed-condenser`` matches
-    the two words in order.
+    the two words in order; so does a dotted word, a dot between two word
+    characters (``release.notes``).
     """
     terms = _TERM.findall(query)
     kept = [term for term in terms if term.lower() not in _STOPWORDS] or terms
