@@ -8,7 +8,7 @@ from pathlib import Path
 from .backup import integrity_check
 from .export import canonical_stream, verify_export
 from .restore import restore_export
-from .store import Event, open_ledger
+from .store import Event, open_ledger, restore_needs_accept_flag
 
 # An unclaimed ledger (one from before system claims) restores under this
 # name; the restore appends its claim after the replayed stream, and the
@@ -46,7 +46,7 @@ def restore_drill(
     if source_digest != export_digest:
         raise RuntimeError("restore drill: event hash mismatch")
 
-    reserved = any(event.kind.startswith("loop.") for event in source_prefix)
+    reserved = any(restore_needs_accept_flag(event.kind) for event in source_prefix)
     restore_system = system if system is not None else UNCLAIMED_DRILL_SYSTEM
     restore_export(
         export_dir,
@@ -64,7 +64,8 @@ def restore_drill(
     finally:
         replay.close()
 
-    # Loop restores append one receipt after replaying the exported stream,
+    # A restore with --accept-loop-events (loop or review receipt events)
+    # appends one session.opened record after replaying the exported stream,
     # and an unclaimed export gets its claim appended the same way.
     expected_count = exported_count + int(reserved) + int(system is None)
     if len(restored) != expected_count:

@@ -113,6 +113,9 @@ def test_every_v1_kind_is_registered() -> None:
         # the entity verb alone writes them (test_entities covers them).
         "entity.registered",
         "entity.state",
+        # the receipt writer alone writes them (test_receipt_*.py cover them).
+        "review.receipt",
+        "review.grant-cite",
     }
 
 
