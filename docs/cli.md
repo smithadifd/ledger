@@ -857,6 +857,65 @@ and `truncated`; `truncated` is true when more matches exist, and each card keep
 
 **`index [--rebuild]`** Build `search.db` beside the database.
 
+**`search-miss --query Q --expected EVENT_OR_ITEM [--note T]`** Log a search
+that failed to surface something you later found another way. It appends one
+line to the database's own misses file, beside it, and does nothing else: no
+event is written, the index is not touched, and a refusal writes nothing.
+`--expected` is `event:N` (the document built from event N, a decision, spec,
+stop point or utterance) or an item id (that item's own document, not its
+decisions or notes); a colon is allowed only in `event:N`, N a positive integer
+with no leading zero, and an id holds no whitespace or control character (at
+most 200 characters). `--query` is up to 500 characters with at least one word
+the search matches and no control character; `--note` is up to 500 characters
+with no control character. Each option is given once. A near miss of any of
+these is a usage error (exit 2) that starts with its name (`query-empty`,
+`query-too-long`, `query-control-character`, `query-no-searchable-words`,
+`expected-empty`, `expected-too-long`, `expected-bad-character`,
+`expected-bad-form`, `note-too-long`, `note-control-character`,
+`missing-option`, `repeated-option`). It writes no event, so it needs no
+`LEDGER_HARNESS` (as with `export` and `backup`), and the database must exist
+(exit 1). A
+misses file that is a symlink, is not a regular file or cannot be written is
+refused (exit 3, `misses-file-unwritable`, `misses-file-not-regular` or
+`misses-file-short-write`), and so is any write error once the file is open (a
+size or quota limit, a full disk, an I/O error, a failed close): exit 3,
+`misses-file-write-failed`, with the usual JSON envelope under `--json`. The
+misses file is named after the database file: `<database file name>.search-misses.jsonl`,
+beside it (`home.db.search-misses.jsonl` for `home.db`), so two databases in
+one folder keep two logs and a replay never reads another database's misses.
+The file is created with mode 0600 on the first
+call. Two seats logging at once each add a whole line; a rerun after an
+interrupted call appends again, and a repeated line is harmless. The file is
+local: `export`, `backup` and the search index never read it.
+
+The file holds one JSON object per line, ASCII, each ending in a line feed:
+`{"expected":"event:12","note":"...","query":"harness map","recorded_at":"2026-11-20T09:30:00Z","v":1}`,
+where `note` is optional and the keys are exactly those five.
+
+**`search-audit`** Replay the logged misses against the current search index and
+print the rank each gets now, one line per miss: `ok` with `rank=N` when it ranks
+within the default ten, `candidate` when it ranks past ten or not at all
+(`rank=none`: not among the first 1000 hits), then the expected document and the
+query, and a count. A candidate is a candidate golden case: add its query,
+expected document and a max rank to the golden-query suite in `ledger/tests/`.
+`--json` carries `misses`, each with `line`, `recorded_at`, `query`, `expected`,
+`note` (when given), `rank` (an integer or `null`), `candidate` and, for a
+candidate, `golden_case` (`query`, `expected`, `max_rank`). The verb only
+reads: it never refreshes the index, so an index that is `behind`, `stale` or
+`missing` is unverifiable (exit 3, code `unverifiable`, no rank printed) until
+`ledger index` (or `doctor`, `search`) brings it up to date. A misses file that
+cannot be read, is not a regular file, is not UTF-8, has a last line with no
+line feed, or holds a line off the grammar above (a blank line, text that is
+not a JSON object, a duplicate, unknown or missing key, a version other than 1,
+a `recorded_at` off the form, a query or expected value the logging verb would
+refuse) is unverifiable the same way, naming the line and the form
+(`blank-line`, `not-json`, `not-an-object`, `duplicate-key`, `unknown-key`,
+`missing-key`, `bad-version`, `bad-type`, `bad-recorded-at`, `not-utf8`,
+`unterminated-line`, `misses-file-unreadable`, `misses-file-not-regular`).
+It reads only this database's misses file.
+With no misses file it prints `no logged misses` and exits 0; a database that
+does not exist exits 1.
+
 ## Integrity and durability verbs
 
 **`doctor`** Print the resolved database path and schema version, the search
