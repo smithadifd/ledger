@@ -237,6 +237,12 @@ def _cannot_publish_error(dest_path: Path) -> LedgerError:
     )
 
 
+def _overlong_temp_error(dest_path: Path) -> LedgerError:
+    return LedgerError(
+        f"backup destination file name exceeds the file name limit: {dest_path}"
+    )
+
+
 def _publish_without_replacing(partial: Path, dest_path: Path) -> None:
     """Move ``partial`` to ``dest_path`` unless a file has that name by then.
 
@@ -293,11 +299,19 @@ def backup_db(
     # A unique partial name, so two backups to one destination never unlink
     # or write each other's copy, and a fixed prefix, so the name can never
     # match the search-index cleanup's pattern whatever the destination is.
-    handle, partial_name = tempfile.mkstemp(
-        prefix=f"{BACKUP_TEMP_PREFIX}{dest_path.name}.",
-        suffix=BACKUP_TEMP_SUFFIX,
-        dir=dest_path.parent,
-    )
+    # The destination file system answers whether that name is too long:
+    # only ENAMETOOLONG becomes a LedgerError. The destination name is not
+    # truncated, and no length is computed here.
+    try:
+        handle, partial_name = tempfile.mkstemp(
+            prefix=f"{BACKUP_TEMP_PREFIX}{dest_path.name}.",
+            suffix=BACKUP_TEMP_SUFFIX,
+            dir=dest_path.parent,
+        )
+    except OSError as exc:
+        if exc.errno != errno.ENAMETOOLONG:
+            raise
+        raise _overlong_temp_error(dest_path) from exc
     partial = Path(partial_name)
     try:
         os.close(handle)
