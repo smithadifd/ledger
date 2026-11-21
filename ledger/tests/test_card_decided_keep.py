@@ -111,13 +111,31 @@ def test_over_budget_card_keeps_decided_notes_and_lists_them_under_decisions(
     assert " -> " not in body
 
 
-def test_not_over_budget_notes_keep_event_order(tmp_path: Path) -> None:
+@pytest.mark.parametrize("full", [False, True])
+def test_decided_prefix_progress_stays_under_progress(tmp_path: Path, full: bool) -> None:
+    lg = open_ledger(_db(tmp_path))
+    _create(lg, PARENT, "ticket", "quiet-parent")
+    text = "decided: use the existing store"
+    progress = _append(lg, "item.progress", {"text": text}, PARENT, "progress-1")
+    card = project_card(lg, PARENT, full=full)
+    rendered = format_card(card)
+    lg.close()
+    body = rendered.split("\n## Progress\n", 1)[1].split("\n\n", 1)[0]
+    assert body == f"- event={progress.id}: {text}"
+    assert _decisions_body(rendered) == "(none)\n"
+    assert _notes_body(rendered) == "(none)"
+    assert card.truncated == ()
+    assert card.as_dict()["progress"] == [{"event_id": progress.id, "text": text}]
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_not_over_budget_notes_keep_event_order(tmp_path: Path, full: bool) -> None:
     lg = open_ledger(_db(tmp_path))
     _create(lg, PARENT, "ticket", "quiet-parent")
     first = _append(lg, "item.note", {"text": "alpha note"}, PARENT, "n-a")
     ruling = _append(lg, "item.note", {"text": RULING}, PARENT, "n-r")
     last = _append(lg, "item.note", {"text": "omega note"}, PARENT, "n-z")
-    card = project_card(lg, PARENT)
+    card = project_card(lg, PARENT, full=full)
     text = format_card(card)
     lg.close()
     assert card.truncated == ()
