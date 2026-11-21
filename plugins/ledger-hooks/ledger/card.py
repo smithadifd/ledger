@@ -894,7 +894,10 @@ def _fmt_links(rows: tuple[dict[str, Any], ...]) -> str:
 
 
 def _fmt_notes(rows: tuple[dict[str, Any], ...]) -> str:
-    lines = [f"- event={row['event_id']}: {_one_line(row['text'])}" for row in rows]
+    lines = [
+        f"- event={row['event_id']}: {_one_line(row['text'])}"
+        for row in rows
+    ]
     return _fmt_list(lines)
 
 
@@ -1213,7 +1216,12 @@ def _render_card(card: Card, order: list[str]) -> str:
         _with_marker(_fmt_blockers(card.blockers), card, "blockers", order),
         "",
         "## Notes",
-        _with_marker(_fmt_notes(card.notes), card, "notes", order),
+        _with_marker(
+            _fmt_notes(tuple(row for row in card.notes if not _is_decided_note(row))),
+            card,
+            "notes",
+            order,
+        ),
     ]
     for section, heading, fmt in _RESUME_FORMAT:
         rows = getattr(card, section)
