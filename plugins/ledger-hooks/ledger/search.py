@@ -172,6 +172,11 @@ class SearchError(Exception):
     """The index cannot be built or read; the message says why."""
 
 
+class IndexNotCurrent(SearchError):
+    """``search(..., refresh=False)`` found an index that is not current. It
+    was left as it is; ``ledger index`` brings it up to date."""
+
+
 class IndexUnavailable(SearchError):
     """Nothing at the index path can be opened: it is absent, or it is not a
     regular file and so is never opened. ``index_status`` reads this as
@@ -1293,11 +1298,14 @@ def search(
     since: datetime | None = None,
     until: datetime | None = None,
     fallback_root: FallbackRoot | None = None,
+    refresh: bool = True,
 ) -> dict[str, Any]:
     """Refresh the index when it is not current, then rank hits.
 
     The filters narrow the text match in the same query; ``since`` and
-    ``until`` are inclusive and must be timezone-aware.
+    ``until`` are inclusive and must be timezone-aware. With ``refresh=False``
+    the index is never rewritten: one that is not current raises
+    ``IndexNotCurrent`` instead (the search-miss replay reads this way).
     """
     expression = match_expression(query)
     if not expression:
@@ -1316,6 +1324,10 @@ def search(
     # Named apart from the status filter, which it would otherwise replace.
     index_state = index_status(resolved, fallback_root)
     refreshed = index_state["status"] != "current"
+    if refreshed and not refresh:
+        raise IndexNotCurrent(
+            f"the search index is {index_state['status']}, not current, and was not refreshed"
+        )
     if refreshed:
         try:
             refresh_index(resolved, fallback_root)
