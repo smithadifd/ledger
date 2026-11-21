@@ -75,9 +75,13 @@ Adding the same item, role and sha256 again writes nothing and reports
 those three, so a retried add lands once. The same bytes under another role
 are a second document.
 
-``attach_document`` is the only writer of ``doc.attached``: the store
-reserves the kind, so ``ledger append`` and ``append-many`` refuse it and
-every stored sha256 is one the ledger computed from the bytes it read.
+``attach_document`` and ``attach_inline_in_transaction`` are the only
+writers of ``doc.attached``: the store reserves the kind, so ``ledger
+append`` and ``append-many`` refuse it and every stored sha256 is one the
+ledger computed from the bytes it read. ``attach_inline_in_transaction`` is
+the in-process form for a writer that lands a document and its own event in
+one transaction (the review receipt writer, ``ledger.receipts``); no verb
+calls it.
 """
 from __future__ import annotations
 
@@ -106,7 +110,7 @@ from ledger.schema import (
     DOC_ROLES,
     doc_path_problem,
 )
-from ledger.store import Event, Ledger
+from ledger.store import Event, Ledger, LedgerError
 from ledger.verbs import (
     EXIT_INTEGRITY,
     EXIT_NOT_FOUND,
@@ -746,6 +750,81 @@ def attach_document(
             model=model,
             session=session,
         )
+    return event, True
+
+
+def attach_inline_in_transaction(
+    lg: Ledger,
+    item_id: str,
+    data: bytes,
+    *,
+    role: str,
+    mime: str,
+    title: str | None = None,
+    actor: str | None = None,
+    harness: str | None = None,
+    model: str | None = None,
+    session: str | None = None,
+) -> tuple[Event, bool]:
+    """Attach ``data`` inline to ``item_id`` inside the caller's open
+    ``Ledger.transaction()``, so the document lands or rolls back with the
+    caller's own appends.
+
+    It keeps ``attach_document``'s rules: the sha256 and size are computed
+    here from ``data``; the idempotency key is ``document_key``; the bytes
+    are scanned for credential shapes before the duplicate check and before
+    any write, and a hit is refused ``doc_credential_shape`` (this form has
+    no override); and a document with the same item, role and sha256 already
+    on the item, whatever its storage, is returned with False and nothing is
+    written. ``data`` that is not bytes, or over ``DOC_INLINE_LIMIT``, is
+    refused ``doc_too_large`` (the bytes are stored inline only); an item that
+    does not exist is ``not_found``. Called outside a transaction it raises
+    ``LedgerError`` before anything is read. Returns ``(event, created)``.
+    """
+    if not lg._in_batch:
+        raise LedgerError("attach_inline_in_transaction needs the caller's Ledger.transaction()")
+    if type(data) is not bytes or len(data) > DOC_INLINE_LIMIT:
+        size = len(data) if type(data) is bytes else "not"
+        raise CliError(
+            f"the document is {size} bytes; it must be bytes, at most the "
+            f"{DOC_INLINE_LIMIT}-byte inline limit; nothing was written",
+            code="doc_too_large",
+            exit_code=EXIT_REFUSED,
+        )
+    hits = scan_credentials(data)
+    if hits:
+        raise CliError(
+            f"the document holds a credential shape ({describe_credentials(hits)}); "
+            "nothing was written",
+            code=CREDENTIAL_SHAPE,
+            exit_code=EXIT_REFUSED,
+        )
+    sha256 = hashlib.sha256(data).hexdigest()
+    if lg.item(item_id) is None:
+        raise CliError(f"item not found: {item_id}", code="not_found", exit_code=EXIT_NOT_FOUND)
+    for event in lg.events(item_id=item_id, kind=DOC_KIND):
+        if event.payload.get("role") == role and event.payload.get("sha256") == sha256:
+            return event, False
+    payload: dict[str, Any] = {
+        "role": role,
+        "sha256": sha256,
+        "size": len(data),
+        "mime": mime,
+        "content_b64": base64.b64encode(data).decode("ascii"),
+    }
+    if title is not None:
+        payload["title"] = title
+    event = lg._append_doc_event(
+        _DOC_WRITER_CAPABILITY,
+        kind=DOC_KIND,
+        payload=payload,
+        item_id=item_id,
+        idempotency_key=document_key(item_id, role, sha256),
+        actor=actor,
+        harness=harness,
+        model=model,
+        session=session,
+    )
     return event, True
 
 

@@ -41,6 +41,7 @@ from .schema import (
     ENTITY_REGISTERED_KIND,
     ENTITY_STATE_KIND,
     PICKER_CHANNEL,
+    RECEIPT_KINDS,
     SPEC_KIND,
     SYSTEM_CLAIM_KIND,
     ValidationError,
@@ -64,11 +65,13 @@ _MIGRATION_NAME = re.compile(r"^(\d{4})_[a-z0-9_]+\.sql$")
 _RECORDED_AT = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 RESERVED_KIND_PREFIX = "loop."
 # Kinds one writer owns: claim_system writes the system claim, set_spec
-# (verbs/spec.py) writes item.spec, attach_document (verbs/doc.py) writes
-# doc.attached, and register_entity and set_entity_state (verbs/entity.py)
-# write the entity kinds. Generic appends refuse them.
+# (verbs/spec.py) writes item.spec, the document writers (verbs/doc.py) write
+# doc.attached, register_entity and set_entity_state (verbs/entity.py) write
+# the entity kinds, and the receipt writer (receipts.py) writes
+# review.receipt and review.grant-cite. Generic appends refuse them. Each
+# kind is reserved by its exact name: review.recorded stays a generic kind.
 ENTITY_KINDS = (ENTITY_REGISTERED_KIND, ENTITY_STATE_KIND)
-RESERVED_KINDS = (SYSTEM_CLAIM_KIND, SPEC_KIND, DOC_KIND, *ENTITY_KINDS)
+RESERVED_KINDS = (SYSTEM_CLAIM_KIND, SPEC_KIND, DOC_KIND, *ENTITY_KINDS, *RECEIPT_KINDS)
 RESERVED_NOTE_PREFIXES = ("work:", "loop:")
 
 # Non-Cf members of Unicode's Default_Ignorable_Code_Point property. Cf
@@ -159,6 +162,15 @@ def _opt_str(value: Any, name: str) -> str | None:
     if value == "":
         return None
     return value
+
+
+def restore_needs_accept_flag(kind: str) -> bool:
+    """Whether an exported event of ``kind`` restores only with
+    ``--accept-loop-events`` (library: ``accept_loop_events``), after the
+    export's stream digest is checked: the loop kinds and the review receipt
+    kinds. ``replay_events`` refuses them outright. The one rule restore,
+    replay and the restore drill read."""
+    return kind.startswith(RESERVED_KIND_PREFIX) or kind in RECEIPT_KINDS
 
 
 def _is_busy(exc: BaseException) -> bool:
@@ -876,6 +888,19 @@ class Ledger:
             raise ValidationError("entity-writer-capability-required")
         # The entity writer owns entity.registered and entity.state only.
         if kwargs.get("kind") not in ENTITY_KINDS:
+            raise ValidationError(f"reserved-kind:{kwargs.get('kind')}")
+        return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
+
+    def _append_receipt_event(self, capability: object, **kwargs: Any) -> Event:
+        """Append a ``review.receipt`` or ``review.grant-cite`` only for the
+        receipt writer (receipts.py), which checked the item, the links and
+        the document in the caller's transaction."""
+        from .receipts import _RECEIPT_WRITER_CAPABILITY
+
+        if capability is not _RECEIPT_WRITER_CAPABILITY:
+            raise ValidationError("receipt-writer-capability-required")
+        # The receipt writer owns the two receipt kinds only.
+        if kwargs.get("kind") not in RECEIPT_KINDS:
             raise ValidationError(f"reserved-kind:{kwargs.get('kind')}")
         return self._append(internal=True, ignore_retry_attribution=False, **kwargs)
 
@@ -1724,4 +1749,5 @@ __all__ = [
     "migrate",
     "open_ledger",
     "open_ledger_readonly",
+    "restore_needs_accept_flag",
 ]
