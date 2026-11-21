@@ -9,6 +9,9 @@ import json
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -30,6 +33,68 @@ from test_search import (  # noqa: F401
 
 def _index(db: Path) -> Path:
     return db.parent / "search.db"
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _hold_partial_lock(path: Path) -> subprocess.Popen:
+    """A child process that holds ``LOCK_EX`` on ``path`` until stdin closes.
+
+    flock is per-process on some platforms, so another fd in this process
+    would not stop cleanup from taking the lock.
+    """
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl, os, sys\n"
+            "fd = os.open(sys.argv[1], os.O_RDWR)\n"
+            "fcntl.flock(fd, fcntl.LOCK_EX)\n"
+            "sys.stdout.write('held\\n')\n"
+            "sys.stdout.flush()\n"
+            "sys.stdin.read()\n",
+            str(path),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    line = holder.stdout.readline()
+    if line != b"held\n":
+        err = holder.stderr.read() if holder.stderr is not None else b""
+        holder.kill()
+        raise AssertionError(f"lock holder did not lock: {line!r} {err!r}")
+    return holder
+
+
+def _release_partial_lock(holder: subprocess.Popen) -> None:
+    if holder.stdin is not None:
+        holder.stdin.close()
+    holder.wait(timeout=10)
+
+
+_WRITER_A = (
+    "import os, sys, time\n"
+    "from pathlib import Path\n"
+    "from ledger import search as search_mod\n"
+    "directory = Path(sys.argv[1])\n"
+    "ledger = Path(sys.argv[2])\n"
+    "ready = Path(sys.argv[3])\n"
+    "go = Path(sys.argv[4])\n"
+    "tmp, fd = search_mod._create_index_partial(directory)\n"
+    "os.utime(tmp, ns=(1, 1))\n"
+    "ready.write_text(str(tmp), encoding='utf-8')\n"
+    "deadline = time.time() + 30\n"
+    "while not go.exists():\n"
+    "    if time.time() > deadline:\n"
+    "        raise SystemExit(3)\n"
+    "    time.sleep(0.01)\n"
+    "if not tmp.is_file():\n"
+    "    raise SystemExit(4)\n"
+    "search_mod._replace_index(tmp, directory / 'search.db', ledger)\n"
+    "os.close(fd)\n"
+)
 
 
 def _snapshot(db: Path) -> dict:
@@ -491,3 +556,86 @@ def test_search_refresh_removes_a_planted_stale_index_partial(db, monkeypatch):
     assert code == EXIT_OK, body
     assert not leftover.exists()
     assert body["data"]["cards"][0]["id"] == "T-feed"
+
+
+def test_a_locked_older_partial_is_left_and_the_refresh_still_publishes(
+    db, monkeypatch
+):
+    leftover = _stale_index_partial(db.parent, "locked1")
+    holder = _hold_partial_lock(leftover)
+    try:
+        ledger_before = db.read_bytes()
+        code, body = run_json(monkeypatch, db, "index")
+        assert code == EXIT_OK, body
+        assert leftover.is_file()
+        assert leftover.read_bytes() == b"stale-index"
+        assert db.read_bytes() == ledger_before
+        assert search_mod.index_status(db)["status"] == "current"
+        assert _index(db).is_file()
+    finally:
+        _release_partial_lock(holder)
+
+
+def test_an_overlapping_writer_keeps_its_temp_and_publishes_after(
+    db, monkeypatch
+):
+    run_json(monkeypatch, db, "index")
+    ready = db.parent / "writer-a-ready"
+    go = db.parent / "writer-a-go"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(REPO_ROOT)
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            _WRITER_A,
+            str(db.parent),
+            str(db),
+            str(ready),
+            str(go),
+        ],
+        cwd=str(REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.time() + 15
+        while not ready.exists():
+            if child.poll() is not None:
+                _out, err = child.communicate()
+                raise AssertionError(
+                    f"writer A exited early {child.returncode}: {err!r}"
+                )
+            if time.time() > deadline:
+                child.kill()
+                raise AssertionError("writer A did not create its temp")
+            time.sleep(0.02)
+        tmp = Path(ready.read_text(encoding="utf-8").strip())
+        assert tmp.is_file()
+        code, body = run_json(monkeypatch, db, "index", "--rebuild")
+        assert code == EXIT_OK, body
+        assert tmp.is_file(), "rebuild B removed writer A's live temp"
+        go.write_text("go", encoding="utf-8")
+        _out, err = child.communicate(timeout=15)
+        assert child.returncode == 0, err
+        assert not tmp.exists()
+        assert _index(db).is_file()
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+
+def test_cleanup_leaves_a_partial_when_fcntl_is_unavailable(db, monkeypatch):
+    leftover = _stale_index_partial(db.parent, "nofcntl")
+    monkeypatch.setattr(search_mod, "fcntl", None)
+    ledger_before = db.read_bytes()
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert leftover.is_file()
+    assert leftover.read_bytes() == b"stale-index"
+    assert db.read_bytes() == ledger_before
+    assert search_mod.index_status(db)["status"] == "current"
+    assert _index(db).is_file()

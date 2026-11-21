@@ -83,11 +83,14 @@ roots, format, ranker and database all still match. Anything else, or any
 error on the way, takes the full rebuild instead.
 
 A rebuild that does not finish can leave its temp file beside the index,
-named with the same prefix and suffix the writer uses. The next successful
-refresh removes each leftover that is a regular file, matches that name
-exactly, is not this writer's own temp, and is older than this rebuild.
-A symlink, a directory, a name that only contains the pattern, a leftover
-of another file, or a file whose type cannot be read is left as it is.
+named with the same prefix and suffix the writer uses. Each writer holds
+an exclusive non-blocking flock on its temp from creation until that
+temp is published or removed. The next successful refresh removes each
+leftover that is a regular file, matches that name exactly, is not this
+writer's own temp, is older than this rebuild, and is not held by a
+running writer. A symlink, a directory, a name that only contains the
+pattern, a leftover of another file, a file whose type cannot be read,
+or a leftover a running writer still holds is left as it is.
 A removal error is one line on stderr and does not fail the refresh or
 lose the new index.
 
@@ -113,6 +116,12 @@ import sqlite3
 import stat
 import sys
 import tempfile
+
+try:
+    import fcntl
+except ImportError:
+    fcntl = None  # type: ignore[assignment]
+
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
@@ -1087,11 +1096,48 @@ def _index_partial_parts() -> tuple[str, str]:
     return f".{SEARCH_DB_NAME}.", ".partial"
 
 
-def _create_index_partial(directory: Path) -> Path:
+def _lock_index_partial_fd(fd: int) -> bool:
+    """Take ``LOCK_EX | LOCK_NB`` on ``fd``.
+
+    False when fcntl is missing or the lock call fails for any reason: the
+    caller leaves the file in place.
+    """
+    if fcntl is None:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return False
+    return True
+
+
+def _close_index_partial_fd(fd: int) -> None:
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def _create_index_partial(directory: Path) -> tuple[Path, int]:
     prefix, suffix = _index_partial_parts()
     fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=directory)
-    os.close(fd)
-    return Path(tmp_name)
+    try:
+        _lock_index_partial_fd(fd)
+    except BaseException:
+        os.close(fd)
+        Path(tmp_name).unlink(missing_ok=True)
+        raise
+    return Path(tmp_name), fd
+
+
+def _connect_index_partial(tmp: Path) -> sqlite3.Connection:
+    """Open the writer's temp without SQLite's own file locks.
+
+    The writer already holds an exclusive flock on this inode. On platforms
+    where flock is fcntl, SQLite's locks on the same file fail with
+    ``database is locked``.
+    """
+    return sqlite3.connect(tmp.as_uri() + "?nolock=1", uri=True)
 
 
 def _is_index_partial_name(name: str) -> bool:
@@ -1101,15 +1147,28 @@ def _is_index_partial_name(name: str) -> bool:
     return bool(name[len(prefix) : len(name) - len(suffix)])
 
 
+def _open_index_partial_for_cleanup(path: Path) -> int | None:
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow:
+        return None
+    try:
+        return os.open(path, os.O_RDONLY | nofollow)
+    except OSError:
+        return None
+
+
 def _remove_stale_index_partials(
     index: Path, keep: Path, older_than_ns: int
 ) -> None:
     """Remove leftover writer temps in ``index``'s directory.
 
     Only a regular file whose name matches ``_is_index_partial_name``, that
-    is not ``keep``, and whose ``lstat`` mtime is older than
-    ``older_than_ns``. Anything else, and any ``stat`` or listing error, is
-    left in place. A removal error is one line on stderr and is not raised.
+    is not ``keep``, whose ``lstat`` mtime is older than ``older_than_ns``,
+    and whose exclusive non-blocking flock this process can take. A live
+    writer's lock, an open that cannot avoid following a symlink, a lock
+    or open failure, or a platform without fcntl, leaves the file. Unlink
+    while holding the lock, then close. A removal error is one line on
+    stderr and is not raised.
     """
     directory = index.parent
     try:
@@ -1131,11 +1190,19 @@ def _remove_stale_index_partials(
             continue
         if found.st_mtime_ns >= older_than_ns:
             continue
+        fd = _open_index_partial_for_cleanup(path)
+        if fd is None:
+            continue
         try:
-            os.unlink(path)
-        except OSError as exc:
-            line = f"cannot remove leftover search index partial {path}: {exc}"
-            print(line.replace("\n", " "), file=sys.stderr)
+            if not _lock_index_partial_fd(fd):
+                continue
+            try:
+                os.unlink(path)
+            except OSError as exc:
+                line = f"cannot remove leftover search index partial {path}: {exc}"
+                print(line.replace("\n", " "), file=sys.stderr)
+        finally:
+            _close_index_partial_fd(fd)
 
 
 def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> dict[str, Any]:
@@ -1157,10 +1224,10 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
                 path, doc_type, roots, mtime_ns=stat[0] if stat else None))
         except OSError:
             manifest["sources"].pop(str(path), None)
-    tmp = _create_index_partial(index.parent)
+    tmp, lock_fd = _create_index_partial(index.parent)
     older_than_ns = os.lstat(tmp).st_mtime_ns
     try:
-        conn = sqlite3.connect(tmp)
+        conn = _connect_index_partial(tmp)
         try:
             for statement in SCHEMA_SQL:
                 conn.execute(statement)
@@ -1181,6 +1248,8 @@ def build_index(db: Path | str, fallback_root: FallbackRoot | None = None) -> di
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+    finally:
+        _close_index_partial_fd(lock_fd)
     counts: dict[str, int] = {}
     for doc in corpus:
         counts[doc.doc_type] = counts.get(doc.doc_type, 0) + 1
@@ -1285,10 +1354,11 @@ def _append_trailing(
     except SearchError:
         return None
     tmp: Path | None = None
+    lock_fd: int | None = None
     try:
-        tmp = _create_index_partial(index.parent)
+        tmp, lock_fd = _create_index_partial(index.parent)
         older_than_ns = os.lstat(tmp).st_mtime_ns
-        conn = sqlite3.connect(tmp)
+        conn = _connect_index_partial(tmp)
         try:
             source.backup(conn)
             source.close()
@@ -1305,6 +1375,8 @@ def _append_trailing(
         source.close()
         if tmp is not None:
             tmp.unlink(missing_ok=True)
+        if lock_fd is not None:
+            _close_index_partial_fd(lock_fd)
     return {"path": str(index), **summary}
 
 
