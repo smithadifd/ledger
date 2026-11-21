@@ -472,6 +472,38 @@ that fit yours. The [CHANGELOG](../CHANGELOG.md) entry has the detail.
   `export` and `card` still exit 0. Once any caller writes receipts into a
   database, upgrade every copy that opens it (the list in 3.1).
 
+- **A ledger open in a subinterpreter is refused (0.6.0).** This applies only to
+  a program that imports the ledger library inside a Python subinterpreter. The
+  file check installs its SQLite connection capture from the main interpreter
+  only, so a ledger open in any other interpreter is now refused with
+  `db_fd_unattributable` (`the capture hook installs only in the main
+  interpreter, and this is another interpreter`), on every Python version,
+  before anything is registered with SQLite. On Python 3.12 and later such an
+  open was accepted before; on 3.11 it was already refused, with another
+  reason. Open the ledger from the main interpreter, or run the `ledger`
+  command as its own process. A process that opens SQLite from an own-GIL
+  subinterpreter on another thread, after the main interpreter has installed
+  the capture, can crash; that combination is unsupported, as it was before.
+
+- **Search-index writers share a lock file and may print a cleanup line (0.6.0).**
+  Every writer of the search index (`index`, `index --rebuild`, `search`,
+  `doctor`) now holds a shared lock on `.search.db.lock` beside `search.db`
+  while it builds its `.search.db.<id>.partial` temp. The lock file is created
+  empty with mode 0600, is never removed, and stays in the database folder when
+  you uninstall. After it publishes, a refresh removes a leftover temp of that
+  name from a rebuild that did not finish, but only when no writer is running
+  and only when the file is positively identified as an index temp. It leaves
+  any other file of that name as it was and prints one `search index cleanup
+  skipped PATH: REASON` line on stderr; the refresh still succeeds. A killed
+  rebuild whose temp has a `-journal` file beside it is reported the same way,
+  not removed. A script that reads stderr must accept the line, and a file you
+  want gone (a backup you made to a name of that form, for example) is yours to
+  delete. A refresh that runs while a writer from a version before 0.6.0 is
+  mid-build can remove that writer's temp, because that writer takes no lock:
+  its refresh then fails, and the next refresh rebuilds. During the upgrade,
+  upgrade every copy that writes the same database's index before you run them
+  at the same time, or run the failed command again.
+
 - **The plugin's bundled `ledger` is the 0.6.0 command (0.6.0).** This applies
   if the `ledger-hooks` plugin is installed. Its hook scripts did not change,
   but the `bin/ledger` they run is the CLI of this release, with everything
