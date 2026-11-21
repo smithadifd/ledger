@@ -90,7 +90,8 @@ leftover that is a regular file, matches that name exactly, is not this
 writer's own temp, is older than this rebuild, and is not held by a
 running writer. A symlink, a directory, a name that only contains the
 pattern, a leftover of another file, a file whose type cannot be read,
-or a leftover a running writer still holds is left as it is.
+or a leftover a running writer still holds, or a leftover the cleanup
+cannot open, is left as it is.
 A removal error is one line on stderr and does not fail the refresh or
 lose the new index.
 
@@ -1118,16 +1119,38 @@ def _close_index_partial_fd(fd: int) -> None:
         pass
 
 
-def _create_index_partial(directory: Path) -> tuple[Path, int]:
+def _rename_creating_to_partial(creating: Path, directory: Path) -> Path:
+    """Give a locked creating file its partial name. Rename keeps the inode.
+
+    The dest name is fresh (the same random shape mkstemp uses). Publish of
+    the finished index still uses ``os.link``.
+    """
     prefix, suffix = _index_partial_parts()
-    fd, tmp_name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=directory)
+    for _ in range(64):
+        dest = directory / f"{prefix}{os.urandom(4).hex()}{suffix}"
+        try:
+            os.rename(os.fspath(creating), os.fspath(dest))
+        except FileExistsError:
+            continue
+        return dest
+    raise OSError("cannot allocate a search index partial name")
+
+
+def _create_index_partial(directory: Path) -> tuple[Path, int]:
+    prefix, _suffix = _index_partial_parts()
+    fd, creating_name = tempfile.mkstemp(
+        prefix=prefix, suffix=".creating", dir=directory
+    )
+    creating = Path(creating_name)
     try:
-        _lock_index_partial_fd(fd)
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        tmp = _rename_creating_to_partial(creating, directory)
     except BaseException:
-        os.close(fd)
-        Path(tmp_name).unlink(missing_ok=True)
+        _close_index_partial_fd(fd)
+        creating.unlink(missing_ok=True)
         raise
-    return Path(tmp_name), fd
+    return tmp, fd
 
 
 def _connect_index_partial(tmp: Path) -> sqlite3.Connection:

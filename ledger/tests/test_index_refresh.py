@@ -5,12 +5,14 @@ synthetic and built under tmp_path.
 """
 from __future__ import annotations
 
+import errno
 import json
 import os
 import sqlite3
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -639,3 +641,67 @@ def test_cleanup_leaves_a_partial_when_fcntl_is_unavailable(db, monkeypatch):
     assert db.read_bytes() == ledger_before
     assert search_mod.index_status(db)["status"] == "current"
     assert _index(db).is_file()
+
+
+def test_creating_temp_name_does_not_match_the_index_partial_pattern(tmp_path):
+    real = tempfile.mkstemp
+    seen: dict = {}
+
+    def wrap(*args, **kwargs):
+        fd, name = real(*args, **kwargs)
+        seen["name"] = Path(name).name
+        return fd, name
+
+    tempfile.mkstemp = wrap  # type: ignore[method-assign]
+    try:
+        tmp, fd = search_mod._create_index_partial(tmp_path)
+    finally:
+        tempfile.mkstemp = real  # type: ignore[method-assign]
+    try:
+        assert "name" in seen
+        assert not search_mod._is_index_partial_name(seen["name"])
+        assert search_mod._is_index_partial_name(tmp.name)
+    finally:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+        leftover = tmp_path / seen["name"]
+        leftover.unlink(missing_ok=True)
+
+
+def test_create_index_partial_holds_the_lock_when_the_name_first_matches(tmp_path):
+    tmp, fd = search_mod._create_index_partial(tmp_path)
+    try:
+        assert search_mod._is_index_partial_name(tmp.name)
+        child = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import fcntl, os, sys\n"
+                "fd = os.open(sys.argv[1], os.O_RDONLY)\n"
+                "try:\n"
+                "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                "except OSError:\n"
+                "    sys.exit(2)\n"
+                "else:\n"
+                "    sys.exit(0)\n",
+                str(tmp),
+            ],
+            check=False,
+        )
+        assert child.returncode == 2, child.returncode
+    finally:
+        os.close(fd)
+        tmp.unlink(missing_ok=True)
+
+
+def test_create_index_partial_lock_failure_raises_and_leaves_no_file(
+    tmp_path, monkeypatch
+):
+    def boom(_fd, _flags):
+        raise OSError(errno.EAGAIN, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(search_mod.fcntl, "flock", boom)
+    before = {p.name for p in tmp_path.iterdir()}
+    with pytest.raises(OSError):
+        search_mod._create_index_partial(tmp_path)
+    assert {p.name for p in tmp_path.iterdir()} == before

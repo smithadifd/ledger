@@ -489,8 +489,9 @@ from scratch. After a successful refresh, leftover `.search.db.<id>.partial`
 files from a rebuild that did not finish are removed when they match that
 name exactly, are regular files, are not this rebuild's own temp, are older
 than this rebuild, and are not held by a running writer; a symlink, a
-directory, a near-miss name, a file whose type cannot be read, or a leftover
-a running writer still holds is left as it is, and a removal error is one
+directory, a near-miss name, a file whose type cannot be read, a leftover
+the cleanup cannot open, or a leftover a running writer still holds is
+left as it is, and a removal error is one
 line on stderr and does not fail the refresh. Each report also carries a `severity` to colour it by:
 
 | severity | when |

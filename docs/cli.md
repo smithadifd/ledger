@@ -885,8 +885,9 @@ refresh (this verb when the index is not current, `--rebuild`, `search`, or
 `doctor`) removes each leftover that matches that name exactly, is a regular
 file, is not this rebuild's own temp, is older than this rebuild, and is not
 held by a running writer. A name that only contains the pattern, a leftover
-of another file, a symlink, a file whose type cannot be read, or a leftover
-a running writer still holds is left as it is. A removal error is one line
+of another file, a symlink, a file whose type cannot be read, a leftover
+the cleanup cannot open, or a leftover a running writer still holds is
+left as it is. A removal error is one line
 on stderr and does not fail the refresh or lose the new index. The ledger
 database and its backups are not touched.
 
