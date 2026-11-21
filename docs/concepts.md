@@ -494,4 +494,6 @@ from scratch. Each report also carries a `severity` to colour it by:
 | `warn` | the index cannot be built where it is (inside a git working tree, a directory at the index path, an unusable `config.json`), or `doctor` could not read its state (`unknown`); the reason is in `reasons` |
 
 Results are ranked by BM25 and can be filtered by type, item status, item,
-initiative and date.
+initiative and date. Text output caps each title at 100 characters and, when
+`--limit` cuts the result, ends with `+more (raise --limit or narrow with --type/--item)`;
+`--json` keeps the stored titles and a `truncated` flag.

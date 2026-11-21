@@ -681,7 +681,10 @@ items whose lease expired; those read `open`, with `recorded_status`,
 
 **`card ITEM [--md PATH] [--full]`** A bounded resume card: header (revision and
 source event ids), fields, decisions, open questions with their options, the
-next step, links, blockers, notes and resume sections. `--md` also writes a
+next step, links, blockers, notes and resume sections. A `decided:` note
+(text that, after leading whitespace, starts with exactly `decided:`) is
+dropped last when the card is over budget, and listed under Decisions as a
+note with its event id, never as an election. `--md` also writes a
 markdown copy. A claim whose lease expired shows `status: open` and, under
 it, an `expired claim:` line naming the old holder, the lease stamp and the
 recorded status; `--json` carries `status`, `recorded_status`,
@@ -843,6 +846,14 @@ A `decided:` note is a `decision` of its own as well as part of its item, and
 a dotted word (`release.notes`) is matched as a phrase. Rebuilds
 the index first when it is missing, stale or behind new events, and refuses by name (exit 3)
 when it cannot rewrite the index, rather than answering from it.
+Text output prints one row per card (score, type, id, title) and an indented snippet, and caps
+each title at 100 characters with an ellipsis when longer. When more matches exist than
+`--limit` (default 10), the last line is `+more (raise --limit or narrow with --type/--item)`
+rather than a count, because the search does not return how many sit past the limit.
+`--json` is unchanged: `data` holds `cards`, `filters`, `limit`, `query`, `ranker`, `refreshed`
+and `truncated`; `truncated` is true when more matches exist, and each card keeps its stored
+`title` plus `score`, `doc_type`, `id`, `snippet`, and when present `path`, `item_id`, `status`,
+`date` and `caveat`.
 
 **`index [--rebuild]`** Build `search.db` beside the database.
 
