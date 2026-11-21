@@ -92,11 +92,14 @@ uses, against the live export trees, and do not write to them.
 Skip this step when the release does not change the export credential scan
 or what export sends.
 
-## 3. Annotated tag on the squash commit; tag only
+## 3. Annotated tag on the squash commit, then one GitHub Release
 
 After the pull request squash-merges, tag that squash commit (not a local
-merge). v0.1.22's tag object points at commit `8e4fe35`. There is no GitHub
-Release for v0.1.21 or v0.1.22.
+merge). v0.1.22's tag object points at commit `8e4fe35`. Every tag gets one
+GitHub Release, titled with the tag, whose notes are that version's changelog
+section; the release standard calls a tag with no Release a defect. The
+v0.1.21 and v0.1.22 tags predate this step and stay without one; v0.5.0 and
+v0.6.0 have theirs.
 
 Tag message shape (`git tag -n3 v0.1.22`):
 
@@ -107,7 +110,24 @@ Commands:
     git tag -a vX.Y.Z -m "ledger vX.Y.Z: <one-line summary>"
     git push origin vX.Y.Z
 
-Push the tag only. Do not create a GitHub Release.
+Then create the Release from the pushed tag. The notes are the changelog
+section the pull request added, not text written at release time. Copy the
+lines under the `## X.Y.Z` heading, up to the next `## ` heading, into a
+scratch file outside the repository (the heading line itself is left out
+because the Release title already names the tag):
+
+    awk '/^## /{if (found) exit} /^## X\.Y\.Z /{found=1; next} found' CHANGELOG.md > <notes-file>
+
+Read the notes file once (the section's closing "Upgrade with" line belongs in
+it), then:
+
+    gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file <notes-file>
+
+`--verify-tag` stops the command when the tag is not already on the remote, so
+it never creates a tag as a side effect. A new stable release is marked Latest;
+the newest stable version is the one marked Latest. A tag with a pre-release
+suffix (`-rc`) takes `--prerelease` and is not marked Latest. Check the result
+with `gh release view vX.Y.Z`.
 
 ## 4. Right after the tag: bump the plugin manifest to the next `-dev` version
 
