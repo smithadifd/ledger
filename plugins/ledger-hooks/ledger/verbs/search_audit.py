@@ -1,6 +1,6 @@
 """Replay the logged search misses against the current search index.
 
-Prints the rank each miss (``ledger search-miss``) gets now. A miss that ranks
+Prints the rank each miss (``ledger search-miss``) of this database gets now. A miss that ranks
 past ten, or not at all, is a candidate golden case. The verb only reads: it
 never refreshes the index, so ``search-audit`` on an index that is behind,
 stale or missing is unverifiable (exit 3, no rank printed) until ``ledger
@@ -14,7 +14,7 @@ import sqlite3
 from ledger.card import _one_line
 from ledger.paths import resolve_db_path
 from ledger.search import IndexNotCurrent, SearchError
-from ledger.search_misses import DEFAULT_RANK, MISSES_NAME, MissError, misses_path, read_misses, replay
+from ledger.search_misses import DEFAULT_RANK, MissError, misses_path, read_misses, replay
 from ledger.store import LedgerError
 from ledger.verbs import EXIT_NOT_FOUND, EXIT_REFUSED, CliError, Context, Result, Verb
 
@@ -48,9 +48,10 @@ def run(args, ctx: Context) -> Result:
         misses = read_misses(resolved)
     except MissError as exc:
         raise _unverifiable(str(exc)) from exc
-    data = {"path": str(misses_path(resolved)), "default_rank": DEFAULT_RANK, "misses": []}
+    path = misses_path(resolved)
+    data = {"path": str(path), "default_rank": DEFAULT_RANK, "misses": []}
     if not misses:
-        return Result(data=data, text=f"no logged misses ({MISSES_NAME})")
+        return Result(data=data, text=f"no logged misses ({path.name})")
     try:
         rows = replay(resolved, misses, ctx.search_fallback_root)
     except IndexNotCurrent as exc:

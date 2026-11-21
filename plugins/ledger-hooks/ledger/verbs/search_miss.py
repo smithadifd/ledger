@@ -1,7 +1,7 @@
 """Log a search that missed: one line appended to the misses file.
 
-The misses file (``search-misses.jsonl``) sits beside the ledger database. The
-verb checks its three options against a fixed grammar (``ledger.search_misses``)
+The misses file (the database's file name plus ``.search-misses.jsonl``) sits
+beside the ledger database and belongs to that database alone. The verb checks its three options against a fixed grammar (``ledger.search_misses``)
 and then appends one line; it writes no event, builds no index and changes no
 other file. A refusal writes nothing. It writes no event, so like ``export``
 and ``backup`` (which write files, not events) it is not a ``writes`` verb and

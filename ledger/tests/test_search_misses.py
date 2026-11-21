@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import hashlib
 import io
+import errno
 import json
 import os
+import resource
 import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -24,7 +26,6 @@ from ledger import search_misses
 from ledger.cli import main
 from ledger.search_misses import (
     DEFAULT_RANK,
-    MISSES_NAME,
     MissError,
     append_miss,
     is_candidate,
@@ -43,6 +44,8 @@ RULING = (
     f"{CHILD}; its tooltips are attested by machine, never by a reader"
 )
 QUERY = "harness map"
+# The misses file of home.db: the database file's own name plus a suffix.
+MISSES_NAME = "home.db.search-misses.jsonl"
 
 
 def invoke(monkeypatch, argv: list[str], harness: str | None = "pytest") -> tuple[int, str, str]:
@@ -276,6 +279,73 @@ def test_an_append_that_stops_part_way_is_refused_by_name(ledger_dir, monkeypatc
     assert caught.value.reason == "misses-file-short-write"
 
 
+# --- an append that fails after the file is open ------------------------------------
+
+
+@contextmanager
+def no_file_growth():
+    """Refuse any growth of a file in this process: a real size limit, so a
+    ``write`` fails with EFBIG. Python ignores SIGXFSZ, so the call raises.
+
+    Wrap only the call under test: while the limit holds, pytest could not
+    write its own report to a redirected stdout.
+    """
+    soft, hard = resource.getrlimit(resource.RLIMIT_FSIZE)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (0, hard))
+    try:
+        yield
+    finally:
+        resource.setrlimit(resource.RLIMIT_FSIZE, (soft, hard))
+
+
+def test_a_write_refused_by_a_size_limit_is_named_not_raised(ledger_dir):
+    with no_file_growth(), pytest.raises(MissError) as caught:
+        append_miss(ledger_dir["db"], QUERY, CHILD)
+    assert caught.value.reason == "misses-file-write-failed"
+    assert ledger_dir["misses"].read_bytes() == b""
+
+
+def test_a_write_refused_by_a_size_limit_exits_3_with_an_envelope(ledger_dir, monkeypatch):
+    with no_file_growth():
+        code, out, err = invoke(monkeypatch, ["--json", "--db", str(ledger_dir["db"]), "search-miss",
+                                              "--query", QUERY, "--expected", CHILD])
+    assert code == EXIT_REFUSED and err == ""
+    envelope = json.loads(out)
+    assert envelope["ok"] is False and envelope["error"]["code"] == "misses-file-write-failed"
+    assert "cannot append to" in envelope["error"]["message"]
+
+
+def test_a_write_error_in_text_mode_names_the_reason(ledger_dir, monkeypatch):
+    with no_file_growth():
+        code, out, err = log(monkeypatch, ledger_dir["db"], "--query", QUERY, "--expected", CHILD)
+    assert code == EXIT_REFUSED and out == ""
+    assert err.startswith("misses-file-write-failed: "), err
+    assert "Traceback" not in err
+
+
+def test_any_oserror_from_the_write_is_named(ledger_dir, monkeypatch):
+    def refuse(fd, data):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(search_misses.os, "write", refuse)
+    code, out, err = log(monkeypatch, ledger_dir["db"], "--query", QUERY, "--expected", CHILD)
+    assert code == EXIT_REFUSED and out == ""
+    assert err.startswith("misses-file-write-failed: "), err
+
+
+def test_a_close_that_fails_after_the_write_is_named(ledger_dir, monkeypatch):
+    real = os.close
+
+    def failing_close(fd):
+        real(fd)
+        raise OSError(errno.EIO, "Input/output error")
+
+    monkeypatch.setattr(search_misses.os, "close", failing_close)
+    code, out, err = log(monkeypatch, ledger_dir["db"], "--query", QUERY, "--expected", CHILD)
+    assert code == EXIT_REFUSED and out == ""
+    assert err.startswith("misses-file-write-failed: cannot close "), err
+
+
 def test_concurrent_writers_each_add_a_whole_line(ledger_dir):
     count = 40
     start = threading.Barrier(8)
@@ -290,6 +360,50 @@ def test_concurrent_writers_each_add_a_whole_line(ledger_dir):
     misses = read_misses(ledger_dir["db"])
     assert len(misses) == count
     assert len({miss.query for miss in misses}) == count
+
+
+# --- one log per database ----------------------------------------------------------
+
+
+def _second_database(directory: Path) -> Path:
+    """A second ledger in the same folder, with an event of its own."""
+    other = directory / "other.db"
+    with open_ledger(other) as lg:
+        _append(lg, "item.created", "unrelated-item",
+                {"type": "ticket", "title": "Harness map elsewhere"}, "unrelated")
+    return other
+
+
+def test_two_databases_in_one_folder_keep_two_logs(ledger_dir, monkeypatch):
+    first, other = ledger_dir["db"], _second_database(ledger_dir["dir"])
+    log(monkeypatch, first, "--query", QUERY, "--expected", f"event:{ledger_dir['ruling']}")
+    assert snapshot(ledger_dir["dir"]).keys() >= {MISSES_NAME}
+    assert not (ledger_dir["dir"] / "other.db.search-misses.jsonl").exists()
+    log(monkeypatch, other, "--query", "elsewhere", "--expected", "unrelated-item")
+    assert [m.query for m in read_misses(first)] == [QUERY]
+    assert [m.query for m in read_misses(other)] == ["elsewhere"]
+    assert search_misses.misses_path(other).name == "other.db.search-misses.jsonl"
+
+
+def test_a_replay_never_reads_another_databases_misses(ledger_dir, monkeypatch):
+    first, other = ledger_dir["db"], _second_database(ledger_dir["dir"])
+    # The miss is logged for the first database only.
+    log(monkeypatch, first, "--query", QUERY, "--expected", f"event:{ledger_dir['ruling']}")
+    # The second database has a current index of its own (the index file is the
+    # folder's, rebuilt for whichever database searched last).
+    code, _, _ = invoke(monkeypatch, ["--db", str(other), "search", QUERY])
+    assert code == EXIT_OK
+    code, out, err = audit(monkeypatch, other)
+    assert (code, err) == (EXIT_OK, "")
+    data = json.loads(out)["data"]
+    assert data["misses"] == []
+    assert Path(data["path"]).name == "other.db.search-misses.jsonl"
+    code, out, _ = invoke(monkeypatch, ["--db", str(other), "search-audit"])
+    assert out == "no logged misses (other.db.search-misses.jsonl)\n"
+    # The first database still replays its own miss.
+    current_index(monkeypatch, first)
+    rows = json.loads(audit(monkeypatch, first)[1])["data"]["misses"]
+    assert [row["expected"] for row in rows] == [f"event:{ledger_dir['ruling']}"]
 
 
 # --- the grammar of a logged line ------------------------------------------------

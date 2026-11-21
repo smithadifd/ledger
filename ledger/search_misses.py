@@ -1,10 +1,12 @@
 """A log of searches that missed, and the replay that ranks each one again.
 
-``ledger search-miss`` appends one line to ``search-misses.jsonl``, beside the
-ledger database. ``ledger search-audit`` reads that file and prints the rank
-each logged miss gets from the current search index. Neither changes ranking
-or the index: the log verb performs one append and nothing else, and the
-replay only reads.
+``ledger search-miss`` appends one line to the misses file of its database,
+beside it: the database's own file name plus ``.search-misses.jsonl`` (for
+``home.db``, ``home.db.search-misses.jsonl``). Two databases in one folder keep
+two logs, so a replay never reads another database's misses. ``ledger
+search-audit`` reads that file and prints the rank each logged miss gets from
+the current search index. Neither changes ranking or the index: the log verb
+performs one append and nothing else, and the replay only reads.
 
 A miss names one query and one thing that query should have surfaced: an
 event (``event:N``, a document built from event N) or an item (its id, the
@@ -28,6 +30,11 @@ the replay names; a rerun of the verb appends again (a repeated line is
 harmless, the replay ranks it twice), and nothing is ever rewritten. The next
 append would continue a torn last line, so the replay's refusal names the line
 to remove first.
+
+Every failure of the append after the file is open (a size or quota limit, a
+full disk, an I/O error, a failed close) is a ``MissError`` named
+``misses-file-write-failed``, never a bare ``OSError``; the verb turns it into
+an exit 3 with a JSON envelope. A rerun appends again.
 """
 from __future__ import annotations
 
@@ -44,7 +51,9 @@ from typing import Any, Mapping, Sequence
 from .paths import resolve_db_path
 from .search import MAX_LIMIT, FallbackRoot, match_expression, search
 
-MISSES_NAME = "search-misses.jsonl"
+# The misses file is the database file's own name plus this suffix, so each
+# database in a shared folder has its own log.
+MISSES_SUFFIX = ".search-misses.jsonl"
 FORMAT = 1
 # The rank a default ``ledger search`` shows: a miss that ranks past it, or not
 # at all, is a candidate golden case.
@@ -86,7 +95,9 @@ class Miss:
 
 
 def misses_path(db: Path | str) -> Path:
-    return resolve_db_path(db).parent / MISSES_NAME
+    """The misses file of one database: its file name plus ``MISSES_SUFFIX``."""
+    resolved = resolve_db_path(db)
+    return resolved.with_name(resolved.name + MISSES_SUFFIX)
 
 
 def _has_control(text: str) -> bool:
@@ -234,12 +245,19 @@ def append_miss(
     except OSError as exc:
         raise MissError("misses-file-unwritable", f"cannot append to {path}: {exc}") from exc
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise MissError("misses-file-not-regular", f"{path} is not a regular file")
-        if os.write(fd, line) != len(line):
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise MissError("misses-file-not-regular", f"{path} is not a regular file")
+            written = os.write(fd, line)
+        except OSError as exc:
+            raise MissError("misses-file-write-failed", f"cannot append to {path}: {exc}") from exc
+        if written != len(line):
             raise MissError("misses-file-short-write", f"the append to {path} stopped part-way")
     finally:
-        os.close(fd)
+        try:
+            os.close(fd)
+        except OSError as exc:
+            raise MissError("misses-file-write-failed", f"cannot close {path}: {exc}") from exc
     return path, entry
 
 
@@ -271,18 +289,18 @@ def read_misses(db: Path | str) -> list[Miss]:
     try:
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise MissError("not-utf8", f"{MISSES_NAME} is not UTF-8: {exc}") from exc
+        raise MissError("not-utf8", f"{path.name} is not UTF-8: {exc}") from exc
     if text and not text.endswith("\n"):
         raise MissError(
             "unterminated-line",
-            f"{MISSES_NAME} line {text.count(chr(10)) + 1} has no line feed at its end",
+            f"{path.name} line {text.count(chr(10)) + 1} has no line feed at its end",
         )
     misses = []
     for number, line in enumerate(text.split("\n")[:-1], start=1):
         try:
             entry = parse_line(line)
         except MissError as exc:
-            raise MissError(exc.reason, f"{MISSES_NAME} line {number}: {exc.detail}") from exc
+            raise MissError(exc.reason, f"{path.name} line {number}: {exc.detail}") from exc
         misses.append(
             Miss(number, entry["recorded_at"], entry["query"], entry["expected"], entry.get("note"))
         )

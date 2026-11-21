@@ -859,7 +859,7 @@ and `truncated`; `truncated` is true when more matches exist, and each card keep
 
 **`search-miss --query Q --expected EVENT_OR_ITEM [--note T]`** Log a search
 that failed to surface something you later found another way. It appends one
-line to `search-misses.jsonl`, beside the database, and does nothing else: no
+line to the database's own misses file, beside it, and does nothing else: no
 event is written, the index is not touched, and a refusal writes nothing.
 `--expected` is `event:N` (the document built from event N, a decision, spec,
 stop point or utterance) or an item id (that item's own document, not its
@@ -877,7 +877,13 @@ these is a usage error (exit 2) that starts with its name (`query-empty`,
 (exit 1). A
 misses file that is a symlink, is not a regular file or cannot be written is
 refused (exit 3, `misses-file-unwritable`, `misses-file-not-regular` or
-`misses-file-short-write`). The file is created with mode 0600 on the first
+`misses-file-short-write`), and so is any write error once the file is open (a
+size or quota limit, a full disk, an I/O error, a failed close): exit 3,
+`misses-file-write-failed`, with the usual JSON envelope under `--json`. The
+misses file is named after the database file: `<database file name>.search-misses.jsonl`,
+beside it (`home.db.search-misses.jsonl` for `home.db`), so two databases in
+one folder keep two logs and a replay never reads another database's misses.
+The file is created with mode 0600 on the first
 call. Two seats logging at once each add a whole line; a rerun after an
 interrupted call appends again, and a repeated line is harmless. The file is
 local: `export`, `backup` and the search index never read it.
@@ -906,6 +912,7 @@ refuse) is unverifiable the same way, naming the line and the form
 (`blank-line`, `not-json`, `not-an-object`, `duplicate-key`, `unknown-key`,
 `missing-key`, `bad-version`, `bad-type`, `bad-recorded-at`, `not-utf8`,
 `unterminated-line`, `misses-file-unreadable`, `misses-file-not-regular`).
+It reads only this database's misses file.
 With no misses file it prints `no logged misses` and exits 0; a database that
 does not exist exits 1.
 
