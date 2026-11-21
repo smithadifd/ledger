@@ -45,6 +45,11 @@ BACKUP_PAGES_PER_STEP = 64
 # starts with ``.search.db.``, whatever the destination is called.
 BACKUP_TEMP_PREFIX = ".ledger-backup."
 BACKUP_TEMP_SUFFIX = ".partial"
+# tempfile.mkstemp inserts this many random characters between prefix
+# and suffix. The encoded length of prefix + dest name + those chars +
+# suffix is what the file name limit applies to.
+_MKSTEMP_RANDOM_LEN = 8
+_FILE_NAME_LIMIT_FALLBACK = 255
 
 
 @dataclass(frozen=True)
@@ -237,6 +242,45 @@ def _cannot_publish_error(dest_path: Path) -> LedgerError:
     )
 
 
+def _backup_temp_sample_name(dest_name: str) -> str:
+    return (
+        f"{BACKUP_TEMP_PREFIX}{dest_name}."
+        f"{'x' * _MKSTEMP_RANDOM_LEN}{BACKUP_TEMP_SUFFIX}"
+    )
+
+
+def _file_name_limit(folder: Path) -> int:
+    try:
+        limit = os.pathconf(folder, "PC_NAME_MAX")
+    except (AttributeError, OSError, ValueError):
+        return _FILE_NAME_LIMIT_FALLBACK
+    if not isinstance(limit, int) or limit <= 0:
+        return _FILE_NAME_LIMIT_FALLBACK
+    return limit
+
+
+def _overlong_temp_error(dest_path: Path, limit: int) -> LedgerError:
+    return LedgerError(
+        f"backup destination file name exceeds the file name limit "
+        f"({limit} bytes): {dest_path}"
+    )
+
+
+def _refuse_overlong_backup_temp(dest_path: Path) -> None:
+    """Refuse before mkdir or a source open when the temp name cannot be created.
+
+    The temp grammar is unchanged: the destination name is not truncated.
+    """
+    encoded_len = len(os.fsencode(_backup_temp_sample_name(dest_path.name)))
+    folder = dest_path.parent
+    if folder.exists():
+        limit = _file_name_limit(folder)
+    else:
+        limit = _FILE_NAME_LIMIT_FALLBACK
+    if encoded_len > limit:
+        raise _overlong_temp_error(dest_path, limit)
+
+
 def _publish_without_replacing(partial: Path, dest_path: Path) -> None:
     """Move ``partial`` to ``dest_path`` unless a file has that name by then.
 
@@ -287,6 +331,9 @@ def backup_db(
     refuse_side_file_name(dest_path, "backup")
     if not overwrite:
         _refuse_existing_target(dest_path)
+    # Before mkdir and before the source is opened: an overlong dest name
+    # would make mkstemp raise OSError and print a traceback.
+    _refuse_overlong_backup_temp(dest_path)
     # A backup of a newer schema would later be read by this same older code.
     _refuse_newer_schema_before_connect(source_path)
     dest_path.parent.mkdir(parents=True, exist_ok=True)
