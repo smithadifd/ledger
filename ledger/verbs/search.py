@@ -3,7 +3,17 @@ from __future__ import annotations
 
 from ledger.card import _one_line
 from ledger.schema import ITEM_STATUSES
-from ledger.search import DOC_TYPES, MAX_LIMIT, SearchError, parse_when, search
+from ledger.search import (
+    DOC_TYPES,
+    MAX_LIMIT,
+    Mention,
+    SearchError,
+    UnknownItem,
+    item_mentions,
+    mentions,
+    parse_when,
+    search,
+)
 from ledger.verbs import (
     EXIT_NOT_FOUND,
     EXIT_REFUSED,
@@ -17,6 +27,7 @@ from ledger.verbs import (
 DEFAULT_SEARCH_LIMIT = 10
 TITLE_CAP = 100
 TITLE_ELLIPSIS = "…"
+MENTION_TEXT_CHARS = 80
 MORE_HINT = "(raise --limit or narrow with --type/--item)"
 SINCE_HELP = (
     "YYYY-MM-DD or YYYY-MM-DDTHH:MM[:SS][Z|+HH:MM], inclusive, UTC unless it has an offset; compares "
@@ -28,9 +39,16 @@ UNTIL_HELP = "ISO date or date-time, inclusive (a bare date keeps the whole day)
 def add_arguments(parser) -> None:
     parser.add_argument(
         "query",
-        nargs="+",
+        nargs="*",
         metavar="WORD",
-        help="free text, quoted or as separate words; each word is matched, ranked by bm25",
+        help="free text, quoted or as separate words; each word is matched, ranked by bm25 "
+        "(required unless --mentions is given)",
+    )
+    parser.add_argument(
+        "--mentions",
+        metavar="ID",
+        help="instead of words: the documents on other items whose text names this item id "
+        "as a whole token, decision documents first; an id that names no item is refused",
     )
     parser.add_argument(
         "--limit",
@@ -106,7 +124,21 @@ def _more_line(truncated: bool) -> str | None:
     return f"+more {MORE_HINT}"
 
 
-def _text(cards: list[dict], *, truncated: bool) -> str:
+def _mention_line(mention: Mention) -> str:
+    """``mentioned in: <item> event=<N> <first 80 characters of the text>``,
+    escaped like every other stored text."""
+    return (
+        f"mentioned in: {_one_line(mention.item_id)} event={mention.event} "
+        f"{_one_line(mention.text[:MENTION_TEXT_CHARS])}"
+    )
+
+
+def _text(
+    cards: list[dict],
+    *,
+    truncated: bool,
+    mentioned: dict[str, list[Mention]] | None = None,
+) -> str:
     lines = []
     for card in cards:
         # Stored titles and snippets are escaped, so neither a control
@@ -119,19 +151,55 @@ def _text(cards: list[dict], *, truncated: bool) -> str:
             lines.append(f"\t{_one_line(card['snippet'])}")
         if "caveat" in card:
             lines.append(f"\t({_one_line(card['caveat'])})")
+        for mention in (mentioned or {}).get(card["id"], ()):
+            lines.append(f"\t{_mention_line(mention)}")
     more = _more_line(truncated)
     if more is not None:
         lines.append(more)
     return "\n".join(lines)
 
 
+def _run_mentions(args, ctx: Context, *, limit: int, since, until) -> Result:
+    try:
+        data = mentions(
+            ctx.db,
+            args.mentions,
+            limit=limit,
+            doc_type=args.doc_type,
+            status=args.status,
+            item=args.item,
+            initiative=args.initiative,
+            since=since,
+            until=until,
+            fallback_root=ctx.search_fallback_root,
+        )
+    except UnknownItem as exc:
+        raise UsageError(f"--mentions: {exc}") from exc
+    except SearchError as exc:
+        raise CliError(str(exc), code="search", exit_code=EXIT_REFUSED) from exc
+    if not data["cards"]:
+        raise CliError(
+            f"no documents on other items name {_one_line(args.mentions)}",
+            code="empty",
+            exit_code=EXIT_NOT_FOUND,
+        )
+    return Result(data=data, text=_text(data["cards"], truncated=data["truncated"]))
+
+
 def run(args, ctx: Context) -> Result:
     limit = _limit(args.limit)
-    query = args.query if isinstance(args.query, str) else " ".join(args.query)
+    words = args.query or []
+    query = words if isinstance(words, str) else " ".join(words)
     since = when_option(args.since, "--since", end_of_day=False)
     until = when_option(args.until, "--until", end_of_day=True)
     if since is not None and until is not None and since > until:
         raise UsageError("--since is after --until")
+    if args.mentions is not None:
+        if query:
+            raise UsageError("--mentions takes an item id and no search words")
+        return _run_mentions(args, ctx, limit=limit, since=since, until=until)
+    if not query:
+        raise UsageError("give search words, or --mentions ID")
     try:
         data = search(
             ctx.db,
@@ -149,7 +217,20 @@ def run(args, ctx: Context) -> Result:
         raise CliError(str(exc), code="search", exit_code=EXIT_REFUSED) from exc
     if not data["cards"]:
         raise CliError("no matching documents", code="empty", exit_code=EXIT_NOT_FOUND)
-    return Result(data=data, text=_text(data["cards"], truncated=data["truncated"]))
+    mentioned: dict[str, list[Mention]] = {}
+    if not ctx.json_mode:
+        # Text mode only: JSON is the search result, byte for byte.
+        item_ids = [card["id"] for card in data["cards"] if card["doc_type"] == "item"]
+        try:
+            mentioned = item_mentions(
+                ctx.db, item_ids, fallback_root=ctx.search_fallback_root
+            )
+        except SearchError as exc:
+            raise CliError(str(exc), code="search", exit_code=EXIT_REFUSED) from exc
+    return Result(
+        data=data,
+        text=_text(data["cards"], truncated=data["truncated"], mentioned=mentioned),
+    )
 
 
 VERB = Verb(
