@@ -42,6 +42,7 @@ Event kinds (`ledger/schema.py`):
 | `review.recorded` | a review round and its verdict | durable |
 | `review.receipt` | one review round of one pull request, on the one item whose `pr` link names it, with the sha256 of its `review-receipt` document (reserved: written only by the receipt writer, `ledger/receipts.py`) | durable |
 | `review.grant-cite` | that the past-cap review-round grant stood, on its deciding election, when a round past the cap ran; it grants nothing by itself (reserved: written only by the receipt writer) | durable |
+| `review.merge-intent`, `review.merge-done` | merge write-ahead on a `pr`-linked item, without requiring `loop.managed`; absent → started → finished per merge key, with retries returning the existing record (reserved: written only by the receipt writer) | durable |
 | `guidance.set` | a dated burn-or-protect note about a resource pool | durable |
 | `session.opened`, `session.closed` | session bookkeeping | ephemeral |
 | `loop.managed`, `loop.intent`, `loop.done`, `loop.closed` | a work loop's own records (reserved) | durable |

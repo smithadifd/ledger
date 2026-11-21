@@ -116,6 +116,8 @@ def test_every_v1_kind_is_registered() -> None:
         # the receipt writer alone writes them (test_receipt_*.py cover them).
         "review.receipt",
         "review.grant-cite",
+        "review.merge-intent",
+        "review.merge-done",
     }
 
 
