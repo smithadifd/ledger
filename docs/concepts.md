@@ -299,6 +299,15 @@ The common case is a python-build-standalone build, which uv-managed Python and 
 use: it links SQLite statically. Use a Python whose sqlite3 module links a shared libsqlite3, such as a distro
 build.
 
+The connection capture is installed by the first ledger open in the main
+interpreter and stays registered until the process ends, so an open inside an
+exit handler is checked like any other; a ledger open in any other interpreter
+(a subinterpreter) is refused with `db_fd_unattributable`, before anything is
+registered with SQLite. Once the main interpreter has installed the capture, a
+process that opens SQLite from an own-GIL subinterpreter on another thread can
+crash, because SQLite then runs the main interpreter's capture without that
+interpreter's GIL: that combination is unsupported.
+
 One first-creation window remains: SQLite opens or creates those side files by
 name, so a process that can write the database's folder can put a hard link
 there between the check and SQLite's open. The ledger then refuses before

@@ -1890,14 +1890,13 @@ def _run_child(program: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_exit_handler_registered_before_the_first_open_is_refused(
+def test_exit_handler_registered_before_the_first_open_opens_the_ledger(
     tmp_path: Path,
 ) -> None:
-    # Accepted limit. The capture hook is cancelled through atexit when it is
-    # installed, so SQLite never calls it after teardown frees it. Exit handlers
-    # run last-registered first: one registered after the first open runs while
-    # the hook is live and opens the ledger; one registered before it runs after
-    # the cancel, captures no connection, and is refused.
+    # The capture hook is never cancelled, so every exit handler runs while it
+    # is registered, whichever order the handlers were registered in: the one
+    # registered before the process's first ledger open (which runs last) and
+    # the one registered after it both open the ledger.
     db = tmp_path / "ledger.db"
     program = (
         "import atexit, sys\n"
@@ -1919,22 +1918,17 @@ def test_exit_handler_registered_before_the_first_open_is_refused(
     )
     result = _run_child(program, str(db))
     assert result.returncode == 0, result.stderr
-    lines = result.stdout.splitlines()
-    assert lines[:2] == ["first open accepted", "late exit open accepted"], result.stdout
-    assert len(lines) == 3, result.stdout
-    assert lines[2].startswith(
-        "early exit open refused: db_fd_unknown: connect opened 0 connections, expected 1: "
-    ), result.stdout
+    assert result.stdout.splitlines() == [
+        "first open accepted",
+        "late exit open accepted",
+        "early exit open accepted",
+    ], result.stdout + result.stderr[-2000:]
 
 
-_TEARDOWN_CONNECTS = r'''
-import os, sqlite3, sys
-from pathlib import Path
-from ledger import open_ledger
-
-open_ledger(Path(sys.argv[1])).close()
-
-
+# Defines plant_late_connects(): every loaded module gets an object that opens
+# a plain SQLite connection when teardown collects it, so connects run while
+# teardown clears the hook's module. Needs os, sqlite3 and sys imported.
+_LATE_CONNECTS = r'''
 class LateConnect:
     def __init__(self, name):
         self.name = name
@@ -1948,11 +1942,68 @@ class LateConnect:
             write(1, ("late connect accepted " + self.name + "\n").encode())
 
 
-for name, module in list(sys.modules.items()):
+def plant_late_connects():
+    for name, module in list(sys.modules.items()):
+        try:
+            setattr(module, "_late_connect", LateConnect(name))
+        except Exception:
+            pass
+'''
+
+
+def _late_connects_ok(result: subprocess.CompletedProcess[str]) -> list[str]:
+    """Assert the child survived its teardown connects; return its other lines."""
+    output = result.stdout + result.stderr
+    tail = output.splitlines()[-4:]
+    assert result.returncode == 0, f"child exited {result.returncode}: {tail}"
+    lines = result.stdout.splitlines()
+    assert any(line.startswith("late connect accepted ") for line in lines), tail
+    refused = [line for line in output.splitlines() if "automatic extension" in line]
+    assert refused == [], refused[:4]
+    return [line for line in lines if not line.startswith("late connect ")]
+
+
+_FIRST_OPEN_AT_EXIT = r'''
+import atexit, os, sqlite3, sys
+from pathlib import Path
+from ledger import open_ledger
+''' + _LATE_CONNECTS + r'''
+
+def at_exit():
     try:
-        setattr(module, "_late_connect", LateConnect(name))
-    except Exception:
-        pass
+        open_ledger(Path(sys.argv[1])).close()
+    except BaseException as exc:
+        print("exit open refused: " + str(exc), flush=True)
+    else:
+        print("exit open accepted", flush=True)
+
+
+atexit.register(at_exit)
+plant_late_connects()
+print("main done", flush=True)
+'''
+
+
+def test_first_ledger_open_inside_an_exit_handler_survives_teardown(
+    tmp_path: Path,
+) -> None:
+    # The process's only ledger open is inside an exit handler, so the hook is
+    # installed while exit handlers run, and teardown connects follow it. The
+    # callback's leaked reference keeps it alive through teardown: the handler's
+    # open is accepted and the process does not crash (SIGSEGV).
+    result = _run_child(_FIRST_OPEN_AT_EXIT, str(tmp_path / "ledger.db"))
+    assert _late_connects_ok(result) == ["main done", "exit open accepted"], result.stdout
+
+
+_TEARDOWN_CONNECTS = r'''
+import os, sqlite3, sys
+from pathlib import Path
+from ledger import open_ledger
+
+open_ledger(Path(sys.argv[1])).close()
+''' + _LATE_CONNECTS + r'''
+
+plant_late_connects()
 print("main done", flush=True)
 '''
 
@@ -1962,45 +2013,116 @@ def test_connects_during_interpreter_teardown_never_reach_a_freed_hook(
 ) -> None:
     # After a checked open, every loaded module holds an object that connects
     # to SQLite when teardown collects it, so connects run while teardown
-    # clears the hook's module and frees its callback. The hook is cancelled at
-    # exit, before teardown, so SQLite never calls it then: no connect is
-    # refused by a failing hook and the process does not crash (SIGSEGV).
+    # clears the hook's module. The hook stays registered, and its callback is
+    # kept alive by a reference teardown never releases, so every such connect
+    # reaches a live callback: none is refused by a failing hook and the
+    # process does not crash (SIGSEGV).
     result = _run_child(_TEARDOWN_CONNECTS, str(tmp_path / "ledger.db"))
+    assert _late_connects_ok(result) == ["main done"], result.stdout
+
+
+_ENTRY_AFTER_GLOBALS_CLEARED = r'''
+import sqlite3, sys, threading
+from pathlib import Path
+import ledger._sqlite_handle as handle_module
+from ledger import open_ledger
+
+open_ledger(Path(sys.argv[1])).close()
+local = handle_module._local
+namespace = vars(handle_module)
+# What interpreter teardown does to a module: every name but __builtins__ is None.
+for name in list(namespace):
+    if name != "__builtins__":
+        namespace[name] = None
+del handle_module, namespace
+
+
+def capture_count(label):
+    captured = []
+    local.captured = captured
+    try:
+        sqlite3.connect(":memory:").close()
+    except BaseException as exc:
+        print(label + " connect refused: " + str(exc), flush=True)
+    else:
+        print(label + " captured " + str(len(captured)), flush=True)
+    finally:
+        local.captured = None
+
+
+capture_count("main")
+worker = threading.Thread(target=capture_count, args=("thread",))
+worker.start()
+worker.join()
+'''
+
+
+def test_hook_callback_reads_no_module_global(tmp_path: Path) -> None:
+    # The teardown test above passes even with a callback that reads module
+    # globals, so this property has its own test: with every name in the hook's
+    # module set to None, a connect on the main thread and on a new thread is
+    # each captured exactly once in the armed list.
+    result = _run_child(_ENTRY_AFTER_GLOBALS_CLEARED, str(tmp_path / "ledger.db"))
     output = result.stdout + result.stderr
-    tail = output.splitlines()[-4:]
-    assert result.returncode == 0, f"child exited {result.returncode}: {tail}"
-    lines = result.stdout.splitlines()
-    assert "main done" in lines, tail
-    assert any(line.startswith("late connect accepted ") for line in lines), tail
-    refused = [line for line in output.splitlines() if "automatic extension" in line]
-    assert refused == [], refused[:4]
+    assert result.returncode == 0, output[-3000:]
+    assert result.stdout.splitlines() == ["main captured 1", "thread captured 1"], output[-3000:]
+    assert "automatic extension" not in output, output[-3000:]
+
+
+_SUBINTERPRETERS = r'''
+import sys
+if sys.version_info >= (3, 13):
+    import _interpreters as interpreters
+
+    def new_interpreter(isolated):
+        return interpreters.create("isolated" if isolated else "legacy")
+else:
+    import _xxsubinterpreters as interpreters
+
+    def new_interpreter(isolated):
+        return interpreters.create(isolated=isolated)
+
+
+def ledger_open_code(root, db):
+    return (
+        "import sys\n"
+        "sys.path.insert(0, " + repr(root) + ")\n"
+        "try:\n"
+        "    from pathlib import Path\n"
+        "    from ledger import open_ledger\n"
+        "    open_ledger(Path(" + repr(db) + ")).close()\n"
+        "except BaseException as exc:\n"
+        "    print('subinterpreter open refused: ' + type(exc).__name__ + ': ' + str(exc), flush=True)\n"
+        "else:\n"
+        "    print('subinterpreter open accepted', flush=True)\n"
+    )
+
+
+CONNECT_CODE = (
+    "import sqlite3\n"
+    "try:\n"
+    "    sqlite3.connect(':memory:').close()\n"
+    "except BaseException as exc:\n"
+    "    print('subinterpreter connect refused: ' + str(exc), flush=True)\n"
+    "else:\n"
+    "    print('subinterpreter connect accepted', flush=True)\n"
+)
+'''
+
+# The refusal a ledger open in any interpreter but the main one gets, up to the path.
+_NOT_MAIN_REFUSAL = (
+    "subinterpreter open refused: UnsafeDatabaseFile: db_fd_unattributable: "
+    "connection capture unavailable: the capture hook installs only in the main "
+    "interpreter, and this is another interpreter: "
+)
 
 
 _SUBINTERPRETER_OPEN = r'''
 import sqlite3, sys
 from pathlib import Path
-
-# A legacy (shared-GIL) subinterpreter, through the API each Python has.
-if sys.version_info >= (3, 13):
-    import _interpreters as interpreters
-    interp = interpreters.create("legacy")
-else:
-    import _xxsubinterpreters as interpreters
-    interp = interpreters.create(isolated=False)
-code = (
-    "import sys\n"
-    "sys.path.insert(0, " + repr(sys.argv[1]) + ")\n"
-    "from pathlib import Path\n"
-    "from ledger import open_ledger\n"
-    "from ledger.dbfile import UnsafeDatabaseFile\n"
-    "try:\n"
-    "    open_ledger(Path(" + repr(sys.argv[2]) + ")).close()\n"
-    "except UnsafeDatabaseFile as exc:\n"
-    "    print('subinterpreter open refused: ' + str(exc), flush=True)\n"
-    "else:\n"
-    "    print('subinterpreter open accepted', flush=True)\n"
-)
-interpreters.run_string(interp, code)
+''' + _SUBINTERPRETERS + r'''
+interp = new_interpreter(isolated=False)
+interpreters.run_string(interp, ledger_open_code(sys.argv[1], sys.argv[2]))
 interpreters.destroy(interp)
 print("subinterpreter destroyed", flush=True)
 sqlite3.connect(":memory:").close()
@@ -2011,44 +2133,281 @@ print("main open accepted", flush=True)
 '''
 
 
-def test_hook_installed_in_a_destroyed_subinterpreter_is_not_called_after(
+def test_subinterpreter_first_open_is_refused_and_registers_nothing(
     tmp_path: Path,
 ) -> None:
-    # A subinterpreter's first open installs the hook with a callback that
-    # interpreter owns. Its exit handlers run when it is destroyed and cancel
-    # the hook, so a later connect in the main interpreter does not call into
-    # the destroyed interpreter (SIGSEGV), and the main interpreter's own first
-    # open installs its own hook.
-    #
-    # The subinterpreter's own open depends on the Python version. The sqlite3
-    # module releases the GIL around the open that calls the hook, and ctypes
-    # takes it back for the callback through the PyGILState API. Python 3.11
-    # binds that API to the first thread state created on the OS thread, here
-    # the main interpreter's, so the subinterpreter's callback runs under the
-    # main thread state, reads that thread state's thread-local, finds no
-    # armed capture, and the hook's self-test refuses: the open fails closed.
-    # Python 3.12 binds the API to the active thread state, so the callback
-    # runs in the subinterpreter and the open is accepted. On every version
-    # the child exits 0 and the main interpreter's connect and open after the
-    # destroy are accepted.
+    # A legacy subinterpreter makes the process's first ledger open. Only the
+    # main interpreter installs the hook, so the subinterpreter's open is
+    # refused before anything is registered with SQLite, on every Python
+    # version: nothing it owned is left for SQLite to call after it is
+    # destroyed. The main interpreter's connect and its first open, which
+    # installs the hook, are then accepted.
     result = _run_child(_SUBINTERPRETER_OPEN, str(ROOT), str(tmp_path / "ledger.db"))
     output = result.stdout + result.stderr
     tail = output.splitlines()[-4:]
     assert result.returncode == 0, f"child exited {result.returncode}: {tail}"
     lines = result.stdout.splitlines()
     assert len(lines) == 4, output[-3000:]
-    if sys.version_info < (3, 12):
-        assert lines[0].startswith(
-            "subinterpreter open refused: db_fd_unattributable: connection capture"
-            " unavailable: capture self-test saw 0 connections, expected 1: "
-        ), output[-3000:]
-    else:
-        assert lines[0] == "subinterpreter open accepted", output[-3000:]
+    assert lines[0].startswith(_NOT_MAIN_REFUSAL), output[-3000:]
     assert lines[1:] == [
         "subinterpreter destroyed",
         "main connect accepted",
         "main open accepted",
     ], output[-3000:]
+
+
+_LIVE_SUBINTERPRETER = r'''
+import sys
+from pathlib import Path
+from ledger import open_ledger
+''' + _SUBINTERPRETERS + r'''
+db = Path(sys.argv[2])
+open_ledger(db).close()
+print("main open accepted before", flush=True)
+interp = new_interpreter(isolated=False)
+interpreters.run_string(interp, ledger_open_code(sys.argv[1], sys.argv[2]))
+interpreters.run_string(interp, CONNECT_CODE)
+open_ledger(db).close()
+print("main open accepted while alive", flush=True)
+interpreters.destroy(interp)
+open_ledger(db).close()
+print("main open accepted after destroy", flush=True)
+'''
+
+
+def test_live_subinterpreter_open_is_refused_after_the_main_install(
+    tmp_path: Path,
+) -> None:
+    # The main interpreter installs the hook first. A legacy subinterpreter's
+    # ledger open is then refused with the same reason, so it registers no
+    # second callback; its plain connect is accepted, and the main
+    # interpreter's opens are accepted while it is alive and after it is
+    # destroyed.
+    result = _run_child(_LIVE_SUBINTERPRETER, str(ROOT), str(tmp_path / "ledger.db"))
+    output = result.stdout + result.stderr
+    tail = output.splitlines()[-4:]
+    assert result.returncode == 0, f"child exited {result.returncode}: {tail}"
+    lines = result.stdout.splitlines()
+    assert len(lines) == 5, output[-3000:]
+    assert lines[0] == "main open accepted before", output[-3000:]
+    assert lines[1].startswith(_NOT_MAIN_REFUSAL), output[-3000:]
+    assert lines[2:] == [
+        "subinterpreter connect accepted",
+        "main open accepted while alive",
+        "main open accepted after destroy",
+    ], output[-3000:]
+
+
+_OWN_GIL_SUBINTERPRETER = r'''
+import os, sqlite3, sys
+from pathlib import Path
+from ledger import open_ledger
+''' + _LATE_CONNECTS + r'''
+db = Path(sys.argv[2])
+open_ledger(db).close()
+print("main open accepted before", flush=True)
+if sys.version_info < (3, 12):
+    print("no own-GIL subinterpreter on this Python", flush=True)
+else:
+''' + "\n".join("    " + line for line in _SUBINTERPRETERS.splitlines()) + r'''
+    interp = new_interpreter(isolated=True)
+    interpreters.run_string(interp, CONNECT_CODE)
+    interpreters.run_string(interp, ledger_open_code(sys.argv[1], sys.argv[2]))
+    interpreters.destroy(interp)
+open_ledger(db).close()
+print("main open accepted after", flush=True)
+plant_late_connects()
+print("main done", flush=True)
+'''
+
+
+def test_own_gil_subinterpreter_open_is_never_accepted(tmp_path: Path) -> None:
+    # The main interpreter installs the hook, then an own-GIL subinterpreter
+    # runs to completion on the main thread (no concurrency): its plain connect
+    # is accepted and its ledger open never is. On 3.12 it cannot import ctypes
+    # at all, so the open fails with ImportError; on 3.14 the install is
+    # refused like any other interpreter's. 3.13 was not measured: the open
+    # must not be accepted there either. 3.11 has no own-GIL subinterpreters,
+    # so the child runs the main interpreter's part only.
+    result = _run_child(_OWN_GIL_SUBINTERPRETER, str(ROOT), str(tmp_path / "ledger.db"))
+    lines = _late_connects_ok(result)
+    output = result.stdout + result.stderr
+    if sys.version_info < (3, 12):
+        assert lines == [
+            "main open accepted before",
+            "no own-GIL subinterpreter on this Python",
+            "main open accepted after",
+            "main done",
+        ], output[-3000:]
+        return
+    assert len(lines) == 5, output[-3000:]
+    assert lines[:2] == ["main open accepted before", "subinterpreter connect accepted"], (
+        output[-3000:]
+    )
+    assert lines[2].startswith("subinterpreter open refused: "), output[-3000:]
+    if sys.version_info < (3, 13):
+        assert lines[2].startswith("subinterpreter open refused: ImportError: "), output[-3000:]
+        assert "_ctypes" in lines[2], output[-3000:]
+    elif sys.version_info >= (3, 14):
+        assert lines[2].startswith(_NOT_MAIN_REFUSAL), output[-3000:]
+    assert lines[3:] == ["main open accepted after", "main done"], output[-3000:]
+
+
+_FIRST_OPEN_ON_A_WORKER_THREAD = r'''
+import sys, threading
+from pathlib import Path
+from ledger import open_ledger
+
+
+def work():
+    try:
+        open_ledger(Path(sys.argv[1])).close()
+    except BaseException as exc:
+        print("worker open refused: " + str(exc), flush=True)
+    else:
+        print("worker open accepted", flush=True)
+
+
+worker = threading.Thread(target=work)
+worker.start()
+worker.join()
+'''
+
+
+def test_first_open_on_a_worker_thread_of_the_main_interpreter_installs(
+    tmp_path: Path,
+) -> None:
+    # The install check is on the interpreter, never the thread: a fresh
+    # process whose first ledger open runs on a worker thread installs the hook
+    # and is accepted. The pytest process has installed it already, so this
+    # needs a fresh process.
+    result = _run_child(_FIRST_OPEN_ON_A_WORKER_THREAD, str(tmp_path / "ledger.db"))
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output[-3000:]
+    assert result.stdout.splitlines() == ["worker open accepted"], output[-3000:]
+
+
+def test_interpreter_check_that_cannot_be_made_refuses_before_registering(
+    tmp_path: Path, monkeypatch
+) -> None:
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    registered = _record_registrations(monkeypatch)
+
+    def unreadable() -> bool:
+        raise OSError("interpreter state unreadable in test")
+
+    monkeypatch.setattr(_sqlite_handle, "_in_main_interpreter", unreadable)
+    refusal = _refuse_kind(db, "E")
+    assert str(refusal).startswith(
+        "db_fd_unattributable: connection capture unavailable: cannot tell whether this is "
+        "the main interpreter, the only one that installs the capture hook: OSError: "
+        "interpreter state unreadable in test: "
+    ), refusal
+    assert registered == [], "nothing may be registered with SQLite when the check fails"
+
+
+def _record_registrations(monkeypatch) -> list[object]:
+    """Reset the hook and record every pointer the next install registers with SQLite."""
+    registered: list[object] = []
+    real_load = _sqlite_handle._load_library
+
+    class RecordingLibrary:
+        def __init__(self, lib) -> None:
+            self._lib = lib
+
+        def __getattr__(self, name: str):
+            function = getattr(self._lib, name)
+            if name != "sqlite3_auto_extension":
+                return function
+
+            def recording(pointer):
+                registered.append(pointer)
+                return function(pointer)
+
+            return recording
+
+    monkeypatch.setattr(_sqlite_handle, "_hook", None)
+    monkeypatch.setattr(_sqlite_handle, "_load_library", lambda: RecordingLibrary(real_load()))
+    return registered
+
+
+def test_interpreter_state_that_cannot_be_read_refuses(tmp_path: Path, monkeypatch) -> None:
+    # Both interpreter states read as null: the comparison cannot be made, so
+    # the install is refused, never taken as the main interpreter.
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    registered = _record_registrations(monkeypatch)
+    real_prototype = ctypes.PYFUNCTYPE
+
+    def null_state(restype, *argtypes):
+        if restype is ctypes.c_void_p and not argtypes:
+            return lambda _spec: (lambda: None)
+        return real_prototype(restype, *argtypes)
+
+    monkeypatch.setattr(_sqlite_handle.ctypes, "PYFUNCTYPE", null_state)
+    refusal = _refuse_kind(db, "E")
+    assert str(refusal).startswith(
+        "db_fd_unattributable: connection capture unavailable: cannot tell whether this is "
+        "the main interpreter, the only one that installs the capture hook: OSError: "
+        "interpreter state unavailable (current None, main None): "
+    ), refusal
+    assert registered == [], "nothing may be registered with SQLite when the check fails"
+
+
+def test_callback_that_cannot_be_kept_alive_is_never_registered(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The hook is never cancelled, so a callback without its leaked reference
+    # would be freed by teardown while SQLite still holds it: refuse instead,
+    # before registering it.
+    db = tmp_path / "ledger.db"
+    _seed(db).close()
+    registered = _record_registrations(monkeypatch)
+
+    def no_reference(_obj: object) -> None:
+        raise OSError("reference refused in test")
+
+    monkeypatch.setattr(_sqlite_handle, "_keep_alive", no_reference)
+    refusal = _refuse_kind(db, "E")
+    assert str(refusal).startswith(
+        "db_fd_unattributable: connection capture unavailable: cannot keep the capture "
+        "callback alive: OSError: reference refused in test: "
+    ), refusal
+    assert registered == [], "an unkept callback must never be registered with SQLite"
+
+
+_DAEMON_CONNECTS_AT_EXIT = r'''
+import sqlite3, sys, threading, time
+from pathlib import Path
+from ledger import open_ledger
+
+open_ledger(Path(sys.argv[1])).close()
+
+
+def churn(connect=sqlite3.connect):
+    while True:
+        connect(":memory:").close()
+
+
+for _ in range(4):
+    threading.Thread(target=churn, daemon=True).start()
+time.sleep(0.2)
+print("main done", flush=True)
+'''
+
+
+def test_daemon_threads_connecting_while_the_main_thread_exits_do_not_hang(
+    tmp_path: Path,
+) -> None:
+    # Regression check: the hook now stays registered through finalization, so
+    # daemon threads still opening connections then call it. The process exits
+    # 0 within the timeout.
+    result = _run_child(_DAEMON_CONNECTS_AT_EXIT, str(tmp_path / "ledger.db"))
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output[-3000:]
+    assert result.stdout.splitlines() == ["main done"], output[-3000:]
+    assert "Fatal Python error" not in output, output[-3000:]
 
 
 def test_anchors_hold_for_threaded_connects(tmp_path: Path) -> None:
