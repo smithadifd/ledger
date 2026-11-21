@@ -128,7 +128,10 @@ time, before anything else.
 unbounded: every row, every word of every row and every source id, with no
 cap, no clip and no cut marker; it can run past WORD_LIMIT.
 
-Truncation caps Links, then drops Notes, then shortens ask fields (ask texts,
+Truncation caps Links, then drops Notes (ordinary notes first, then decided:
+notes oldest first; a cut decided: note is counted and marked under Decisions,
+not Notes, and the Truncated line names decisions for it), then shortens ask
+fields (ask texts,
 then option descriptions, then the other fields; each down to
 ASK_MIN_WORDS words, marked "… (+K words cut; full text in event <id>; ledger
 export-item <item> --json)"),
@@ -180,6 +183,15 @@ def _decided_note_rows(notes: tuple[dict[str, Any], ...]) -> list[dict[str, Any]
         for row in notes
         if _is_decided_note(row)
     ]
+
+
+def _cut_section(section: str, row: Mapping[str, Any]) -> str:
+    """The section a cut ``row`` is reported against. A decided: note is
+    listed under Decisions, so its cut is counted and marked there; every
+    other row is reported against the section it was cut from."""
+    if section == "notes" and _is_decided_note(row):
+        return "decisions"
+    return section
 
 
 def _election_rows(
@@ -1498,7 +1510,7 @@ def bound_card(card: Card) -> Card:
                 items.remove(row)
             else:
                 row = items.pop(0)
-            cut_rows(section, [row])
+            cut_rows(_cut_section(section, row), [row])
             current = apply(**{section: tuple(items)})
 
     for field in ("owner", "claim", "title"):
@@ -1547,7 +1559,7 @@ def bound_card(card: Card) -> Card:
             while remaining and _card_word_count(current, card) > WORD_LIMIT:
                 row = min(remaining, key=lambda row: int(row["event_id"]))
                 remaining.remove(row)
-                cut_rows("notes", [row])
+                cut_rows(_cut_section("notes", row), [row])
                 current = apply(notes=tuple(remaining))
             continue
         cut_rows(section, items)
