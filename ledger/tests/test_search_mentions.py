@@ -628,6 +628,62 @@ def test_a_decision_hit_whose_id_is_named_in_a_note_gets_no_line(tmp_path, monke
     assert not any("mentioned in:" in line for line in lines)
 
 
+def _recorded_decided_ledger(tmp_path: Path, monkeypatch) -> dict:
+    """A ruling note on one item, and two recorded decisions on another whose
+    effect and verbatim words both start with "decided:". Each recorded one
+    is short and repeats the id, so it outranks the note on score alone."""
+    monkeypatch.delenv("HARNESS_ROOT", raising=False)
+    db = tmp_path / "state" / "home.db"
+    docs: dict[str, str] = {}
+    with open_ledger(db) as lg:
+        _append(lg, "item.created", PARENT, {"type": "initiative", "title": "Parent"}, "p")
+        _append(lg, "item.created", CHILD, {"type": "ticket", "title": "Map tooltips"}, "c")
+        _append(lg, "item.created", READOUT, {"type": "initiative", "title": "Readout"}, "r")
+        docs["note"] = _doc(PARENT, _append(
+            lg, "item.note", PARENT,
+            {"text": f"decided: the work belongs to {CHILD} and nothing else, "
+                     "so no other lane picks it up"}, "note"))
+        for number in (1, 2):
+            docs[f"recorded-{number}"] = _doc(READOUT, _append(
+                lg, "decision.recorded", READOUT,
+                {"who": "writer-a", "who_kind": "person", "standing": "lean",
+                 "effect": f"decided: {CHILD} {CHILD} {number}",
+                 "verbatim": f"decided: {CHILD} {CHILD} {number}",
+                 "tags": [{"type": "initiative", "id": "INIT-ALPHA"}],
+                 "phase": "plan"}, f"recorded-{number}"))
+    _config(db)
+    return {"db": db, "docs": docs}
+
+
+def test_a_recorded_decision_that_starts_with_decided_is_not_a_note(tmp_path, monkeypatch):
+    ledger = _recorded_decided_ledger(tmp_path, monkeypatch)
+    docs = ledger["docs"]
+    # The recorded decisions outrank the note on score, so only the source
+    # event kind can put the note first.
+    plain = _ids(monkeypatch, ledger["db"], CHILD, "--type", "decision")
+    assert plain.index(docs["recorded-1"]) < plain.index(docs["note"])
+    assert plain.index(docs["recorded-2"]) < plain.index(docs["note"])
+    ids = _mention_ids(monkeypatch, ledger["db"], CHILD)
+    assert ids[0] == docs["note"], ids
+    assert set(ids[1:]) == {docs["recorded-1"], docs["recorded-2"]}
+
+
+def test_two_recorded_decisions_do_not_displace_the_note_from_the_mentioned_in_lines(
+    tmp_path, monkeypatch
+):
+    ledger = _recorded_decided_ledger(tmp_path, monkeypatch)
+    docs = ledger["docs"]
+    lines = _text_search(monkeypatch, ledger["db"], "--type", "item", "tooltips")
+    at = next(i for i, line in enumerate(lines) if line.split("	")[2:3] == [CHILD])
+    mention_lines = [line for line in lines[at + 1:at + 4] if line.startswith("	mentioned in: ")]
+    assert len(mention_lines) == 2, lines
+    note_event = int(docs["note"].split(":")[1])
+    assert mention_lines[0].startswith(f"	mentioned in: {PARENT} event={note_event} decided: ")
+    assert mention_lines[1].startswith(f"	mentioned in: {READOUT} event=")
+    found = search_mod.item_mentions(ledger["db"], [CHILD])[CHILD]
+    assert [mention.item_id for mention in found] == [PARENT, READOUT]
+
+
 def test_an_id_with_no_searchable_word_is_refused_by_name_never_empty(tmp_path, monkeypatch):
     monkeypatch.delenv("HARNESS_ROOT", raising=False)
     db = tmp_path / "state" / "home.db"

@@ -1505,18 +1505,42 @@ def _event_number(doc_id: str) -> int | None:
     return int(tail)
 
 
-def _mention_tier(row: Sequence[Any]) -> int:
+def _decided_note_docs(db: Path) -> frozenset[str]:
+    """The document ids of the ``decided:`` notes: the ``item.note`` events
+    ``decided_note_text`` accepts, as ``ledger_docs`` ids them.
+
+    The index does not say which event a decision document came from, and a
+    ``decision.recorded`` whose effect and verbatim words both start with
+    ``decided:`` looks exactly like a note, so the source event decides.
+    """
+    _last, _items, events = _read_ledger(db)
+    return frozenset(
+        f"{event.item_id}:{event.id}" for event in events if decided_note_text(event) is not None
+    )
+
+
+def _decided_loader(db: Path) -> Callable[[], frozenset[str]]:
+    """``_decided_note_docs`` of ``db``, read on first use and kept for the
+    one call that made the loader, so a search with no decision candidate
+    never reads the events."""
+    cache: list[frozenset[str]] = []
+
+    def load() -> frozenset[str]:
+        if not cache:
+            cache.append(_decided_note_docs(db))
+        return cache[0]
+
+    return load
+
+
+def _mention_tier(row: Sequence[Any], decided: frozenset[str]) -> int:
     """0 for a ``decided:`` note, 1 for any other decision document, 2 for
-    the rest. A ``decided:`` note is a decision document whose title and
-    content both start with ``DECIDED_PREFIX`` (``ledger_docs`` titles it by
-    its own first characters)."""
+    the rest. A ``decided:`` note is a decision document whose id is in
+    ``decided``, the ids of the ``item.note`` events (never a recorded
+    decision whose text happens to start the same way)."""
     if row[0] != "decision":
         return 2
-    if (row[2] or "").startswith(DECIDED_PREFIX) and (row[9] or "").lstrip().startswith(
-        DECIDED_PREFIX
-    ):
-        return 0
-    return 1
+    return 0 if row[1] in decided else 1
 
 
 def _mention_rows(
@@ -1525,6 +1549,7 @@ def _mention_rows(
     expression: str,
     filter_sql: str,
     filter_params: Sequence[Any],
+    decided: Callable[[], frozenset[str]],
 ) -> list[tuple]:
     """Every document on another item that names ``item_id``: decision
     documents first, ``decided:`` notes before the other decisions, then the
@@ -1545,8 +1570,11 @@ def _mention_rows(
     )
     rows = conn.execute(sql, [expression, item_id, *filter_params]).fetchall()
     kept = [row for row in rows if names_item(row[2], item_id) or names_item(row[9], item_id)]
+    # Only a decision candidate needs the events: the index does not say
+    # which event kind a decision document came from.
+    notes = decided() if any(row[0] == "decision" for row in kept) else frozenset()
     # A stable sort: within each group the rank order stays.
-    kept.sort(key=_mention_tier)
+    kept.sort(key=lambda row: _mention_tier(row, notes))
     return kept
 
 
@@ -1591,7 +1619,10 @@ def mentions(
         expression = match_expression(item_id)
         if not expression:
             raise SearchError(f"the item id has no searchable words: {item_id!r}")
-        rows = _mention_rows(conn, item_id, expression, filter_sql, filter_params)
+        rows = _mention_rows(
+            conn, item_id, expression, filter_sql, filter_params,
+            _decided_loader(resolve_db_path(db)),
+        )
     except sqlite3.OperationalError as exc:
         raise SearchError(f"search failed: {exc}") from exc
     finally:
@@ -1625,6 +1656,7 @@ def item_mentions(
         return {}
     index, _refreshed = _current_index(db, fallback_root, True)
     found: dict[str, list[Mention]] = {}
+    decided = _decided_loader(resolve_db_path(db))
     conn = _open_index(index)
     try:
         for item_id in ids:
@@ -1632,7 +1664,7 @@ def item_mentions(
             found[item_id] = []
             if not expression:
                 continue
-            for row in _mention_rows(conn, item_id, expression, "", ()):
+            for row in _mention_rows(conn, item_id, expression, "", (), decided):
                 event = _event_number(row[1])
                 if event is None:
                     continue
