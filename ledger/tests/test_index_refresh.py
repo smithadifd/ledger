@@ -803,6 +803,78 @@ def test_a_hard_link_to_the_ledger_database_under_a_partial_name_survives(
     assert _event_keys(db) == keys
 
 
+def test_a_hard_link_to_an_index_shaped_db_survives_rebuild_and_refresh(
+    db, monkeypatch
+):
+    # A ledger has an events table, so the schema check would keep a hard
+    # link to it even without the identity skip. After the writer has read
+    # the ledger and published, rewrite --db in place (same inode) as an
+    # index-shaped file with no side files, then plant a hard link under a
+    # partial name. Only the device-and-inode skip can keep that link: the
+    # schema check alone would accept it.
+    alias = db.parent / ".search.db.alias-shape.partial"
+    ledger_bytes = db.read_bytes()
+    planted: dict[str, bytes] = {}
+    real_replace = search_mod._replace_index
+
+    def replace_then_shape(tmp, index, ledger):
+        real_replace(tmp, index, ledger)
+        scratch = Path(ledger).parent / "index-shape-src"
+        _write_index_schema(scratch, search_mod.SCHEMA_SQL)
+        payload = scratch.read_bytes()
+        scratch.unlink()
+        for suffix in _SIDE_SUFFIXES:
+            side = scratch.with_name(scratch.name + suffix)
+            if os.path.lexists(side):
+                side.unlink()
+        target = Path(ledger)
+        target.write_bytes(payload)
+        for suffix in _SIDE_SUFFIXES:
+            side = target.with_name(target.name + suffix)
+            if os.path.lexists(side):
+                side.unlink()
+        if not alias.exists():
+            os.link(target, alias)
+        planted["bytes"] = target.read_bytes()
+        found = os.lstat(alias)
+        assert search_mod._why_not_index_temp(alias, found) is None
+        _no_side_files(alias)
+        _no_side_files(target)
+
+    monkeypatch.setattr(search_mod, "_replace_index", replace_then_shape)
+
+    leftover = _stale_index_partial(db.parent, "shap1")
+    code, body = run_json(monkeypatch, db, "index", "--rebuild")
+    assert code == EXIT_OK, body
+    assert alias.is_file(), (
+        "index --rebuild removed a hard link to an index-shaped --db"
+    )
+    assert db.is_file(), "index --rebuild removed the --db file"
+    assert os.path.samefile(alias, db)
+    assert alias.read_bytes() == planted["bytes"]
+    assert db.read_bytes() == planted["bytes"]
+    assert not leftover.exists()
+    alias.unlink()
+    db.write_bytes(ledger_bytes)
+
+    leftover = _stale_index_partial(db.parent, "shap2")
+    with open_ledger(db) as lg:
+        _append(lg, "item.note", "T-feed", {"text": "the ibis note"}, "k-shape-1")
+    ledger_bytes = db.read_bytes()
+    code, body = run_json(monkeypatch, db, "index")
+    assert code == EXIT_OK, body
+    assert alias.is_file(), (
+        "an append refresh removed a hard link to an index-shaped --db"
+    )
+    assert db.is_file(), "an append refresh removed the --db file"
+    assert os.path.samefile(alias, db)
+    assert alias.read_bytes() == planted["bytes"]
+    assert db.read_bytes() == planted["bytes"]
+    assert not leftover.exists()
+    alias.unlink()
+    db.write_bytes(ledger_bytes)
+
+
 def test_a_partial_named_after_the_ledger_database_is_kept(db, monkeypatch):
     live = db.parent / ".search.db.livedata"
     with open_ledger(live) as lg:
