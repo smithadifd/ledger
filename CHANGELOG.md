@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+`search` finds rulings on their own: a `decided:` note, a recorded decision, an item's current spec and a stop point are each a document, and a dotted word is matched as a phrase.
+
+- **`search` indexes rulings as their own documents; a dotted word is a phrase.** An `item.note` whose text, after leading whitespace, starts with exactly `decided:` (the form the agent contract tells a session to write) is now also a `decision` document of its own, titled by its first 80 characters and carrying its item's id; the note stays in its item's document too. Before, it was searchable only as one note among all of its item's notes, under the item's title, so a ruling written on a busy item ranked past the default ten cards. `Decided:`, `decided :` or a note that only contains the word elsewhere is not a decision. `decision.recorded` events (title: the effect; text: the verbatim words, who, and the tag ids) are `decision` documents too, each item's current spec (its newest `item.spec`: the title, body and acceptance) is a `spec` document, and each `item.stopped` point is a `stop` document; `--type` takes `spec` and `stop`, and `--item` keeps them with the item's other documents. An event without the text field is left out of the new document types and indexed as before. A query word holding a dot between two word characters (`harness.home`) is matched as a phrase of its parts, as a hyphenated word already is; a sentence's final dot still splits. The index format is now 4: an index built by an earlier version reads `stale` and the next `search`, `index` or `doctor` rebuilds it. No schema or migration change.
+
 ## 0.5.0 — 2026-11-19
 
 An expired claim reads `open` in `query`, `ready` and `card`, `doctor` lists stale claims, refreshes the search index and prints the actor stamps a write would carry, every ledger open refuses a search index and the index writer never replaces a file that appears at its path, a refused write says its limit and the forms it allows, `resume --hook-env` and the plugin's hooks replace an inherited `cli` harness, and the install and upgrade pages are corrected.

@@ -838,7 +838,9 @@ refused `spec_unreadable` (exit 3), printing no text.
 
 **`search WORD... [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
 Full-text search, ranked by BM25; the words may be quoted or separate.
-Types: `item`, `decision`, `utterance`, `standard`, `adr`, `doc`. Rebuilds
+Types: `item`, `decision`, `spec`, `stop`, `utterance`, `standard`, `adr`, `doc`.
+A `decided:` note is a `decision` of its own as well as part of its item, and
+a dotted word (`harness.home`) is matched as a phrase. Rebuilds
 the index first when it is missing, stale or behind new events, and refuses by name (exit 3)
 when it cannot rewrite the index, rather than answering from it.
 
