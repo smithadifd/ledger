@@ -779,7 +779,7 @@ def test_backup_partial_symlink_is_refused_before_victim_is_touched(
     with pytest.raises(UnsafeDatabaseFile, match=r"^db_symlink:"):
         backup_db(source, dest)
     assert len(planted) == 1
-    assert planted[0].name.startswith(".backup.db.")
+    assert planted[0].name.startswith(".ledger-backup.backup.db.")
     assert victim.read_bytes() == victim_before
     assert not dest.exists()
     assert not os.path.lexists(planted[0])
