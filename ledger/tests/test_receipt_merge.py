@@ -126,6 +126,38 @@ def test_payload_grammar_refuses_without_writing(db, kind, field, value, reason)
 
 
 @pytest.mark.parametrize("kind", [INTENT, DONE])
+@pytest.mark.parametrize("stamp", ["actor", "session"])
+def test_credential_shaped_stamp_is_refused_without_writing(db, kind, stamp):
+    with open_ledger(db) as lg:
+        if kind == DONE:
+            write(lg)
+        before = len(lg.events())
+        result = invoke(lg, kind, **{stamp: "ghp_" + "A" * 36})
+        assert isinstance(result, CliError), result
+        assert result.code == "receipt_credential_shape"
+        assert len(lg.events()) == before
+
+
+@pytest.mark.parametrize("kind", [INTENT, DONE])
+def test_credential_shaped_item_id_is_refused_without_writing(tmp_path, kind):
+    item = "ghp_" + "A" * 36
+    with open_ledger(tmp_path / "credentials.db") as lg:
+        new_item(lg, item)
+        link(lg, item, PR)
+        if kind == DONE:
+            # Seed an existing intent so done is otherwise eligible to write.
+            lg._append_receipt_event(
+                receipts._RECEIPT_WRITER_CAPABILITY, kind=INTENT, payload=PAYLOAD,
+                item_id=item, idempotency_key="prior-intent",
+            )
+        before = len(lg.events())
+        result = invoke(lg, kind, item=item)
+        assert isinstance(result, CliError), result
+        assert result.code == "receipt_credential_shape"
+        assert len(lg.events()) == before
+
+
+@pytest.mark.parametrize("kind", [INTENT, DONE])
 @pytest.mark.parametrize("field", ["key", "pr", "head"])
 def test_required_payload_fields(db, kind, field):
     payload = dict(PAYLOAD)
@@ -149,6 +181,17 @@ def test_link_resolution_and_multiple_pr_links(tmp_path, target):
         link(lg, ITEM, target)
         assert write(lg).state == "started"
         assert write(lg, DONE).state == "finished"
+
+
+def test_mixed_case_intent_and_lowercase_done_share_key(db):
+    with open_ledger(db) as lg:
+        intent = write(lg, payload={**PAYLOAD, "pr": "https://github.com/Example/Repo/pull/12"})
+        assert intent.state == "started"
+        done = write(lg, DONE)
+        assert done.state == "finished"
+        assert intent.event.payload["key"] == done.event.payload["key"] == KEY
+        assert lg.events(kind=INTENT) == [intent.event]
+        assert lg.events(kind=DONE) == [done.event]
 
 
 @pytest.mark.parametrize("stage", ["absent", "started", "finished"])
