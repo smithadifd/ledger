@@ -772,7 +772,14 @@ owner's picker answer, recorded with `pick --ask` (else the reason is the
 gate's, or `not_first_answer`). The table prints one row per grant, sorted by grant id,
 under a line naming the ledger revision; `--json` prints the same rows.
 `--check` exits 0 when the grant is `STANDING`, else 3 with `grant_withdrawn`,
-`grant_unverified` or `grant_unknown`. It reports; no gate reads it.
+`grant_unverified` or `grant_unknown`. A gate decides a grant through the
+library call `ledger.verbs.grants.standing(lg, grant_id)`, and a shell caller
+through `--check`; both run the same functions. `standing` returns the grant
+only when that exact id is `STANDING` (no prefix match, case folding or
+trimming) and otherwise raises the refusal `--check` exits with. It is safe
+inside the caller's write transaction and never writes. The readers it is for
+are the merge command, the review-run round check, apply-reviewed-patch and
+design dispatch; each moves to it in its own change.
 
 **`export-item ITEM [--ticket]`** One item's events, oldest first, without
 ephemeral events recorded before its latest close, then one completeness
