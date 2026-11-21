@@ -43,7 +43,8 @@ def add_arguments(parser) -> None:
     parser.add_argument(
         "--item",
         metavar="ID",
-        help="only this item's documents: the item, its decisions and utterances",
+        help="only this item's documents: the item, its decisions, spec, stop points "
+        "and utterances",
     )
     parser.add_argument(
         "--initiative",

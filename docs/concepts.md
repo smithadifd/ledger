@@ -468,11 +468,15 @@ prove who wrote the file.
 `ledger search` and `ledger index` maintain `search.db`, an SQLite FTS5
 index in the database's own directory (`ledger/search.py`). It is a derived
 projection: never exported, and never built inside a git working tree. It
-indexes current items with their notes and links, questions and elections,
-person utterances, and, under each root in `search_roots`, the markdown files
+indexes current items with their notes and links, questions, elections and
+recorded decisions, each item's current spec, stop points, person
+utterances, and, under each root in `search_roots`, the markdown files
 in `standards/` and `decisions/` plus any markdown file an item or decision
-names, chunked at `##` headings. A note is searched as part of its item, not
-as its own document: a hit on a note's words returns the item that carries it.
+names, chunked at `##` headings. A note is searched as part of its item: a
+hit on a note's words returns the item that carries it. A note whose text,
+after leading whitespace, starts with exactly `decided:` is also a
+`decision` document of its own, titled by its first 80 characters, so a
+ruling on an item with many notes is found by its own words.
 Without `search_roots` only the ledger is indexed; `ledger index` says so and
 names the `config.json` to set it in, and exits 0.
 
