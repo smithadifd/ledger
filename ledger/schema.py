@@ -207,6 +207,91 @@ DURABLE = "durable"
 EPHEMERAL = "ephemeral"
 SYSTEM_CLAIM_KIND = "ledger.system"
 
+# The review receipts. Only the receipt writer (ledger/receipts.py) writes
+# them: the store reserves both kinds, and restore takes them only with
+# --accept-loop-events. A review.receipt records one review round of one pull
+# request, on the one item whose pr link names it; a review.grant-cite records
+# that the past-cap review-round grant stood when a round past the cap ran.
+RECEIPT_KIND = "review.receipt"
+GRANT_CITE_KIND = "review.grant-cite"
+RECEIPT_KINDS = (RECEIPT_KIND, GRANT_CITE_KIND)
+RECEIPT_VERDICTS = ("approved", "changes_requested", "unparseable", "crashed")
+# The verdicts that carry served_model, family, open_bugs and findings; the
+# other two carry neither count, so a reader testing open_bugs == 0 cannot
+# read a crash as clean.
+RECEIPT_COUNTED_VERDICTS = ("approved", "changes_requested")
+RECEIPT_CELLS = ("block", "harden", "nit")
+# The document role a receipt's document is attached under.
+RECEIPT_DOC_ROLE = "review-receipt"
+# At most this many findings in one receipt.
+RECEIPT_MAX_FINDINGS = 200
+# The one grant a review.grant-cite cites. The same string as
+# ledger.verbs.grants.REVIEW_ROUND_GRANT_ID (a test holds them equal); the
+# schema cannot import the verb module.
+CITED_GRANT_ID = "grant:review-round-past-cap"
+_INT_MAX = 2**63 - 1  # SQLite integer ceiling
+_EVENT_ID = {"type": "integer", "min": 1, "max": _INT_MAX}
+# owner/repo, lowercase only: ledger link's character set casefolded. An
+# uppercase letter is refused, never folded.
+_RECEIPT_REPO = {"type": "string", "max_len": 200, "pattern": r"[a-z0-9_.-]+/[a-z0-9_.-]+"}
+_RECEIPT_COMMIT = {"type": "string", "pattern": r"[0-9a-f]{40}"}
+# One token: a lane, a family or a tier. The ledger holds no list of either.
+_RECEIPT_TOKEN = {"type": "string", "min_len": 1, "max_len": 64,
+                  "pattern": r"[a-z0-9][a-z0-9._-]*"}
+# One line of text a terminal shows as stored (display_text_problem).
+_RECEIPT_MODEL = {"type": "string", "min_len": 1, "max_len": 200, "single_line": True,
+                  "display_text": True}
+# <path>:<line>#<root>, one line.
+_FINDING_ID = {"type": "string", "min_len": 1, "max_len": 300, "single_line": True,
+               "no_control": True, "pattern": r"[^\s#]+:[1-9][0-9]*#[^\s#]+"}
+# Where an imported receipt came from: closed, both keys required.
+_IMPORTED_FROM = {
+    "type": "object",
+    "required": {
+        "store": {"type": "string", "min_len": 1, "max_len": 1024, "single_line": True,
+                  "no_nul": True},
+        "sha256": _SHA256_HEX,
+    },
+    "optional": {},
+}
+
+
+def _check_receipt(payload: Mapping[str, Any]) -> None:
+    """The rules across a ``review.receipt`` payload's fields; its fields
+    have passed their own checks.
+
+    ``prior_receipt`` is present exactly when ``round`` is 2 or more. An
+    ``approved`` or ``changes_requested`` receipt carries ``served_model``,
+    ``family``, ``open_bugs`` and ``findings``, and ``open_bugs`` is the
+    number of findings whose cell is ``block``. An ``unparseable`` or
+    ``crashed`` receipt carries neither ``open_bugs`` nor ``findings``, and
+    ``family`` exactly when ``served_model``. Finding ids are unique.
+    """
+    if payload["round"] >= 2 and "prior_receipt" not in payload:
+        _fail("receipt-prior-required")
+    if payload["round"] == 1 and "prior_receipt" in payload:
+        _fail("receipt-prior-forbidden")
+    if payload["verdict"] in RECEIPT_COUNTED_VERDICTS:
+        for key in ("served_model", "family", "open_bugs", "findings"):
+            if key not in payload:
+                _fail(f"receipt-counts-required:{key}")
+        blocks = sum(1 for finding in payload["findings"] if finding["cell"] == "block")
+        if payload["open_bugs"] != blocks:
+            _fail("receipt-open-bugs-mismatch")
+    else:
+        for key in ("open_bugs", "findings"):
+            if key in payload:
+                _fail(f"receipt-counts-forbidden:{key}")
+        if "family" in payload and "served_model" not in payload:
+            _fail("receipt-family-needs-served-model")
+        if "served_model" in payload and "family" not in payload:
+            _fail("receipt-served-model-needs-family")
+    seen: set[str] = set()
+    for index, finding in enumerate(payload.get("findings", ())):
+        if finding["id"] in seen:
+            _fail(f"receipt-finding-duplicate:findings[{index}].id")
+        seen.add(finding["id"])
+
 
 # item_id: "required" | "optional" | "absent" (refused when given)
 SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
@@ -645,6 +730,62 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
         },
         "optional": {},
     },
+    # One review round of one pull request (ledger/receipts.py). doc_sha256
+    # is the sha256 the ledger computed for the review-receipt document the
+    # writer attached in the same transaction; prior_receipt, carried_from
+    # and supersedes name receipts on the same item. "check" holds the rules
+    # across fields (_check_receipt).
+    (RECEIPT_KIND, 1): {
+        "item_id": "required",
+        "required": {
+            "repo": _RECEIPT_REPO,
+            "pr": _EVENT_ID,
+            "head": _RECEIPT_COMMIT,
+            "base": _RECEIPT_COMMIT,
+            "round": _EVENT_ID,
+            "counts_toward_cap": {"type": "boolean"},
+            "lane": _RECEIPT_TOKEN,
+            "tier": _RECEIPT_TOKEN,
+            "requested_model": _RECEIPT_MODEL,
+            "verdict": {"enum": RECEIPT_VERDICTS},
+            "changed_files_sha256": _SHA256_HEX,
+            "doc_sha256": _SHA256_HEX,
+        },
+        "optional": {
+            "prior_receipt": _EVENT_ID,
+            "family": _RECEIPT_TOKEN,
+            "served_model": _RECEIPT_MODEL,
+            "open_bugs": {"type": "integer", "min": 0, "max": RECEIPT_MAX_FINDINGS},
+            "findings": {
+                "type": "array",
+                "max_len": RECEIPT_MAX_FINDINGS,
+                "items": {
+                    "type": "object",
+                    "required": {"id": _FINDING_ID, "cell": {"enum": RECEIPT_CELLS}},
+                    "optional": {"carried_from": _EVENT_ID},
+                },
+            },
+            "supersedes": _EVENT_ID,
+            "imported_from": _IMPORTED_FROM,
+        },
+        "check": _check_receipt,
+    },
+    # That the past-cap review-round grant stood, on its deciding election,
+    # when the writer wrote this (ledger/receipts.py sets grant_id and
+    # grant_event_id itself). It grants nothing by itself.
+    (GRANT_CITE_KIND, 1): {
+        "item_id": "required",
+        "required": {
+            "grant_id": {"enum": (CITED_GRANT_ID,)},
+            "grant_event_id": _EVENT_ID,
+            "repo": _RECEIPT_REPO,
+            "pr": _EVENT_ID,
+            "round": _EVENT_ID,
+            "scope": {"type": "string", "min_len": 1, "max_len": 300, "single_line": True,
+                      "display_text": True},
+        },
+        "optional": {},
+    },
 }
 
 # One place declares how long each kind lives in item exports and cards.
@@ -679,6 +820,8 @@ DURABILITY: dict[str, str] = {
     "loop.done": DURABLE,
     "loop.closed": DURABLE,
     SYSTEM_CLAIM_KIND: DURABLE,
+    RECEIPT_KIND: DURABLE,
+    GRANT_CITE_KIND: DURABLE,
 }
 
 
@@ -1152,8 +1295,12 @@ def _check_field(value: Any, spec: Mapping[str, Any], path: str) -> None:
             _fail(_too_long(path, max_len, len(value)))
         if spec.get("single_line") and ("\n" in value or "\r" in value):
             _fail(f"not-single-line:{path}")
+        if spec.get("no_nul") and "\x00" in value:
+            _fail(f"nul-character:{path}")
         if spec.get("no_control") and control_character(value) is not None:
             _fail(f"{ASK_CONTROL_CHARACTER}:{path}")
+        if spec.get("display_text") and display_text_problem(value) is not None:
+            _fail(f"not-display-text:{path}")
         if spec.get("doc_path") and doc_path_problem(value) is not None:
             _fail(f"{DOC_PATH_REFUSAL}:{path}")
         pattern = spec.get("pattern")
@@ -1281,6 +1428,10 @@ def validate_payload(kind: str, payload: Any, payload_version: int = 1) -> dict[
         present = [key for key in group if key in payload]
         if len(present) != 1:
             _fail(f"exactly-one-of:{','.join(group)}")
+    # Rules across fields, for a kind that declares them.
+    check = schema.get("check")
+    if check is not None:
+        check(payload)
     return payload
 
 
