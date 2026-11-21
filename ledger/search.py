@@ -52,6 +52,19 @@ all in UTC. ``search`` filters on these (``status``, ``item``,
 whose ``rel`` is ``item`` and whose target is that initiative. A filter on an
 item field drops every document that has no item, such as a standard.
 
+``mentions`` reads the same index the other way: the documents on other
+items whose text names one item's id. A document mentions an id when its
+title or content holds the id as a whole token (``names_item``: the
+characters on each side are not id characters, so ``child-item`` does not
+match ``child-item-2``), compared exactly as the id is stored. Item
+documents are never mentions: one folds all of its item's notes, so it
+names no single event; a note that is a ruling is its own ``decision``
+document and is found there. Decision documents come first, a ``decided:``
+note before any other decision, then the rest; each group is in rank order. The index match only narrows the candidates; a candidate
+that fails ``names_item`` is dropped. An id that names no item raises
+``UnknownItem``, so a typo never reads as "no mentions". Neither the index
+format nor the event schema changes.
+
 The index stores a manifest: the format, the ranker, the last event id and
 its hash, the roots, and every source file with its mtime and size. ``index_status``
 recomputes it and calls the index stale on any difference, so an edited,
@@ -147,6 +160,15 @@ UTTERANCE_TITLE_CHARS = 80
 DECIDED_PREFIX = "decided:"
 DECISION_TITLE_CHARS = 80
 STOP_TITLE_CHARS = 80
+# The most mentions a normal item hit prints a line for.
+MENTION_LINES = 2
+# An id is a whole token in a text when the character before it is not a
+# word character or a hyphen (nor a dot after a word character), and the
+# one after it is not a word character or a hyphen (nor a dot before a
+# word character). ``_TERM`` joins a dot between two word characters the
+# same way.
+_ID_LEFT = r"(?<![\w-])(?<!\w\.)"
+_ID_RIGHT = r"(?![\w-])(?!\.\w)"
 _LINK_KIND_PREFIXES = ("item.", "decision.")
 _MD_PATH = re.compile(r"(?:~/|/)?(?:[\w.@+-]+/)*[\w.@+-]+\.md(?![\w-])")
 # Up to three literal spaces of indent (CommonMark); a tab or other
@@ -1286,30 +1308,9 @@ def _iso(moment: datetime) -> str:
     return moment.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def search(
-    db: Path | str,
-    query: str,
-    *,
-    limit: int,
-    doc_type: str | None = None,
-    status: str | None = None,
-    item: str | None = None,
-    initiative: str | None = None,
-    since: datetime | None = None,
-    until: datetime | None = None,
-    fallback_root: FallbackRoot | None = None,
-    refresh: bool = True,
-) -> dict[str, Any]:
-    """Refresh the index when it is not current, then rank hits.
-
-    The filters narrow the text match in the same query; ``since`` and
-    ``until`` are inclusive and must be timezone-aware. With ``refresh=False``
-    the index is never rewritten: one that is not current raises
-    ``IndexNotCurrent`` instead (the search-miss replay reads this way).
-    """
-    expression = match_expression(query)
-    if not expression:
-        raise SearchError("the query has no searchable words")
+def _check_options(
+    limit: Any, status: str | None, since: datetime | None, until: datetime | None
+) -> None:
     if type(limit) is not int or not 1 <= limit <= MAX_LIMIT:
         raise SearchError(f"limit must be an integer from 1 to {MAX_LIMIT}")
     if status is not None and status not in ITEM_STATUSES:
@@ -1319,6 +1320,13 @@ def search(
             raise SearchError(f"{name} must be a timezone-aware datetime")
     if since is not None and until is not None and since > until:
         raise SearchError("since is after until")
+
+
+def _current_index(
+    db: Path | str, fallback_root: FallbackRoot | None, refresh: bool
+) -> tuple[Path, bool]:
+    """The index path, brought up to date when it is not current, and whether
+    it was. With ``refresh`` false a stale index raises ``IndexNotCurrent``."""
     resolved = resolve_db_path(db)
     refuse_inside_git(resolved)
     # Named apart from the status filter, which it would otherwise replace.
@@ -1336,17 +1344,34 @@ def search(
             raise SearchError(
                 f"cannot rebuild the search index {search_db_path(resolved)}: {exc}"
             ) from exc
-    index = search_db_path(resolved)
-    sql = (
+    return search_db_path(resolved), refreshed
+
+
+def _select_sql(extra_columns: str = "") -> str:
+    return (
         "SELECT fts_corpus.doc_type, fts_corpus.doc_id, fts_corpus.title, "
         f"snippet(fts_corpus, 3, '[', ']', '…', {SNIPPET_TOKENS}), "
         f"{RANK_SQL} AS rank, doc_path.path, "
-        "doc_meta.item_id, doc_meta.status, doc_meta.date "
+        f"doc_meta.item_id, doc_meta.status, doc_meta.date{extra_columns} "
         "FROM fts_corpus LEFT JOIN doc_path ON doc_path.rowid = fts_corpus.rowid "
         "LEFT JOIN doc_meta ON doc_meta.rowid = fts_corpus.rowid "
         "WHERE fts_corpus MATCH ?"
     )
-    params: list[Any] = [expression]
+
+
+def _filter_sql(
+    *,
+    doc_type: str | None,
+    status: str | None,
+    item: str | None,
+    initiative: str | None,
+    since: datetime | None,
+    until: datetime | None,
+) -> tuple[str, list[Any], dict[str, str]]:
+    """The ``AND ...`` clauses for the filters, their parameters, and the
+    ``filters`` a result reports."""
+    sql = ""
+    params: list[Any] = []
     filters: dict[str, str] = {}
     if doc_type is not None:
         sql += " AND fts_corpus.doc_type = ?"
@@ -1372,8 +1397,60 @@ def search(
         sql += " AND doc_meta.ts <= ?"
         params.append(_micros(until))
         filters["until"] = _iso(until.astimezone(UTC))
-    sql += " ORDER BY rank LIMIT ?"
-    params.append(limit + 1)
+    return sql, params, filters
+
+
+def _card(row: Sequence[Any]) -> dict[str, Any]:
+    kind, doc_id, title, snippet, rank, path, item_id, item_status, when = row[:9]
+    card: dict[str, Any] = {
+        "score": round(-rank, 4),
+        "doc_type": kind,
+        "id": doc_id,
+        "title": title,
+        "snippet": " ".join(snippet.split()),
+    }
+    if path is not None:
+        card["path"] = path
+    for key, value in (("item_id", item_id), ("status", item_status), ("date", when)):
+        if value is not None:
+            card[key] = value
+    if kind == "utterance":
+        card["caveat"] = UTTERANCE_CAVEAT
+    return card
+
+
+def search(
+    db: Path | str,
+    query: str,
+    *,
+    limit: int,
+    doc_type: str | None = None,
+    status: str | None = None,
+    item: str | None = None,
+    initiative: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    fallback_root: FallbackRoot | None = None,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    """Refresh the index when it is not current, then rank hits.
+
+    The filters narrow the text match in the same query; ``since`` and
+    ``until`` are inclusive and must be timezone-aware. With ``refresh=False``
+    the index is never rewritten: one that is not current raises
+    ``IndexNotCurrent`` instead (the search-miss replay reads this way).
+    """
+    expression = match_expression(query)
+    if not expression:
+        raise SearchError("the query has no searchable words")
+    _check_options(limit, status, since, until)
+    index, refreshed = _current_index(db, fallback_root, refresh)
+    filter_sql, filter_params, filters = _filter_sql(
+        doc_type=doc_type, status=status, item=item, initiative=initiative,
+        since=since, until=until,
+    )
+    sql = _select_sql() + filter_sql + " ORDER BY rank LIMIT ?"
+    params: list[Any] = [expression, *filter_params, limit + 1]
     conn = _open_index(index)
     try:
         rows = conn.execute(sql, params).fetchall()
@@ -1381,25 +1458,8 @@ def search(
         raise SearchError(f"search failed: {exc}") from exc
     finally:
         conn.close()
-    cards = []
-    for kind, doc_id, title, snippet, rank, path, item_id, item_status, when in rows[:limit]:
-        card: dict[str, Any] = {
-            "score": round(-rank, 4),
-            "doc_type": kind,
-            "id": doc_id,
-            "title": title,
-            "snippet": " ".join(snippet.split()),
-        }
-        if path is not None:
-            card["path"] = path
-        for key, value in (("item_id", item_id), ("status", item_status), ("date", when)):
-            if value is not None:
-                card[key] = value
-        if kind == "utterance":
-            card["caveat"] = UTTERANCE_CAVEAT
-        cards.append(card)
     return {
-        "cards": cards,
+        "cards": [_card(row) for row in rows[:limit]],
         "filters": filters,
         "limit": limit,
         "query": query,
@@ -1407,3 +1467,212 @@ def search(
         "refreshed": refreshed,
         "truncated": len(rows) > limit,
     }
+
+
+# --- mentions ---------------------------------------------------------------
+
+
+class UnknownItem(SearchError):
+    """``mentions`` was given an id that names no item in the ledger."""
+
+
+@dataclass(frozen=True)
+class Mention:
+    """One document on another item that names an item: where to read it."""
+
+    item_id: str
+    event: int
+    text: str
+    doc_type: str
+
+
+def names_item(text: str | None, item_id: str) -> bool:
+    """True when ``text`` holds ``item_id`` as a whole token, exactly as
+    stored (case and all): ``child-item`` is not in ``child-item-2``,
+    ``xchild-item`` or ``Child-Item``, and is in ``see child-item.``."""
+    if not text or not item_id:
+        return False
+    return re.search(_ID_LEFT + re.escape(item_id) + _ID_RIGHT, text) is not None
+
+
+def _event_number(doc_id: str) -> int | None:
+    """The event id a ledger document's id ends in (``<item>:<N>`` or
+    ``event:<N>``), or ``None`` for any other shape."""
+    # No colon leaves ``head`` empty, as a leading colon does.
+    head, _sep, tail = doc_id.rpartition(":")
+    if not head or not tail.isascii() or not tail.isdigit():
+        return None
+    return int(tail)
+
+
+def _decided_note_docs(db: Path) -> frozenset[str]:
+    """The document ids of the ``decided:`` notes: the ``item.note`` events
+    ``decided_note_text`` accepts, as ``ledger_docs`` ids them.
+
+    The index does not say which event a decision document came from, and a
+    ``decision.recorded`` whose effect and verbatim words both start with
+    ``decided:`` looks exactly like a note, so the source event decides.
+    """
+    _last, _items, events = _read_ledger(db)
+    return frozenset(
+        f"{event.item_id}:{event.id}" for event in events if decided_note_text(event) is not None
+    )
+
+
+def _decided_loader(db: Path) -> Callable[[], frozenset[str]]:
+    """``_decided_note_docs`` of ``db``, read on first use and kept for the
+    one call that made the loader, so a search with no decision candidate
+    never reads the events."""
+    cache: list[frozenset[str]] = []
+
+    def load() -> frozenset[str]:
+        if not cache:
+            cache.append(_decided_note_docs(db))
+        return cache[0]
+
+    return load
+
+
+def _mention_tier(row: Sequence[Any], decided: frozenset[str]) -> int:
+    """0 for a ``decided:`` note, 1 for any other decision document, 2 for
+    the rest. A ``decided:`` note is a decision document whose id is in
+    ``decided``, the ids of the ``item.note`` events (never a recorded
+    decision whose text happens to start the same way)."""
+    if row[0] != "decision":
+        return 2
+    return 0 if row[1] in decided else 1
+
+
+def _mention_rows(
+    conn: sqlite3.Connection,
+    item_id: str,
+    expression: str,
+    filter_sql: str,
+    filter_params: Sequence[Any],
+    decided: Callable[[], frozenset[str]],
+) -> list[tuple]:
+    """Every document on another item that names ``item_id``: decision
+    documents first, ``decided:`` notes before the other decisions, then the
+    rest, each group in rank order.
+
+    The index match only narrows the candidates: one whose title and content
+    both lack the whole token is dropped. Every candidate is read before any
+    cut, so a dropped one never costs a result its place.
+    """
+    sql = (
+        _select_sql(", fts_corpus.content")
+        + " AND fts_corpus.doc_type <> 'item'"
+        # ``<>`` is unknown for a document with no item (a standard), which
+        # drops it: it is not on another item.
+        + " AND doc_meta.item_id <> ?"
+        + filter_sql
+        + " ORDER BY rank, fts_corpus.rowid"
+    )
+    rows = conn.execute(sql, [expression, item_id, *filter_params]).fetchall()
+    kept = [row for row in rows if names_item(row[2], item_id) or names_item(row[9], item_id)]
+    # Only a decision candidate needs the events: the index does not say
+    # which event kind a decision document came from.
+    notes = decided() if any(row[0] == "decision" for row in kept) else frozenset()
+    # A stable sort: within each group the rank order stays.
+    kept.sort(key=lambda row: _mention_tier(row, notes))
+    return kept
+
+
+def mentions(
+    db: Path | str,
+    item_id: str,
+    *,
+    limit: int,
+    doc_type: str | None = None,
+    status: str | None = None,
+    item: str | None = None,
+    initiative: str | None = None,
+    since: datetime | None = None,
+    until: datetime | None = None,
+    fallback_root: FallbackRoot | None = None,
+    refresh: bool = True,
+) -> dict[str, Any]:
+    """The documents on other items that name ``item_id``, as ``search``
+    returns its cards: decision documents first (``decided:`` notes before
+    the others), then the rest, each group by rank.
+
+    Takes ``search``'s filters and limit. An id that names no item raises
+    ``UnknownItem``. The result is ``search``'s shape; ``query`` is the id and
+    ``filters`` carries it as ``mentions``.
+    """
+    if type(item_id) is not str:
+        raise SearchError("the item id must be a string")
+    _check_options(limit, status, since, until)
+    index, refreshed = _current_index(db, fallback_root, refresh)
+    filter_sql, filter_params, filters = _filter_sql(
+        doc_type=doc_type, status=status, item=item, initiative=initiative,
+        since=since, until=until,
+    )
+    conn = _open_index(index)
+    try:
+        known = conn.execute(
+            "SELECT 1 FROM fts_corpus WHERE doc_type = 'item' AND doc_id = ? LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if known is None:
+            raise UnknownItem(f"no item named {item_id!r} in the ledger")
+        expression = match_expression(item_id)
+        if not expression:
+            raise SearchError(f"the item id has no searchable words: {item_id!r}")
+        rows = _mention_rows(
+            conn, item_id, expression, filter_sql, filter_params,
+            _decided_loader(resolve_db_path(db)),
+        )
+    except sqlite3.OperationalError as exc:
+        raise SearchError(f"search failed: {exc}") from exc
+    finally:
+        conn.close()
+    return {
+        "cards": [_card(row) for row in rows[:limit]],
+        "filters": {"mentions": item_id, **filters},
+        "limit": limit,
+        "query": item_id,
+        "ranker": RANKER,
+        "refreshed": refreshed,
+        "truncated": len(rows) > limit,
+    }
+
+
+def item_mentions(
+    db: Path | str,
+    item_ids: Iterable[str],
+    *,
+    per_item: int = MENTION_LINES,
+    fallback_root: FallbackRoot | None = None,
+) -> dict[str, list[Mention]]:
+    """For each item id, up to ``per_item`` of the documents that name it,
+    decision documents first, as ``Mention`` records a text line can print.
+
+    Reads the index once. A mention whose document id carries no event number
+    is left out, never printed without one.
+    """
+    ids = list(dict.fromkeys(item_ids))
+    if not ids:
+        return {}
+    index, _refreshed = _current_index(db, fallback_root, True)
+    found: dict[str, list[Mention]] = {}
+    decided = _decided_loader(resolve_db_path(db))
+    conn = _open_index(index)
+    try:
+        for item_id in ids:
+            expression = match_expression(item_id)
+            found[item_id] = []
+            if not expression:
+                continue
+            for row in _mention_rows(conn, item_id, expression, "", (), decided):
+                event = _event_number(row[1])
+                if event is None:
+                    continue
+                found[item_id].append(Mention(row[6], event, row[2], row[0]))
+                if len(found[item_id]) >= per_item:
+                    break
+    except sqlite3.OperationalError as exc:
+        raise SearchError(f"search failed: {exc}") from exc
+    finally:
+        conn.close()
+    return found

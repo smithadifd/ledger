@@ -855,6 +855,30 @@ and `truncated`; `truncated` is true when more matches exist, and each card keep
 `title` plus `score`, `doc_type`, `id`, `snippet`, and when present `path`, `item_id`, `status`,
 `date` and `caveat`.
 
+Under each `item` hit, text output prints up to two lines `mentioned in: ITEM event=N TEXT`: the
+documents on other items that name that item's id (see `--mentions` below), `decided:` notes
+first, with TEXT the first 80 characters of the document's title (for a `decided:` note, the
+note's own first 80 characters). A hit with no mention gets no line. Only text output changes:
+the order of the hits and `--json` are the same as without the lines.
+
+**`search --mentions ID [--limit N] [--type T] [--status S] [--item ID] [--initiative ID] [--since DATE] [--until DATE]`**
+Instead of words, list the documents on other items whose text names ID, so a ruling about an
+item that sits on its parent, a readout or an initiative is found from the item's own id. A
+document names ID when its title or content holds ID as a whole token, compared exactly as the
+id is stored: the characters on each side are not word characters or hyphens, and a dot joins
+a token only between two word characters, so `child-item` is in `see child-item.` and in
+`(child-item)` but not in `child-item-2`, `xchild-item`, `child_item` or `Child-Item`. The
+documents are `decision`, `spec`, `stop` and `utterance` documents that belong to an item
+other than ID; an item never mentions itself, and an `item` document (which folds all of its
+item's notes and names no single event) and a markdown document are not mentions. Decision
+documents come first, a `decided:` note before any other decision, then the rest; each group is
+in rank order. `--limit`, `--type` and the other filters work as they do for a word search, and
+text and `--json` output have the normal shapes (`query` is the id, and `filters` carries it as
+`mentions`). An ID that names no item in the ledger is a usage error that names it (exit 2),
+so a typo never reads as no mentions; an item no other item mentions exits 1 with `no documents
+on other items name ID`. Words and `--mentions` together are a usage error. It refreshes the
+index first, as `search` does, and writes no event.
+
 **`index [--rebuild]`** Build `search.db` beside the database.
 
 **`search-miss --query Q --expected EVENT_OR_ITEM [--note T]`** Log a search

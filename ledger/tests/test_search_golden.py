@@ -50,6 +50,9 @@ class Case:
     expected: str
     max_rank: int
     doc_type: str | None = None
+    # An item id: the case runs ``search --mentions ID`` (its query is empty)
+    # instead of a text search.
+    mentions: str | None = None
 
 
 GOLDEN_CASES = (
@@ -62,6 +65,9 @@ GOLDEN_CASES = (
     Case("dotted-token", "release.notes", "dotted-ruling", 3),
     # A hyphenated word stays one phrase.
     Case("hyphenated-token", "rate-limiter", "rate-item", 3),
+    # The ruling on the parent names the child by id; `search --mentions` on
+    # the child finds it first, with no words for it.
+    Case("ruling-found-by-mentions-of-the-child", "", "ruling", 1, mentions=CHILD),
 )
 
 
@@ -78,9 +84,13 @@ def _append(lg, kind: str, item_id: str | None, payload: dict, key: str):
                      idempotency_key=key, harness="fixture")
 
 
-def ranked_ids(monkeypatch, db: Path, query: str, doc_type: str | None) -> list[str]:
-    """Every hit's document id for the query, best first, from the CLI."""
-    argv = ["--json", "--db", str(db), "search", "--limit", str(MAX_LIMIT), query]
+def ranked_ids(
+    monkeypatch, db: Path, query: str, doc_type: str | None, mentions: str | None = None
+) -> list[str]:
+    """Every hit's document id for the query (or the mentions of an item id),
+    best first, from the CLI."""
+    argv = ["--json", "--db", str(db), "search", "--limit", str(MAX_LIMIT)]
+    argv += ["--mentions", mentions] if mentions is not None else [query]
     if doc_type is not None:
         argv += ["--type", doc_type]
     code, out, err = invoke(monkeypatch, argv)
@@ -94,14 +104,15 @@ def ranked_ids(monkeypatch, db: Path, query: str, doc_type: str | None) -> list[
 def check_case(monkeypatch, db: Path, docs: dict[str, str], case: Case) -> int:
     """The case's rank, or an AssertionError naming why it failed."""
     expected = docs[case.expected]
-    ids = ranked_ids(monkeypatch, db, case.query, case.doc_type)
+    ids = ranked_ids(monkeypatch, db, case.query, case.doc_type, case.mentions)
+    asked = case.query if case.mentions is None else f"--mentions {case.mentions}"
     assert expected in ids, (
         f"golden case {case.name!r}: {expected} is absent from the {len(ids)} results "
-        f"for {case.query!r}"
+        f"for {asked!r}"
     )
     rank = ids.index(expected) + 1
     assert rank <= case.max_rank, (
-        f"golden case {case.name!r}: {expected} ranks {rank} for {case.query!r}, "
+        f"golden case {case.name!r}: {expected} ranks {rank} for {asked!r}, "
         f"past its max rank {case.max_rank}"
     )
     return rank
@@ -186,3 +197,18 @@ def test_a_case_ranked_past_its_max_rank_fails(busy, monkeypatch):
     tight = Case("tight", "harness map", "ruling", rank - 1)
     with pytest.raises(AssertionError, match=f"ranks {rank} for 'harness map', past its max rank {rank - 1}"):
         check_case(monkeypatch, busy["db"], busy["docs"], tight)
+
+
+def test_a_normal_hit_on_the_child_prints_its_mentioned_in_line(busy, monkeypatch):
+    # The ruling sits on the parent and names the child; a plain search that
+    # hits the child shows where, in one line under the hit.
+    code, out, err = invoke(
+        monkeypatch,
+        ["--db", str(busy["db"]), "search", "--type", "item", "tooltips"],
+    )
+    assert code == EXIT_OK and "Traceback" not in err
+    event = busy["docs"]["ruling"].split(":")[1]
+    line = f"\tmentioned in: {PARENT} event={event} {RULING[:80]}"
+    lines = out.splitlines()
+    hit = next(i for i, row in enumerate(lines) if row.split("\t")[2:3] == [CHILD])
+    assert line in lines[hit + 1:hit + 4], lines
