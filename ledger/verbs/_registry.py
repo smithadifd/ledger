@@ -45,6 +45,8 @@ from ledger.verbs import ready
 from ledger.verbs import restore
 from ledger.verbs import resume
 from ledger.verbs import search
+from ledger.verbs import search_audit
+from ledger.verbs import search_miss
 from ledger.verbs import spec
 from ledger.verbs import state
 from ledger.verbs import verify
@@ -84,6 +86,8 @@ MODULES = (
     restore,
     resume,
     search,
+    search_audit,
+    search_miss,
     spec,
     state,
     verify,

@@ -333,7 +333,7 @@ touches your database.
 The database folder, `~/.local/share/ledger`, is data and not part of the
 install: the steps above leave it, and it stays until you delete it yourself.
 It holds each `<system>.db` and the files beside it (the search index, the
-`config.json` and the per-session model records). Take a `ledger export` or a
+`config.json`, the per-session model records and the `<system>.db.search-misses.jsonl` log). Take a `ledger export` or a
 `ledger backup` first if you may want the events back.
 
 ## Quick start
@@ -544,6 +544,8 @@ captured and `pick` refuses (`capture_missing`).
 | `export-item` | print one item's events (ephemeral ones decay after close) | no |
 | `search` | full-text search over items, decisions, utterances and markdown roots; text output caps titles at 100 characters and says when more matches sit past the limit | no |
 | `index` | build or rebuild the derived search index | no |
+| `search-miss` | log a search that missed (`--query`, `--expected event:N` or an item id, optional `--note`): one line appended to the database's own `<database file name>.search-misses.jsonl` beside it, no event and no index change | no |
+| `search-audit` | replay the logged misses against the current search index and print the rank each gets now; read-only, and unverifiable (exit 3) unless the index is current | no |
 | `lint-quotes` | check every election's quotes against its utterance | no |
 | `verify` | verify the hash chain and every payload, then replay the `child-of` forest and fail with exit 4 on the first break; `--system` checks the claim | no |
 | `doctor` | refresh the search index, then print the database path, schema version, search-index state, expired claims and stale claims (no lease stamp, older than 7 days) with a release command it never runs | no |
