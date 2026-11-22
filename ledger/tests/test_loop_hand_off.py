@@ -590,6 +590,23 @@ def test_r14_a_second_open_hand_off_is_refused(db: str) -> None:
         assert open_hand_off(ledger, ITEM) == second.event
 
 
+def test_r14_a_done_for_another_operation_under_the_same_id_leaves_it_open(db: str) -> None:
+    # The reader rule matches a loop.done by operation and operation id: a
+    # review that reuses the build's operation id and finishes does not
+    # finish the build's hand-off, so a second hand-off is still refused.
+    with open_ledger(db, create=False) as ledger:
+        first = hand_off(ledger, "build-1").event
+        claim_operation(ledger, ITEM, "review", "build-1", holder=HOLDER)
+        done = finish_operation(ledger, ITEM, "review", "build-1", holder=HOLDER, verdict="pass")
+        assert (done.kind, done.payload["operation"], done.payload["operation_id"]) == (
+            "loop.done",
+            "review",
+            "build-1",
+        )
+        assert open_hand_off(ledger, ITEM) == first
+    assert_refused(db, ValidationError, "loop-hand-off-open:build-1", operation_id="build-2")
+
+
 @pytest.mark.parametrize(
     "retry",
     [
