@@ -857,6 +857,42 @@ class Ledger:
             **kwargs,
         )
 
+    def _append_loop_pr_link(
+        self,
+        capability: object,
+        *,
+        ignore_retry_attribution: bool = False,
+        **kwargs: Any,
+    ) -> Event:
+        """Append the pull request link of a loop-managed item, only for the
+        loop writer (``ledger.loop.link_pull_request``).
+
+        The one way past ``reserved-transition:loop-pr``. It takes only
+        ``item.linked`` with rel ``pr`` (anything else is
+        ``loop-pr-link-required``) and goes down the public append path with
+        every check a public append makes, apart from that one refusal. The
+        loop-close refusal is untouched, and ``_append_loop_event`` still
+        refuses the kind. The writer's precondition checks the item, the
+        holder's live claim and the existing links in the write's transaction.
+        """
+        from .loop import _LOOP_WRITER_CAPABILITY
+
+        if capability is not _LOOP_WRITER_CAPABILITY:
+            raise ValidationError("loop-writer-capability-required")
+        payload = kwargs.get("payload")
+        if (
+            kwargs.get("kind") != "item.linked"
+            or not isinstance(payload, Mapping)
+            or payload.get("rel") != "pr"
+        ):
+            raise ValidationError("loop-pr-link-required")
+        return self._append(
+            internal=False,
+            loop_pr_link=True,
+            ignore_retry_attribution=ignore_retry_attribution,
+            **kwargs,
+        )
+
     def _append_spec_event(self, capability: object, **kwargs: Any) -> Event:
         """Append an ``item.spec`` event only for the spec writer (``set_spec``)."""
         from .verbs.spec import _SPEC_WRITER_CAPABILITY
@@ -994,6 +1030,7 @@ class Ledger:
         ignore_retry_attribution: bool,
         internal: bool,
         capture: bool = False,
+        loop_pr_link: bool = False,
     ) -> Event:
         if type(kind) is not str or not kind:
             raise ValidationError("unknown-kind:")
@@ -1073,7 +1110,13 @@ class Ledger:
                         ).fetchone()
                         if payload_obj["status"] == "closed" or loop_closed is not None:
                             raise ValidationError("reserved-transition:loop-close")
-                    if kind == "item.linked" and payload_obj["rel"] == "pr":
+                    # Only the loop writer's own door (_append_loop_pr_link)
+                    # sets loop_pr_link; every other writer is refused here.
+                    if (
+                        kind == "item.linked"
+                        and payload_obj["rel"] == "pr"
+                        and not loop_pr_link
+                    ):
                         raise ValidationError("reserved-transition:loop-pr")
             # The standing guard lives here, on the one write path every
             # writer takes, not in a CLI verb.
