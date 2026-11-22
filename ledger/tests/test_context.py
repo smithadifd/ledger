@@ -180,7 +180,7 @@ def test_context_is_a_discovered_read_verb(graph, monkeypatch) -> None:
     assert context_verb.VERB.writes is False
     code, out, err = ctx(monkeypatch, db, TARGET, env={"LEDGER_HARNESS": None})
     assert code == 0, err
-    assert out.startswith(f"# context {TARGET}: Context target\n")
+    assert out.startswith(f"# context {TARGET}: Context target spec\n")
 
 
 def test_budget_200_fits_spec_and_decisions_and_collapses_depth_two(graph, monkeypatch) -> None:
@@ -277,7 +277,7 @@ def test_header_names_the_revision_and_says_it_is_not_authority(graph, monkeypat
     out = pack_text(monkeypatch, db, TARGET)
     head = out.split("\n\n")[0].splitlines()
     assert head == [
-        f"# context {TARGET}: Context target",
+        f"# context {TARGET}: Context target spec",
         "type: ticket · status: open",
         f"revision: {ids['revision']} {ids['hash']}",
         "budget: 600 words",

@@ -25,7 +25,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from ledger.card import projected_title, spec_by_item
 from ledger.verbs import (
+
     EXIT_NOT_FOUND,
     CliError,
     Context,
@@ -79,7 +81,11 @@ def run(args, ctx: Context) -> Result:
         # two reads still resolves, so a row is never marked unresolved for an
         # item that existed when its link was read.
         linked = lg.events(kind="item.linked")
-        titles = {row["item_id"]: row["title"] for row in lg.items()}
+        specs = spec_by_item(lg.events(kind="item.spec"))
+        titles = {
+            row["item_id"]: projected_title(row["title"], specs.get(row["item_id"]))
+            for row in lg.items()
+        }
     finally:
         lg.close()
     outgoing: list[dict[str, Any]] = []

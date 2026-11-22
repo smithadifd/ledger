@@ -73,7 +73,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from ledger.card import _one_line, word_count
+from ledger.card import _one_line, projected_title, spec_by_item, word_count
 from ledger.schema import SPEC_KIND, TAG_TYPES
 from ledger.store import Event, Ledger
 from ledger.verbs import (
@@ -337,11 +337,18 @@ def project(lg: Ledger, item_id: str) -> Pack:
     events = lg.events()
     tail = events[-1]
     revision = tail.id
-    known = {row["item_id"]: row for row in lg.items()}
+    specs = spec_by_item(events)
+    known = {
+        row["item_id"]: {
+            **dict(row),
+            "title": projected_title(row["title"], specs.get(row["item_id"])),
+        }
+        for row in lg.items()
+    }
     # The target as read after the events: an append between the lookup above
     # and the events read is in the revision, so the header must see it too.
     # The moving check below covers this read like every other view read.
-    item = item_dict(known[item_id])
+    item = item_dict(known[item_id], specs)
     spec = None
     for event in events:
         if event.kind == SPEC_KIND and event.item_id == item_id:

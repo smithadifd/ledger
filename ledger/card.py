@@ -38,6 +38,10 @@ Format (stable — a later reader should parse this layout, not invent one):
 
     This card is a projection; the events are the authority (ledger export-item -- <item>)
 
+The title is the newest item.spec title when that field is a non-empty
+string, else the item.created title; it is escaped like the other inline
+fields.
+
 The spec line names the item's current spec version (its latest item.spec
 event, also named in source_event_ids). The moved line appears only while
 the item is claimed, its claim stamped spec_version N older than the
@@ -582,6 +586,36 @@ def latest_spec_event(events: Iterable[Any]) -> Any | None:
         if event.kind == SPEC_KIND:
             latest = event
     return latest
+
+
+def spec_by_item(events: Iterable[Any]) -> dict[str, Any]:
+    """Newest ``item.spec`` event per item_id, in event-id order.
+
+    The same event ``ledger spec show`` prints for that item (highest
+    spec version; versions increase with event id).
+    """
+    latest: dict[str, Any] = {}
+    for event in events:
+        if event.kind == SPEC_KIND and event.item_id is not None:
+            latest[event.item_id] = event
+    return latest
+
+
+def projected_title(created_title: Any, spec: Any | None) -> Any:
+    """The title a ticket projection prints.
+
+    Newest item.spec title when that field is a non-empty string (the
+    schema's type and min_len); otherwise the item.created title. A
+    missing or non-string spec title is never shown. The caller escapes
+    the result the same way as other inline fields.
+    """
+    if spec is not None:
+        payload = getattr(spec, "payload", None)
+        if isinstance(payload, Mapping):
+            title = payload.get("title")
+            if isinstance(title, str) and title:
+                return title
+    return created_title
 
 
 def claim_spec_version(events: list[Any], item: Mapping[str, Any]) -> int | None:
@@ -1819,6 +1853,7 @@ def _children_with_sources(
     ``item_id``: the child's latest child-of link, as v_items resolves
     parent_id. That link is None when the events read do not hold it.
     """
+    specs = spec_by_item(events)
     kids = sorted(
         (row for row in rows if row.get("parent_id") == item_id),
         key=lambda row: int(row["created_event_id"]),
@@ -1854,7 +1889,7 @@ def _children_with_sources(
             (
                 {
                     "item_id": pick["item_id"],
-                    "title": pick["title"],
+                    "title": projected_title(pick["title"], specs.get(pick["item_id"])),
                     "status": pick["status"],
                     "holder": pick["owner"] if pick["owner"] is not None else pick["claim"],
                 },
@@ -2151,7 +2186,7 @@ def _project_item(
     card = Card(
         item_id=item_id,
         type=item["type"],
-        title=item["title"],
+        title=projected_title(item["title"], spec),
         status=item["status"],
         owner=owner,
         claim=claim,

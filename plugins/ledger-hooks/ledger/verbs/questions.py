@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+from ledger.card import projected_title, spec_by_item
 from ledger.search import MAX_LIMIT, in_window
 from ledger.verbs import (
     DEFAULT_LIMIT,
@@ -107,6 +108,7 @@ def run(args, ctx: Context) -> Result:
     lg = open_db(ctx, write=False)
     try:
         matched = []
+        specs = spec_by_item(lg.events(kind="item.spec"))
         for row in lg._conn.execute(
             """
             SELECT
@@ -130,7 +132,9 @@ def run(args, ctx: Context) -> Result:
                 continue
             if not in_window(_recorded_micros(row["recorded_at"]), since, until):
                 continue
-            matched.append(_question(row))
+            q = _question(row)
+            q["title"] = projected_title(q["title"], specs.get(q["item_id"]))
+            matched.append(q)
     finally:
         lg.close()
     if not matched:

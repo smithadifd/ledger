@@ -71,7 +71,9 @@ from typing import Any, Mapping
 from ledger import __version__, session_model
 from ledger.paths import resolve_db_path
 from ledger.store import open_ledger_readonly
+from ledger.card import projected_title, spec_by_item
 from ledger.verbs import (
+
     EXIT_NOT_FOUND,
     EXIT_REFUSED,
     VERSION_LINE,
@@ -406,6 +408,7 @@ def run(args, ctx: Context) -> Result:
             conn.execute("BEGIN")
             try:
                 rows = lg.items()
+                specs = spec_by_item(lg.events(kind="item.spec"))
                 if args.item_id:
                     stops = lg.events(item_id=args.item_id, kind="item.stopped")
                     item = require_item(lg, args.item_id)
@@ -429,7 +432,12 @@ def run(args, ctx: Context) -> Result:
                             continue
                         entries.append(
                             _entry(
-                                row,
+                                {
+                                    **row,
+                                    "title": projected_title(
+                                        row["title"], specs.get(row["item_id"])
+                                    ),
+                                },
                                 newest[row["item_id"]],
                                 _rollup(rows, row["item_id"]),
                                 prefix=prefix,

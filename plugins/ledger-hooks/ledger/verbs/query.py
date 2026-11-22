@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ledger import lease
-from ledger.card import _read_snapshot
+from ledger.card import _read_snapshot, spec_by_item
 from ledger.search import in_window, newest_event_times
 from ledger.verbs import (
     DEFAULT_LIMIT,
@@ -107,10 +107,11 @@ def run(args, ctx: Context) -> Result:
         with _read_snapshot(lg):
             rows = lg.items_with_revision()
             leases = lease_rows(lg)
+            specs = spec_by_item(lg.events(kind="item.spec"))
         for row in rows:
             # The status a reader acts on: an expired claim reads open.
             held = leases.get(row["item_id"])
-            item = read_item(item_dict(row), held, at=moment)
+            item = read_item(item_dict(row, specs), held, at=moment)
             age = lease.stale_age(held, at=moment) if item["recorded_status"] == "claimed" else None
             item["stale_claim"] = age is not None
             item["claim_age_seconds"] = age
