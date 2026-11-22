@@ -607,6 +607,35 @@ def test_r14_a_done_for_another_operation_under_the_same_id_leaves_it_open(db: s
     assert_refused(db, ValidationError, "loop-hand-off-open:build-1", operation_id="build-2")
 
 
+def test_r14_a_done_on_another_item_under_the_same_id_leaves_it_open(
+    db: str, monkeypatch
+) -> None:
+    # The reader rule matches a loop.done on the hand-off's own item only: a
+    # build on another item that reuses the operation id and finishes does
+    # not finish this item's hand-off, so a second hand-off is still refused.
+    other_item = "item-2"
+    new_item(monkeypatch, db, other_item)
+    with open_ledger(db, create=False) as ledger:
+        first = hand_off(ledger, "build-1").event
+        take_item(
+            ledger,
+            other_item,
+            HOLDER,
+            idempotency_key=f"manage:{other_item}",
+            claim_key=f"take:{other_item}:1",
+        )
+        claim_operation(ledger, other_item, "build", "build-1", holder=HOLDER)
+        done = finish_operation(ledger, other_item, "build", "build-1", holder=HOLDER)
+        assert (done.kind, done.item_id, done.payload["operation"], done.payload["operation_id"]) == (
+            "loop.done",
+            other_item,
+            "build",
+            "build-1",
+        )
+        assert open_hand_off(ledger, ITEM) == first
+    assert_refused(db, ValidationError, "loop-hand-off-open:build-1", operation_id="build-2")
+
+
 @pytest.mark.parametrize(
     "retry",
     [
