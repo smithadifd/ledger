@@ -103,7 +103,8 @@ finishes, so a resumed loop reads `operation_state` and reconciles a started
 operation instead of repeating it. Once an item is loop-managed:
 
 - only `loop.closed` closes it: `ledger state --status closed` is refused;
-- only the loop links its PR: `ledger link --rel pr` is refused;
+- only the loop links its PR (`link_pull_request`, below): `ledger link --rel pr`
+  and every other generic writer are refused `reserved-transition:loop-pr`;
 - notes starting with `work:` or `loop:` are reserved for it.
 
 The guarantee is about the process boundary: no sequence of CLI write verbs
@@ -174,6 +175,40 @@ export holding one: `verify`, `verify_export` and
 `restore --accept-loop-events` stop with `unknown-version:loop.intent:2`, and
 `export --commit` refuses the record. Its `export-item` prints the event
 without checking it. Upgrade every reader before anything writes a hand-off.
+
+### The pull request link
+
+`ledger.loop.link_pull_request(ledger, item_id, holder, repo, pr)` records
+the pull request of a loop-managed item. It is the only writer of an
+`item.linked` with rel `pr` on such an item, and it writes an ordinary one:
+payload version 1, exactly `{"rel": "pr", "target": <url>}`, where the URL is
+`ledger.receipts.pr_url(repo, pr)`, the lowercase
+`https://github.com/<owner>/<repo>/pull/<N>` that `pr_item`, the receipt
+writer and the merge records look up. The key is
+`loop:<item>:pr-link:<url>`. It returns the event and whether this call
+wrote it (`created`). No CLI verb reaches it, so the guarantee above stands.
+
+- `holder` is required, a non-empty string (`loop-pr-link-needs-holder`).
+- `repo` is a lowercase `owner/repo` under the receipt's rule, at most 200
+  characters; an uppercase letter is refused, never folded (`bad-type:repo`,
+  `too-long:repo`).
+- `pr` is an integer from 1 to 2^63-1 (`bad-type:pr`, `too-large:pr`).
+
+These are checked before the write. Then, in the write's transaction: the
+item must be loop-managed (`loop-item-not-managed:<item>`); `holder` must
+hold the item's live claim (`claim_lost`, also for a closed item or a lease
+that ran out); the item must have no `pr` link at all, whatever its target,
+form or key (`loop-pr-link-already-exists:<item>`); and no other item may
+link the same pull request, compared as `pr_item` compares (the URL or the
+`owner/repo#N` form, owner and repo in any case;
+`loop-pr-linked-elsewhere:<that item>`). Every refusal writes nothing. The
+same call again returns the stored event with `created` false and writes
+nothing, whatever the actor, session or holder of the retry, so `created`
+false is not proof of holding the claim; another event already under the key
+is an `IdempotencyConflict`. The hand-off is not read: an item linked after
+its hand-off finished, or under a new holder's claim, links the same way.
+`manage_item` still refuses an item that already has a `pr` link, so a link a
+generic writer made before the loop took the item is never adopted.
 
 ## Routing keys on items
 

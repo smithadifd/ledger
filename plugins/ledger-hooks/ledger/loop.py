@@ -13,7 +13,15 @@ from dataclasses import dataclass
 from typing import Any, Mapping
 
 from . import lease
-from .schema import LOOP_HAND_OFF_VERSION, LOOP_OPERATIONS, ValidationError
+from .receipts import _pull_request, pr_url
+from .schema import (
+    _EVENT_ID,
+    _RECEIPT_REPO,
+    LOOP_HAND_OFF_VERSION,
+    LOOP_OPERATIONS,
+    ValidationError,
+    _check_field,
+)
 from .store import Event, Ledger, _event_from_row, canonical_dumps
 
 _LOOP_WRITER_CAPABILITY = object()
@@ -28,6 +36,14 @@ class OperationState:
 
 @dataclass(frozen=True)
 class OperationClaim:
+    event: Event
+    created: bool
+
+
+@dataclass(frozen=True)
+class PullRequestLink:
+    """The item's pull request link, and whether this call wrote it."""
+
     event: Event
     created: bool
 
@@ -281,6 +297,23 @@ def restamp_claim(ledger: Ledger, item_id: str, holder: str, *, idempotency_key:
         return _restamp_handed_off(ledger, item_id, holder, idempotency_key)
 
 
+def _has_pr_link(conn: sqlite3.Connection, item_id: str) -> bool:
+    """True when the item has any ``item.linked`` with rel ``pr``, whatever
+    its target, form or key.
+
+    The one read behind ``manage_item``'s refusal of an item that already
+    has a pull request link and ``link_pull_request``'s refusal of a second
+    one, so the two cannot disagree.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM events "
+        "WHERE item_id = ? AND kind = 'item.linked' "
+        "AND json_extract(payload, '$.rel') = 'pr' LIMIT 1",
+        (item_id,),
+    ).fetchone()
+    return row is not None
+
+
 def manage_item(
     ledger: Ledger,
     item_id: str,
@@ -309,13 +342,7 @@ def manage_item(
             raise ValidationError(f"missing-item:{item_id}")
         if held_by_needs_you(conn, item_id):
             raise ValidationError(f"held-needs-you-item:{item_id}")
-        pr_link = conn.execute(
-            "SELECT 1 FROM events "
-            "WHERE item_id = ? AND kind = 'item.linked' "
-            "AND json_extract(payload, '$.rel') = 'pr' LIMIT 1",
-            (item_id,),
-        ).fetchone()
-        if pr_link is not None:
+        if _has_pr_link(conn, item_id):
             raise ValidationError(f"loop-pr-link-already-exists:{item_id}")
 
     return ledger._append_loop_event(
@@ -682,6 +709,98 @@ def finish_operation(
     return event
 
 
+def link_pull_request(
+    ledger: Ledger,
+    item_id: str,
+    holder: str,
+    repo: str,
+    pr: int,
+    *,
+    actor: str | None = None,
+    harness: str | None = None,
+    model: str | None = None,
+    session: str | None = None,
+) -> PullRequestLink:
+    """Record the pull request of a loop-managed item, as the holder of its live claim.
+
+    DESIGN: on a loop-managed item an ``item.linked`` with rel ``pr`` exists
+    only when this writer wrote it, as the holder of the item's live claim,
+    naming one pull request in the one stored form, while the item had no
+    other ``pr`` link and no other item linked that pull request. The
+    generic writers stay refused (``reserved-transition:loop-pr``); this
+    writer goes through the store's one door for it
+    (``Ledger._append_loop_pr_link``).
+
+    The event is an ordinary ``item.linked``, payload version 1, exactly
+    ``{"rel": "pr", "target": pr_url(repo, pr)}``: the lowercase URL that
+    ``ledger.receipts.pr_item`` and the merge records look up. The key is
+    ``loop:<item>:pr-link:<target>``.
+
+    Grammar, checked before the transaction: ``holder`` a non-empty string
+    (else ``loop-pr-link-needs-holder``); ``repo`` under the receipt repo
+    rule, a lowercase ``owner/repo`` of at most 200 characters, refused and
+    never folded (``bad-type:repo``, ``too-long:repo``); ``pr`` under the
+    receipt number rule, an integer from 1 to 2^63-1 (``bad-type:pr``,
+    ``too-large:pr``).
+
+    An exact retry (the same item and pull request) returns the stored
+    event with ``created`` false and writes nothing; it re-reads no claim,
+    so ``created`` false is not proof of holding it. Retry stamps (actor,
+    harness, model, session) are ignored, as for the other loop writes.
+
+    Otherwise, inside the write's transaction, in this order: the item must
+    be loop-managed (``loop-item-not-managed:<item>``); ``holder`` must
+    hold its live claim (``check_holder``, live: ``claim_lost``); the item
+    must have no ``pr`` link at all (``loop-pr-link-already-exists:<item>``);
+    and no other item may link the pull request, compared as ``pr_item``
+    compares (``loop-pr-linked-elsewhere:<that item>``). A key already
+    holding another event is the store's ``IdempotencyConflict``. Every
+    refusal writes nothing. The hand-off is not read and not required.
+    """
+    if type(holder) is not str or not holder:
+        raise ValidationError("loop-pr-link-needs-holder")
+    _check_field(repo, _RECEIPT_REPO, "repo")
+    _check_field(pr, _EVENT_ID, "pr")
+    target = pr_url(repo, pr)
+    wanted = _pull_request(target)
+    created = False
+
+    def linkable(conn: sqlite3.Connection) -> None:
+        nonlocal created
+        managed = conn.execute(
+            "SELECT 1 FROM events WHERE item_id = ? AND kind = 'loop.managed' LIMIT 1",
+            (item_id,),
+        ).fetchone()
+        if managed is None:
+            raise ValidationError(f"loop-item-not-managed:{item_id}")
+        check_holder(conn, item_id, holder, "pull request link not written", live=True)
+        if _has_pr_link(conn, item_id):
+            raise ValidationError(f"loop-pr-link-already-exists:{item_id}")
+        # The reader's comparison (receipts.pr_item): the URL or the
+        # owner/repo#N form, owner and repo casefolded, the number an integer.
+        for row in conn.execute(
+            "SELECT item_id, payload FROM events "
+            "WHERE kind = 'item.linked' AND item_id != ? ORDER BY id",
+            (item_id,),
+        ):
+            payload = json.loads(row["payload"])
+            if payload.get("rel") == "pr" and _pull_request(payload.get("target")) == wanted:
+                raise ValidationError(f"loop-pr-linked-elsewhere:{row['item_id']}")
+        created = True
+
+    event = ledger._append_loop_pr_link(
+        _LOOP_WRITER_CAPABILITY,
+        ignore_retry_attribution=True,
+        kind="item.linked",
+        payload={"rel": "pr", "target": target},
+        item_id=item_id,
+        idempotency_key=f"loop:{item_id}:pr-link:{target}",
+        precondition=linkable,
+        **_metadata(actor, harness, model, session),
+    )
+    return PullRequestLink(event, created)
+
+
 def close_item(
     ledger: Ledger,
     item_id: str,
@@ -733,9 +852,11 @@ def close_item(
 
 __all__ = [
     "OperationState",
+    "PullRequestLink",
     "check_holder",
     "close_item",
     "finish_operation",
+    "link_pull_request",
     "manage_item",
     "open_hand_off",
     "operation_state",
