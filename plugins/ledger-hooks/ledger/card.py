@@ -601,6 +601,18 @@ def spec_by_item(events: Iterable[Any]) -> dict[str, Any]:
     return latest
 
 
+def _usable_spec_title(spec: Any | None) -> str | None:
+    """Newest spec title when it is a non-empty string; else None."""
+    if spec is None:
+        return None
+    payload = getattr(spec, "payload", None)
+    if isinstance(payload, Mapping):
+        title = payload.get("title")
+        if isinstance(title, str) and title:
+            return title
+    return None
+
+
 def projected_title(created_title: Any, spec: Any | None) -> Any:
     """The title a ticket projection prints.
 
@@ -609,13 +621,19 @@ def projected_title(created_title: Any, spec: Any | None) -> Any:
     missing or non-string spec title is never shown. The caller escapes
     the result the same way as other inline fields.
     """
-    if spec is not None:
-        payload = getattr(spec, "payload", None)
-        if isinstance(payload, Mapping):
-            title = payload.get("title")
-            if isinstance(title, str) and title:
-                return title
-    return created_title
+    title = _usable_spec_title(spec)
+    return created_title if title is None else title
+
+
+def title_source_event_id(created_event_id: Any, spec: Any | None) -> Any:
+    """The event that holds the title ``projected_title`` returns.
+
+    Newest item.spec when that spec supplied the title; otherwise the
+    item.created event.
+    """
+    if _usable_spec_title(spec) is not None:
+        return spec.id
+    return created_event_id
 
 
 def claim_spec_version(events: list[Any], item: Mapping[str, Any]) -> int | None:

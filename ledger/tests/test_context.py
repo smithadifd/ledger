@@ -678,6 +678,35 @@ def test_a_clipped_related_title_names_the_event_that_holds_it(tmp_path: Path, m
     assert depth2[0].endswith(f"… (full text in event {far}) · link: it-near blocks it-far")
 
 
+def test_a_clipped_related_spec_title_names_the_spec_event(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A related item's clip note cites the spec event that holds the title."""
+    spec_title = " ".join(f"spec{n}" for n in range(35))
+    db = tmp_path / "ledger.db"
+    with open_ledger(db) as lg:
+        _create(lg, "it-t", "Clip target")
+        created = _create(lg, "it-near", "short created")
+        spec, wrote = set_spec(
+            lg,
+            "it-near",
+            {"title": spec_title, "body_md": "Body.\n"},
+        )
+        assert wrote
+        near_link = _link(lg, "it-t", "item", "it-near").id
+    out = pack_text(monkeypatch, str(db), "it-t", "--budget", "2000")
+    found = blocks(out)
+    depth1 = found["## Related items (depth 1)"][1:]
+    assert len(depth1) == 1, out
+    assert depth1[0].startswith(
+        f"event={near_link} it-near (ticket, open): spec0 spec1 "
+    )
+    assert depth1[0].endswith(
+        f"… (full text in event {spec.id}) · link: it-t item it-near"
+    )
+    assert f"full text in event {created.id}" not in depth1[0]
+
+
 def test_a_superseded_decision_names_its_replacement(graph, monkeypatch) -> None:
     db, ids = graph
     first, second = ids["decisions"]

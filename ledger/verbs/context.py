@@ -34,7 +34,8 @@ Layout, in this order (every section heading always prints):
 Every content line starts ``event=<id>``, the event it was read from. A
 related item names the link event that joins it to the graph (the lowest such
 id) and that link, ``<from> <rel> <to>``; when its title is clipped, the clip
-names the item's ``item.created`` event, which holds the title. The links that
+names the event that holds the title: the newest ``item.spec`` when that spec
+supplied the title, else the item's ``item.created`` event. The links that
 make the graph are
 ``item.linked`` events whose rel names an item (``item``, ``blocks``,
 ``duplicate-of``) and whose target is an existing item other than the source.
@@ -73,7 +74,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
-from ledger.card import _one_line, projected_title, spec_by_item, word_count
+from ledger.card import (
+    _one_line,
+    projected_title,
+    spec_by_item,
+    title_source_event_id,
+    word_count,
+)
 from ledger.schema import SPEC_KIND, TAG_TYPES
 from ledger.store import Event, Ledger
 from ledger.verbs import (
@@ -320,14 +327,19 @@ def _nearest(
 
 
 def _related_line(
-    row: tuple[int, str, Event], known: Mapping[str, Mapping[str, Any]]
+    row: tuple[int, str, Event],
+    known: Mapping[str, Mapping[str, Any]],
+    specs: Mapping[str, Any],
 ) -> str:
     event_id, item_id, event = row
     item = known[item_id]
     link = f"{event.item_id} {event.payload['rel']} {event.payload['target']}"
+    title_event_id = title_source_event_id(
+        item["created_event_id"], specs.get(item_id)
+    )
     return (
         f"event={event_id} {item_id} ({item['type']}, {item['status']}): "
-        f"{_clip(item['title'], item['created_event_id'])} · link: {link}"
+        f"{_clip(item['title'], title_event_id)} · link: {link}"
     )
 
 
@@ -363,9 +375,9 @@ def project(lg: Ledger, item_id: str) -> Pack:
         _document_section(lg, item_id),
         _note_section(item_id, events),
         Section("related_1", "Related items (depth 1)",
-                tuple(_related_line(row, known) for row in depth1)),
+                tuple(_related_line(row, known, specs) for row in depth1)),
         Section("related_2", "Related items (depth 2)",
-                tuple(_related_line(row, known) for row in depth2)),
+                tuple(_related_line(row, known, specs) for row in depth2)),
     )
     if lg.events(after_id=revision, limit=1):
         raise _Moved(revision)
