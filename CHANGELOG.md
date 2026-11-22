@@ -1,8 +1,12 @@
 # Changelog
 
-## Unreleased
+## 0.6.3 — 2026-11-22
+
+`context` related-item clip notes cite the spec event that holds the printed title. No new verb, flag or hook, and no migration.
 
 - **`context` related-item clip notes name the event that holds the title.** When a related item's printed title comes from its newest `item.spec`, a clipped line now says `full text in event <spec>` instead of the created event, which does not hold that title. An item with no usable spec title still cites `item.created`. `links --json` `data.title` and `resume --item` keep printing the newest spec title; tests now pin both through `require_item`.
+
+Upgrade with `@v0.6.3`.
 
 ## 0.6.2 — 2026-11-22
 
