@@ -5,6 +5,11 @@ CARD-SPEC-TITLE1: ``card``, ``query``, ``ready``, children rows, ``links``,
 field is a non-empty string, else the ``item.created`` title. A missing or
 non-string spec title is never shown. ``card --full`` names the child's
 newest spec event in ``source_event_ids``.
+
+LEDGER-TITLE-FOLLOWUP1: ``require_item``'s spec argument is what
+``ledger links ITEM --json`` puts in top-level ``data.title`` and what
+``ledger resume --item ITEM`` puts in the entry title. Replacing that
+argument with ``{}`` must turn those two outputs back to the created title.
 """
 from __future__ import annotations
 
@@ -316,6 +321,63 @@ def test_resume_prints_the_current_spec_title(tmp_path: Path, monkeypatch) -> No
     assert first[0] == ITEM
     assert first[2] == WINNING
     code, raw, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
+    assert code == 0, err
+    [entry] = json.loads(raw)["data"]["items"]
+    assert entry["title"] == WINNING
+    with open_ledger(db, create=False) as lg:
+        assert lg.item(ITEM)["title"] == MINTER
+
+
+def test_links_json_data_title_is_the_current_spec_title(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``ledger links ITEM --json`` top-level ``data.title`` uses require_item."""
+    db = _db(tmp_path)
+    seed(monkeypatch, db, ITEM, MINTER)
+    seed(monkeypatch, db, "it-other", "other")
+    _spec(monkeypatch, db, ITEM, WINNING)
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "link", ITEM, "--rel", "item", "--target", "it-other"]
+    )
+    assert code == 0, err
+    code, raw, err = invoke(monkeypatch, ["--json", "--db", db, "links", ITEM])
+    assert code == 0, err
+    data = json.loads(raw)["data"]
+    assert data["item_id"] == ITEM
+    assert data["title"] == WINNING
+    with open_ledger(db, create=False) as lg:
+        assert lg.item(ITEM)["title"] == MINTER
+
+
+def test_resume_item_prints_the_current_spec_title(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """``ledger resume --item ITEM`` entry title uses require_item."""
+    db = _db(tmp_path)
+    seed(monkeypatch, db, ITEM, MINTER)
+    _spec(monkeypatch, db, ITEM, WINNING)
+    code, _out, err = invoke(
+        monkeypatch,
+        [
+            "--db",
+            db,
+            "append",
+            "--kind",
+            "item.stopped",
+            f"--item={ITEM}",
+            "--payload",
+            json.dumps({"point": "stop", "phase": "build"}),
+        ],
+    )
+    assert code == 0, err
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume", "--item", ITEM])
+    assert code == 0, err
+    first = out.splitlines()[0].split("\t")
+    assert first[0] == ITEM
+    assert first[2] == WINNING
+    code, raw, err = invoke(
+        monkeypatch, ["--json", "--db", db, "resume", "--item", ITEM]
+    )
     assert code == 0, err
     [entry] = json.loads(raw)["data"]["items"]
     assert entry["title"] == WINNING
