@@ -25,6 +25,13 @@ LINK_RELS = (
     "pr", "branch", "session", "item", "url", "blocks", "duplicate-of", "child-of",
 )
 LOOP_OPERATIONS = ("build", "decision", "review", "merge", "ping")
+# A hand-off is a loop.intent of payload version 2, which only
+# claim_operation with hand_off writes (ledger/loop.py): who controls a
+# build, and which implementation runs each of the loop's three seams.
+# Version 1 is unchanged.
+LOOP_HAND_OFF_VERSION = 2
+LOOP_HAND_OFF_OPERATION = "build"
+LOOP_HAND_OFF_SEAMS = ("build", "review", "outward")
 # A decision's standing is a position, never a ticket status: these values
 # share nothing with ITEM_STATUSES, and only decision events carry them.
 STANDINGS = ("lean", "settled", "superseded")
@@ -545,6 +552,31 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
         "required": {
             "operation": {"enum": LOOP_OPERATIONS},
             "operation_id": {"type": "string", "min_len": 1},
+        },
+        "optional": {
+            "target": {"type": "string", "min_len": 1},
+            "head": {"type": "string", "min_len": 1},
+            "asked_event_id": {"type": "integer", "min": 1},
+            "source": _SOURCE,
+        },
+    },
+    # A hand-off: version 1's keys plus who controls the build and the
+    # closed map of the three seams, both required, on a build operation
+    # only. Each value is one ASCII token (_ENTITY_TOKEN), compared by exact
+    # equality, so a look-alike letter, an invisible character or a
+    # normalisation never makes two names equal. There is no parent key:
+    # the item's child-of link holds the parent, and a copy could go stale.
+    ("loop.intent", LOOP_HAND_OFF_VERSION): {
+        "item_id": "required",
+        "required": {
+            "operation": {"enum": (LOOP_HAND_OFF_OPERATION,)},
+            "operation_id": {"type": "string", "min_len": 1},
+            "controller": _ENTITY_TOKEN,
+            "seams": {
+                "type": "object",
+                "required": {seam: _ENTITY_TOKEN for seam in LOOP_HAND_OFF_SEAMS},
+                "optional": {},
+            },
         },
         "optional": {
             "target": {"type": "string", "min_len": 1},

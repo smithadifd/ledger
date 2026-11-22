@@ -94,7 +94,7 @@ writer in `ledger/loop.py`:
 | Kind | Meaning |
 |------|---------|
 | `loop.managed` | the item is handed to the loop |
-| `loop.intent` | the loop is about to perform an external side effect, one of `build`, `decision`, `review`, `merge` or `ping` |
+| `loop.intent` | the loop is about to perform an external side effect, one of `build`, `decision`, `review`, `merge` or `ping`; payload version 2 is a hand-off (below) |
 | `loop.done` | that side effect finished, with its result |
 | `loop.closed` | the loop closed the item |
 
@@ -124,6 +124,56 @@ was standing (`ledger.verbs.grants.standing`) when it wrote. A
 `review-receipt` document added with `doc add` is not a receipt. `restore`
 refuses an export holding any of these kinds unless the same `--accept-loop-events`
 is passed, which also checks the export's stream digest.
+
+### Hand-offs
+
+A `loop.intent` of payload version 2 is a *hand-off*: it records who
+controls a build and which implementation runs each of the loop's seams for
+as long as the build is open. Only `claim_operation` with `hand_off=True`,
+`controller` and `seams` writes one, on a `build` operation, as the holder
+of the item's live claim, in the same transaction that leaves that claim
+without an expiry:
+
+- `controller` is one token: ASCII letters, digits, `.`, `_` and `-`,
+  starting with a letter or digit, 1 to 64 characters. It names a role, and
+  a reader compares it by exact equality.
+- `seams` is an object with exactly the keys `build`, `review` and
+  `outward`, each one token of the same shape.
+- Both are required, and nothing else is added to version 1's keys. There is
+  no `parent` key: the item's `child-of` link gives the parent. Version 1 is
+  unchanged and takes neither key; `claim_operation` without the fields
+  writes it exactly as before.
+
+Each refusal writes nothing, neither the intent nor the claim:
+`missing-key:controller` or `missing-key:seams` (one without the other),
+`hand-off-fields-need-hand-off` (either without `hand_off=True`),
+`bad-type:operation` (an operation other than `build`), `bad-type:controller`,
+`too-long:controller`, `bad-type:seams`, `missing-key:seams.<seam>`,
+`unknown-key:seams.<name>` and `bad-type:seams.<seam>` (a field off its
+grammar), `unknown-key:<key>` (any other key), `loop-item-not-managed:<item>`,
+`claim_lost` (the caller does not hold the item's live claim, or the item is
+closed) and `loop-hand-off-open:<operation id>` (another hand-off on the item
+is open). A retry under the same operation id with another controller, other
+seams or the other version is an `IdempotencyConflict`; an exact retry
+returns the stored event. The generic writers refuse the kind
+(`reserved-kind:loop.intent`) whatever its version.
+
+**Reader rule.** An item's hand-off is its one version 2 `loop.intent` with
+no `loop.done` naming the same operation and operation id. With none, the
+item is not handed off: the person controls it and the seams are the
+defaults. A version 1 intent is never a hand-off. In process,
+`ledger.loop.open_hand_off(ledger, item_id)` applies the rule: it returns
+the event or `None`, and refuses `loop-hand-off-ambiguous:<item>` when two
+are open (a restored chain can hold two; the writer cannot). The writer's
+refusal of a second hand-off reads through the same code. From the CLI, read
+the item with `export-item --json`, which prints each event's
+`payload_version`; `events --json` does not print it.
+
+A ledger from before hand-offs (0.6.3 and earlier) refuses a database or
+export holding one: `verify`, `verify_export` and
+`restore --accept-loop-events` stop with `unknown-version:loop.intent:2`, and
+`export --commit` refuses the record. Its `export-item` prints the event
+without checking it. Upgrade every reader before anything writes a hand-off.
 
 ## Routing keys on items
 
