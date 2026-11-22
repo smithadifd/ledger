@@ -1,8 +1,10 @@
 """Ticket title projections use the current spec title.
 
-CARD-SPEC-TITLE1: ``card``, ``query``, ``ready`` and children rows print the
-newest ``item.spec`` title when that field is a non-empty string, else the
-``item.created`` title. A missing or non-string spec title is never shown.
+CARD-SPEC-TITLE1: ``card``, ``query``, ``ready``, children rows, ``links``,
+``questions`` and ``resume`` print the newest ``item.spec`` title when that
+field is a non-empty string, else the ``item.created`` title. A missing or
+non-string spec title is never shown. ``card --full`` names the child's
+newest spec event in ``source_event_ids``.
 """
 from __future__ import annotations
 
@@ -209,3 +211,113 @@ def test_a_note_does_not_supply_the_title(tmp_path: Path, monkeypatch) -> None:
     code, out, err = _card(monkeypatch, db)
     assert code == 0, err
     assert _title_line(out) == f"title: {WINNING}"
+
+
+def test_full_card_names_the_child_spec_event(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-anchor", "anchor")
+    seed(monkeypatch, db, "it-kid", MINTER)
+    _spec(monkeypatch, db, "it-kid", WINNING)
+    code, _out, err = invoke(
+        monkeypatch,
+        ["--db", db, "link", "it-kid", "--rel", "child-of", "--target", "it-anchor"],
+    )
+    assert code == 0, err
+    with open_ledger(db, create=False) as lg:
+        specs = [event for event in lg.events(item_id="it-kid") if event.kind == "item.spec"]
+        assert len(specs) == 1
+        spec_id = specs[0].id
+        assert lg.item("it-kid")["title"] == MINTER
+    code, out, err = invoke(monkeypatch, ["--db", db, "card", "--full", "it-anchor"])
+    assert code == 0, err
+    assert f"- it-kid: {WINNING} [open] holder: -" in out.splitlines()
+    header = {
+        int(part) for part in out.splitlines()[2].split(": ", 1)[1].split(", ")
+    }
+    assert spec_id in header
+    data = _card_json_full(monkeypatch, db, "it-anchor")
+    assert data["children"][0]["title"] == WINNING
+    assert spec_id in data["source_event_ids"]
+
+
+def _card_json_full(monkeypatch, db: str, item_id: str) -> dict:
+    code, out, err = invoke(
+        monkeypatch, ["--json", "--db", db, "card", "--full", item_id]
+    )
+    assert code == 0, err
+    return json.loads(out)["data"]
+
+
+def test_links_prints_the_current_spec_title(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, "it-a", "alpha")
+    seed(monkeypatch, db, "it-b", MINTER)
+    _spec(monkeypatch, db, "it-b", WINNING)
+    code, _out, err = invoke(
+        monkeypatch, ["--db", db, "link", "it-a", "--rel", "item", "--target", "it-b"]
+    )
+    assert code == 0, err
+    code, out, err = invoke(monkeypatch, ["--db", db, "links", "it-a"])
+    assert code == 0, err
+    assert out.splitlines()[0].split("\t")[4] == WINNING
+    code, raw, err = invoke(monkeypatch, ["--json", "--db", db, "links", "it-a"])
+    assert code == 0, err
+    data = json.loads(raw)["data"]
+    assert data["outgoing"][0]["title"] == WINNING
+    with open_ledger(db, create=False) as lg:
+        assert lg.item("it-b")["title"] == MINTER
+
+
+def test_questions_prints_the_current_spec_title(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, ITEM, MINTER)
+    _spec(monkeypatch, db, ITEM, WINNING)
+    with open_ledger(db) as lg:
+        lg.append(
+            kind="decision.asked",
+            item_id=ITEM,
+            idempotency_key="ask-title",
+            harness="pytest",
+            payload={
+                "question": "ship it?",
+                "options": [{"label": "yes"}, {"label": "no"}],
+            },
+        )
+    code, raw, err = invoke(monkeypatch, ["--json", "--db", db, "questions"])
+    assert code == 0, err
+    [row] = json.loads(raw)["data"]["questions"]
+    assert row["item_id"] == ITEM
+    assert row["title"] == WINNING
+    with open_ledger(db, create=False) as lg:
+        assert lg.item(ITEM)["title"] == MINTER
+
+
+def test_resume_prints_the_current_spec_title(tmp_path: Path, monkeypatch) -> None:
+    db = _db(tmp_path)
+    seed(monkeypatch, db, ITEM, MINTER)
+    _spec(monkeypatch, db, ITEM, WINNING)
+    code, _out, err = invoke(
+        monkeypatch,
+        [
+            "--db",
+            db,
+            "append",
+            "--kind",
+            "item.stopped",
+            f"--item={ITEM}",
+            "--payload",
+            json.dumps({"point": "stop", "phase": "build"}),
+        ],
+    )
+    assert code == 0, err
+    code, out, err = invoke(monkeypatch, ["--db", db, "resume"])
+    assert code == 0, err
+    first = out.splitlines()[0].split("\t")
+    assert first[0] == ITEM
+    assert first[2] == WINNING
+    code, raw, err = invoke(monkeypatch, ["--json", "--db", db, "resume"])
+    assert code == 0, err
+    [entry] = json.loads(raw)["data"]["items"]
+    assert entry["title"] == WINNING
+    with open_ledger(db, create=False) as lg:
+        assert lg.item(ITEM)["title"] == MINTER

@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- **`card`, `query`, `ready` and children rows show the current spec title.** An item with a spec prints the title of its newest `item.spec` (the same version `spec show` prints), escaped like the card's other inline fields. An item with no spec, or whose newest spec has a missing or non-string title, prints the `item.created` title and still exits 0. `v_items.title` stays the created title.
+- **`card`, `query`, `ready` and children rows show the current spec title.** An item with a spec prints the title of its newest `item.spec` (the same version `spec show` prints), escaped like the card's other inline fields. An item with no spec, or whose newest spec has a missing or non-string title, prints the `item.created` title and still exits 0. `v_items.title` stays the created title. `card --full` names each child's newest `item.spec` event in `source_event_ids`.
 
 ## 0.6.1 — 2026-11-21
 
