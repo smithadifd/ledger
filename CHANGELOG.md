@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`card`, `query`, `ready` and children rows show the current spec title.** An item with a spec prints the title of its newest `item.spec` (the same version `spec show` prints), escaped like the card's other inline fields. An item with no spec, or whose newest spec has a missing or non-string title, prints the `item.created` title and still exits 0. `v_items.title` stays the created title. `card --full` names each child's newest `item.spec` event in `source_event_ids`.
+
 ## 0.6.1 — 2026-11-21
 
 Two reserved review records, `review.merge-intent` and `review.merge-done`, carry a merge write-ahead on a pull request's linked item without a work loop. The upgrade page now names two 0.6.0 changes an upgrader can hit, the subinterpreter refusal and the shared search-index lock file, and the release checklist now creates one GitHub Release per tag. No new verb, flag or hook, and no migration.

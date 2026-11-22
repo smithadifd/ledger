@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from ledger import lease
-from ledger.card import _read_snapshot
+from ledger.card import _read_snapshot, spec_by_item
 from ledger.verbs import (
     DEFAULT_LIMIT,
     EXIT_NOT_FOUND,
@@ -35,9 +35,11 @@ def run(args, ctx: Context) -> Result:
         with _read_snapshot(lg):
             rows = lg.ready()
             leases = lease_rows(lg)
+            specs = spec_by_item(lg.events(kind="item.spec"))
         # An expired claim is ready and reads open (lease.read_status).
         matched = [
-            read_item(item_dict(row), leases.get(row["item_id"]), at=moment) for row in rows
+            read_item(item_dict(row, specs), leases.get(row["item_id"]), at=moment)
+            for row in rows
         ]
     finally:
         lg.close()

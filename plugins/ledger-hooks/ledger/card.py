@@ -38,6 +38,10 @@ Format (stable — a later reader should parse this layout, not invent one):
 
     This card is a projection; the events are the authority (ledger export-item -- <item>)
 
+The title is the newest item.spec title when that field is a non-empty
+string, else the item.created title; it is escaped like the other inline
+fields.
+
 The spec line names the item's current spec version (its latest item.spec
 event, also named in source_event_ids). The moved line appears only while
 the item is claimed, its claim stamped spec_version N older than the
@@ -582,6 +586,36 @@ def latest_spec_event(events: Iterable[Any]) -> Any | None:
         if event.kind == SPEC_KIND:
             latest = event
     return latest
+
+
+def spec_by_item(events: Iterable[Any]) -> dict[str, Any]:
+    """Newest ``item.spec`` event per item_id, in event-id order.
+
+    The same event ``ledger spec show`` prints for that item (highest
+    spec version; versions increase with event id).
+    """
+    latest: dict[str, Any] = {}
+    for event in events:
+        if event.kind == SPEC_KIND and event.item_id is not None:
+            latest[event.item_id] = event
+    return latest
+
+
+def projected_title(created_title: Any, spec: Any | None) -> Any:
+    """The title a ticket projection prints.
+
+    Newest item.spec title when that field is a non-empty string (the
+    schema's type and min_len); otherwise the item.created title. A
+    missing or non-string spec title is never shown. The caller escapes
+    the result the same way as other inline fields.
+    """
+    if spec is not None:
+        payload = getattr(spec, "payload", None)
+        if isinstance(payload, Mapping):
+            title = payload.get("title")
+            if isinstance(title, str) and title:
+                return title
+    return created_title
 
 
 def claim_spec_version(events: list[Any], item: Mapping[str, Any]) -> int | None:
@@ -1815,10 +1849,12 @@ def _children_with_sources(
     events it was rendered from.
 
     The sources are the child's creation event, its current state event
-    (None when it has none) and the child-of link that makes it a child of
-    ``item_id``: the child's latest child-of link, as v_items resolves
-    parent_id. That link is None when the events read do not hold it.
+    (None when it has none), the child-of link that makes it a child of
+    ``item_id`` (the child's latest child-of link, as v_items resolves
+    parent_id; None when the events read do not hold it), and the child's
+    newest item.spec event (None when it has none).
     """
+    specs = spec_by_item(events)
     kids = sorted(
         (row for row in rows if row.get("parent_id") == item_id),
         key=lambda row: int(row["created_event_id"]),
@@ -1850,11 +1886,12 @@ def _children_with_sources(
         placed.add(pick["item_id"])
         link = anchor_link.get(pick["item_id"])
         state_id = pick.get("state_event_id")
+        spec = specs.get(pick["item_id"])
         ordered.append(
             (
                 {
                     "item_id": pick["item_id"],
-                    "title": pick["title"],
+                    "title": projected_title(pick["title"], spec),
                     "status": pick["status"],
                     "holder": pick["owner"] if pick["owner"] is not None else pick["claim"],
                 },
@@ -1866,6 +1903,7 @@ def _children_with_sources(
                         if link is not None and link.payload.get("target") == item_id
                         else None
                     ),
+                    "spec_event_id": None if spec is None else int(spec.id),
                 },
             )
         )
@@ -1888,8 +1926,9 @@ def _child_source_ids(
     item_id: str, children: Iterable[tuple[Mapping[str, Any], Mapping[str, int | None]]]
 ) -> set[int]:
     """The events behind the child rows: each child's creation, state (when it
-    has one) and child-of link event. A child whose creation or link event is
-    missing is refused, never left out of the full card's header."""
+    has one), child-of link event, and newest item.spec event (when it has
+    one). A child whose creation or link event is missing is refused, never
+    left out of the full card's header."""
     ids: set[int] = set()
     for row, sources in children:
         for key in ("created_event_id", "link_event_id"):
@@ -1909,6 +1948,9 @@ def _child_source_ids(
         state_id = sources["state_event_id"]
         if state_id is not None:
             ids.add(int(state_id))
+        spec_id = sources["spec_event_id"]
+        if spec_id is not None:
+            ids.add(int(spec_id))
     return ids
 
 
@@ -2151,7 +2193,7 @@ def _project_item(
     card = Card(
         item_id=item_id,
         type=item["type"],
-        title=item["title"],
+        title=projected_title(item["title"], spec),
         status=item["status"],
         owner=owner,
         claim=claim,
@@ -2179,8 +2221,8 @@ def _project_item(
     if full:
         # The full card names every event it was projected from, including
         # each decision record's standing, result, source and superseding events,
-        # each child row's creation, state and child-of link events, and each
-        # Blockers row's blocked_by state event and blocks link events.
+        # each child row's creation, state, child-of link and newest spec events,
+        # and each Blockers row's blocked_by state event and blocks link events.
         ids = (
             base
             | _content_ids(card)

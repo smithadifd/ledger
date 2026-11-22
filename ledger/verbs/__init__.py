@@ -24,7 +24,7 @@ from types import ModuleType
 from typing import Any, Callable, Iterable, Mapping
 
 from ledger import __version__, lease
-from ledger.card import _one_line
+from ledger.card import _one_line, projected_title, spec_by_item
 from ledger.store import Event, Ledger, open_ledger
 
 # The one line `ledger --version` prints and `ledger resume --brief` prints first.
@@ -265,11 +265,14 @@ def event_dict(event: Event) -> dict[str, Any]:
     return asdict(event)
 
 
-def item_dict(row: Mapping[str, Any]) -> dict[str, Any]:
+def item_dict(
+    row: Mapping[str, Any], specs: Mapping[str, Any] | None = None
+) -> dict[str, Any]:
+    spec = None if specs is None else specs.get(row["item_id"])
     return {
         "item_id": row["item_id"],
         "type": row["type"],
-        "title": row["title"],
+        "title": projected_title(row["title"], spec),
         "status": row["status"],
         "owner": row["owner"],
         "claim": row["claim"],
@@ -350,7 +353,9 @@ def resolve_limit(value: int | None) -> int:
 def require_item(lg: Ledger, item_id: str) -> dict[str, Any]:
     for row in lg.items():
         if row["item_id"] == item_id:
-            return item_dict(row)
+            return item_dict(
+                row, spec_by_item(lg.events(item_id=item_id, kind="item.spec"))
+            )
     raise CliError(f"item not found: {item_id}", code="not_found", exit_code=EXIT_NOT_FOUND)
 
 
