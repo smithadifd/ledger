@@ -1389,3 +1389,57 @@ def test_cli6_one_items_unreadable_hand_off_marks_only_its_row(tmp_path: Path, m
     )
     [other] = [ln for ln in text.splitlines() if ln.startswith(f"stale claim: {OTHER_ITEM}\t")]
     assert "\trelease: " in other
+
+
+# --- Round 3: a finished merge step; doctor's advice per operation ---------------
+
+
+def test_m5_a_finished_merge_step_reads_changed_not_merge(bare: str) -> None:
+    intent = hand_off_v1(bare, operation="merge")
+    fields = request(bare, intent)
+    with open_ledger(bare, create=False) as ledger:
+        finish_operation(ledger, ITEM, "merge", "op-1", outcome="merged")
+    assert_refused(bare, "reclaim-handoff-changed", **fields)
+
+
+def _stale_session_step(tmp_path: Path, monkeypatch, clock, operation: str) -> tuple[str, Event]:
+    path = str(tmp_path / "ledger.db")
+    clock.at(-8 * DAY)
+    file_item(monkeypatch, path)
+    take(path)
+    intent = hand_off_v2(path) if operation == "build" else hand_off_v1(path, operation=operation)
+    clock.real()
+    return path, intent
+
+
+MERGE_ADVICE = (
+    "reclaim-handoff does not apply to a merge step (it refuses reclaim-merge-step); "
+    "recovery needs an operator, who finds out whether the merge happened"
+)
+RECLAIM_ADVICE = (
+    "recover it with reclaim-handoff --declare-seat-lost, naming the successor "
+    "and the evidence (ledger reclaim-handoff --help)"
+)
+
+
+def test_cli7_doctor_says_a_merge_step_needs_an_operator(tmp_path: Path, monkeypatch, clock) -> None:
+    path, intent = _stale_session_step(tmp_path, monkeypatch, clock, "merge")
+    [row] = json.loads(ok(monkeypatch, path, "--json", "doctor"))["data"]["stale_claims"]["items"]
+    assert row["release_command"] is None
+    assert row["session_hand_off"] == {"intent_event_id": intent.id, "operation": "merge", "operation_id": "op-1"}
+    assert (row["recovery"], row["recovery_note"]) == ("operator", MERGE_ADVICE)
+    [line] = [ln for ln in ok(monkeypatch, path, "doctor").splitlines() if ln.startswith("stale claim: ")]
+    assert line.endswith(f"\tsession hand-off: intent event {intent.id}; {MERGE_ADVICE}")
+    assert "recover it with reclaim-handoff" not in line
+    # The advice holds: the verb does refuse this step.
+    assert_refused(path, "reclaim-merge-step", **request(path, intent))
+
+
+def test_cli7_doctor_keeps_the_reclaim_advice_for_a_build_step(tmp_path: Path, monkeypatch, clock) -> None:
+    path, intent = _stale_session_step(tmp_path, monkeypatch, clock, "build")
+    [row] = json.loads(ok(monkeypatch, path, "--json", "doctor"))["data"]["stale_claims"]["items"]
+    assert row["release_command"] is None
+    assert row["session_hand_off"]["operation"] == "build"
+    assert (row["recovery"], row["recovery_note"]) == ("reclaim-handoff", RECLAIM_ADVICE)
+    [line] = [ln for ln in ok(monkeypatch, path, "doctor").splitlines() if ln.startswith("stale claim: ")]
+    assert line.endswith(f"\tsession hand-off: intent event {intent.id}; {RECLAIM_ADVICE}")

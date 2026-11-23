@@ -297,6 +297,20 @@ def _release_command(prefix: str, item_id: str, revision: int) -> str:
     )
 
 
+# What a session hand-off's stale claim tells the operator. Never a command:
+# the successor and the evidence are the caller's to name.
+RECLAIM_ADVICE = (
+    "recover it with reclaim-handoff --declare-seat-lost, naming the successor "
+    "and the evidence (ledger reclaim-handoff --help)"
+)
+# reclaim-handoff refuses a merge step (reclaim-merge-step): its seat-lost
+# loop.done would read as a merge.
+MERGE_STEP_ADVICE = (
+    "reclaim-handoff does not apply to a merge step (it refuses reclaim-merge-step); "
+    "recovery needs an operator, who finds out whether the merge happened"
+)
+
+
 def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
     """Stamp-less claims past ``lease.STALE_CLAIM_SECONDS``, disjoint from
     ``expired``, each with its release command; any failure reads as
@@ -305,8 +319,10 @@ def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
     A session hand-off's claim (``loop.session_hand_off`` names an
     unfinished session-mode operation on the item) gets ``release_command``
     ``None`` and ``session_hand_off`` set to that operation: its recovery is
-    ``reclaim-handoff``, never a generic release. Every other row has
-    ``session_hand_off`` ``None``. When that read fails for one item, only
+    ``reclaim-handoff``, never a generic release. Such a row also has
+    ``recovery``: ``reclaim-handoff``, or ``operator`` for a ``merge`` step,
+    which ``reclaim-handoff`` refuses, and ``recovery_note`` saying which and
+    why. Every other row has ``session_hand_off`` ``None``. When that read fails for one item, only
     its row reads ``status`` ``unknown`` with a ``reason`` and no release
     command (it may be a session hand-off); the other rows are unaffected."""
     try:
@@ -334,6 +350,9 @@ def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
                 row["session_hand_off"] = hand_off
                 if hand_off is not None:
                     row["release_command"] = None
+                    merge_step = hand_off["operation"] == "merge"
+                    row["recovery"] = "operator" if merge_step else "reclaim-handoff"
+                    row["recovery_note"] = MERGE_STEP_ADVICE if merge_step else RECLAIM_ADVICE
                     items.append(row)
                     continue
                 revision = conn.execute(
@@ -361,11 +380,9 @@ def _stale_line(c: dict) -> str:
         )
     hand_off = c.get("session_hand_off")
     if hand_off is not None:
-        # No command: the successor and the evidence are the caller's to name.
         return (
             f"{head}\tsession hand-off: intent event {hand_off['intent_event_id']}; "
-            "recover it with reclaim-handoff --declare-seat-lost, naming the successor "
-            "and the evidence (ledger reclaim-handoff --help)\n"
+            f"{c['recovery_note']}\n"
         )
     return f"{head}\trelease: {c['release_command']}\n"
 

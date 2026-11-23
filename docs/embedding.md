@@ -219,12 +219,13 @@ what the writes land on): the configured claim TTL
 (`missing-item:<item>`, `loop-item-not-managed:<item>`); it is not closed
 or blocked (`reclaim-item-closed`, `reclaim-item-blocked`); its latest state
 is its latest claim-bearing event (`reclaim-no-current-claim`); the intent
-is a `loop.intent` on the item (`reclaim-handoff-missing`) and not a `merge`
-step (`reclaim-merge-step`: its seat-lost `loop.done` would read as a merge,
-so a merge step is never recovered) and still open: a
+is a `loop.intent` on the item (`reclaim-handoff-missing`) and still open: a
 version 2 one is the item's open hand-off by the reader rule
 (`loop-hand-off-ambiguous:<item>` for two), a version 1 one has no matching
-`loop.done` (`reclaim-handoff-changed`); no other unfinished session-mode
+`loop.done` (`reclaim-handoff-changed`); it is not a `merge` step
+(`reclaim-merge-step`: its seat-lost `loop.done` would read as a merge, so a
+merge step is never recovered; a finished one reads `reclaim-handoff-changed`
+first); no other unfinished session-mode
 operation is on the item (`reclaim-session-ambiguous`); the operation has its
 session rewrite, the unstamped claim the loop writer wrote in the intent's
 own transaction, and the current claim has no expiry, even an expired one

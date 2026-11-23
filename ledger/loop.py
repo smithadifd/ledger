@@ -1083,11 +1083,6 @@ def _reclaim_guard(ledger: Ledger, item_id: str, payload: Mapping[str, Any]) -> 
     if not found or found[0]["kind"] != "loop.intent" or found[0]["item_id"] != item_id:
         raise ValidationError("reclaim-handoff-missing")
     intent = found[0]
-    # A merge step is never recovered: its seat-lost loop.done would name the
-    # operation every merge reader looks for (close_item, decisions), and no
-    # merge happened.
-    if json.loads(intent["payload"])["operation"] == "merge":
-        raise ValidationError("reclaim-merge-step")
     open_intents = _rows(conn, _OPEN_INTENTS_SQL, (item_id,))
     if intent["payload_version"] == LOOP_HAND_OFF_VERSION:
         # The reader rule, unchanged: two open hand-offs refuse
@@ -1097,6 +1092,12 @@ def _reclaim_guard(ledger: Ledger, item_id: str, payload: Mapping[str, Any]) -> 
             raise ValidationError("reclaim-handoff-changed")
     elif all(row["id"] != intent["id"] for row in open_intents):
         raise ValidationError("reclaim-handoff-changed")
+    # A merge step is never recovered: its seat-lost loop.done would name the
+    # operation every merge reader looks for (close_item, decisions), and no
+    # merge happened. Checked once the step is known to be open, so a
+    # finished one reads reclaim-handoff-changed.
+    if json.loads(intent["payload"])["operation"] == "merge":
+        raise ValidationError("reclaim-merge-step")
     # The target is the item's only unfinished session-mode operation.
     for row in open_intents:
         if row["id"] != intent["id"] and _is_session_operation(conn, row):
