@@ -26,7 +26,7 @@ from ledger.backup import backup_db, integrity_check
 from ledger.cli import main
 from ledger.dbfile import UnsafeDatabaseFile, verify_bound
 from ledger.export import export_events
-from ledger.loop import manage_item
+from ledger.loop import claim_operation, manage_item, take_item
 from ledger.restore import restore_export
 from ledger.store import LedgerError, open_ledger
 from ledger.verbs import EXIT_OK, EXIT_REFUSED, discover_verbs
@@ -50,6 +50,7 @@ WRITE_ACTIONS = (
     "new",
     "note",
     "pick",
+    "reclaim-handoff",
     "restore",
     "spec",
     "state",
@@ -868,6 +869,16 @@ def _prepare(action: str, tmp_path: Path, monkeypatch) -> tuple[Path, list[str],
                               stdin=json.dumps(hook))
         assert code == EXIT_OK, err + out
         argv = ["pick", ITEM, "--ask", str(asked)]
+    elif action == "reclaim-handoff":
+        with open_ledger(db, create=False) as lg:
+            take_item(lg, ITEM, "seat-a@s1", idempotency_key="probe-manage", claim_key="probe-take")
+            intent = claim_operation(
+                lg, ITEM, "build", "probe-build", holder="seat-a@s1", hand_off=True
+            ).event
+        argv = ["reclaim-handoff", ITEM, "--intent", str(intent.id), "--claim", str(intent.id + 1),
+                "--from", "seat-a@s1", "--to", "seat-b@s2", "--declare-seat-lost",
+                "--authority", "operator", "--declared-by", "probe-operator",
+                "--evidence", "probe"]
     elif action == "restore":
         export_dir = _export(tmp_path)
         db = tmp_path / "restored.db"

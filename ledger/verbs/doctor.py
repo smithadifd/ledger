@@ -19,7 +19,11 @@ variable itself. An unset stamp is the word ``missing``.
 
 Stale claims are listed beside the expired claims: claims with no lease stamp whose claim
 event is older than ``lease.STALE_CLAIM_SECONDS`` (7 days), each with a
-release command doctor prints and never runs. Before it reports the search
+release command doctor prints and never runs. A stale claim of an unfinished
+session hand-off (``ledger.loop.session_hand_off``) gets no release command:
+a generic ``state --status open`` would not move the loop's claim, and its
+recovery is ``reclaim-handoff``, which needs a successor and evidence doctor
+cannot know, so it names that verb and never prints a command. Before it reports the search
 index, doctor refreshes it as ``search`` does; when that cannot write (an
 unwritable index directory), it reports the state it reads and keeps its
 exit code and JSON shape.
@@ -31,7 +35,7 @@ import sqlite3
 import stat
 from pathlib import Path
 
-from ledger import lease, search
+from ledger import lease, loop, search
 from ledger.card import _one_line
 from ledger.dbfile import UnsafeDatabaseFile
 from ledger.export import read_watermark, resolve_export_dir
@@ -296,7 +300,13 @@ def _release_command(prefix: str, item_id: str, revision: int) -> str:
 def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
     """Stamp-less claims past ``lease.STALE_CLAIM_SECONDS``, disjoint from
     ``expired``, each with its release command; any failure reads as
-    ``unknown``, never an error."""
+    ``unknown``, never an error.
+
+    A session hand-off's claim (``loop.session_hand_off`` names an
+    unfinished session-mode operation on the item) gets ``release_command``
+    ``None`` and ``session_hand_off`` set to that operation: its recovery is
+    ``reclaim-handoff``, never a generic release. Every other row has
+    ``session_hand_off`` ``None``."""
     try:
         conn = _connect_readonly(resolved)
         conn.row_factory = sqlite3.Row
@@ -307,6 +317,12 @@ def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
             items = []
             for row in lease.stale_claims(conn):
                 if row["item_id"] in listed:
+                    continue
+                hand_off = loop.session_hand_off(conn, row["item_id"])
+                row["session_hand_off"] = hand_off
+                if hand_off is not None:
+                    row["release_command"] = None
+                    items.append(row)
                     continue
                 revision = conn.execute(
                     "SELECT MAX(id) FROM events WHERE item_id = ?", (row["item_id"],)
@@ -325,10 +341,16 @@ def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
 
 
 def _stale_line(c: dict) -> str:
-    return (
-        f"stale claim: {c['item_id']}\tholder={c['holder']}\tage={c['age_seconds']}s"
-        f"\trelease: {c['release_command']}\n"
-    )
+    head = f"stale claim: {c['item_id']}\tholder={c['holder']}\tage={c['age_seconds']}s"
+    hand_off = c.get("session_hand_off")
+    if hand_off is not None:
+        # No command: the successor and the evidence are the caller's to name.
+        return (
+            f"{head}\tsession hand-off: intent event {hand_off['intent_event_id']}; "
+            "recover it with reclaim-handoff --declare-seat-lost, naming the successor "
+            "and the evidence (ledger reclaim-handoff --help)\n"
+        )
+    return f"{head}\trelease: {c['release_command']}\n"
 
 
 def _counts(conn: sqlite3.Connection, sql: str) -> dict[str, int]:

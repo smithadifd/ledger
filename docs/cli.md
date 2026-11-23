@@ -142,6 +142,45 @@ Set the item's status.
 Claim the item with a lease. The holder defaults to the actor. `--capacity`
 refuses the claim when N items are already claimed.
 
+**`reclaim-handoff ITEM --intent EVENT_ID --claim EVENT_ID --from HOLDER --to SEAT@SESSION --declare-seat-lost --authority operator|successor --declared-by NAME --evidence REF`**
+Recover a dead session hand-off: move the claim a session-mode step left
+without an expiry from its holder, whose seat is lost, to a named successor.
+It is the one verb that writes loop-reserved events, and it calls
+`ledger.loop.reclaim_handoff`, which holds every check (see
+[docs/embedding.md](embedding.md), Reclaiming a dead session hand-off).
+Nothing is read from the item for you: `--intent` and `--claim` are the
+hand-off's intent event and the item's current claim event as you read them
+(`export-item --json`), `--from` is the holder exactly as the claim names
+it, and `--to` is the successor, `<seat>@<session>`, each part letters,
+digits, `.`, `_` and `-`, starting with a letter or digit, 1 to 64
+characters. `--declare-seat-lost` is required: it declares that the holder's
+seat is lost and its workers are stopped. The ledger cannot see a process
+die, so this is the declaration, attributed to `--declared-by` on
+`--authority` `operator` or `successor` (a successor declares as itself:
+`--declared-by` equals `--to`), with `--evidence`, one line of at most 300
+characters naming what shows it. It is attribution, not authentication.
+
+One transaction writes the `loop.reclaimed` marker, the old operation's
+`loop.done` with outcome `seat-lost`, and the successor's claim with
+`prior_holder`, the item's current spec version and a lease of the configured
+`claim_ttl_seconds`; all three or none. The successor then opens a new
+operation id for its own hand-off. Every refusal exits 3 and writes nothing;
+the refusal names are in docs/embedding.md. A ticket pass on the item that no
+matching end released refuses `reclaim-pass-live:<pass>`: end the dead pass
+first (the ticket skill's release), since the recovery never ends a pass and
+never releases a parent's lease. The same command again prints `already
+reclaimed` and writes nothing, renewing no lease; a different request for the
+same hand-off is refused as a conflict. The database must exist; the verb
+never creates one. Text output is `reclaimed ITEM from=HOLDER to=HOLDER
+events=A,B,C` (TAB-separated); `--json` carries `created` and the three
+events as `reclaimed`, `done` and `claim`.
+
+```sh
+ledger reclaim-handoff it-1a2b3c4d5e6f --intent 41 --claim 42 \
+  --from roll-seat-1@4f2a --to roll-seat-2@9c1d --declare-seat-lost \
+  --authority operator --declared-by operator-1 --evidence "pane closed, no seat process"
+```
+
 **`claim-system NAME`** Claim this database for a system, for example `work` or
 `home`. A system name is 1 to 64 characters: a lowercase letter, then lowercase
 letters, digits, `_` or `-`; anything else is refused with exit 2 before the
@@ -1031,9 +1070,18 @@ read with `--db` and carries `--expect-revision`, so it refuses once the item
 has changed since. `--json` carries them as `stale_claims`, the same shape as
 `expired_claims` (`{status, items}`, or `{status: "unknown", items: [],
 reason}` when they cannot be read); each item has `item_id`, `holder`,
-`claim_event_id`, `claimed_at`, `expires_at` (`null`), `age_seconds` and
-`release_command`, the command as one string. An item is never in both
-lists, and neither list changes the exit code.
+`claim_event_id`, `claimed_at`, `expires_at` (`null`), `age_seconds`,
+`release_command`, the command as one string, and `session_hand_off`. An item is never in both
+lists, and neither list changes the exit code. A stale claim of an unfinished
+session hand-off (a loop-managed item whose open intent is a version 2
+hand-off, or a version 1 one with the loop writer's session rewrite) gets no
+command: a `state --status open` would not move the loop's claim, and its
+recovery, `reclaim-handoff`, needs a successor and evidence doctor cannot
+know. Its line ends `session hand-off: intent event N; recover it with
+reclaim-handoff --declare-seat-lost, naming the successor and the evidence
+(ledger reclaim-handoff --help)` instead of `release:`, and its JSON row has
+`release_command` `null` and `session_hand_off` as `{intent_event_id,
+operation, operation_id}`; every other row has `session_hand_off` `null`.
 
 **`verify [--system NAME]`** Walk the hash chain and re-validate every
 payload. With `--system`, also require the database's claim to be `NAME`.

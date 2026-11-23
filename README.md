@@ -517,6 +517,7 @@ captured and `pick` refuses (`capture_missing`).
 | `note` | append a note to an item | yes |
 | `state` | set an item's status (`open`, `claimed`, `blocked`, `closed`), owner, claim or blocker | yes |
 | `claim` | claim an item with a lease, optionally capped by `--capacity` | yes |
+| `reclaim-handoff` | move a dead session hand-off's claim to a named successor on an explicit `--declare-seat-lost` with its authority and evidence; refused while a ticket pass on the item may be live | yes |
 | `claim-system` | claim this database for a system such as `work` or `home`; the same name again writes no event, but opening the database for writing applies any pending migration (an older copy then refuses the file); another name is refused | yes |
 | `link` | link an item to a PR, branch, session, URL or another item; `duplicate-of` also closes it | yes |
 | `append` | append a validated event of any non-reserved kind | yes |
@@ -548,7 +549,7 @@ captured and `pick` refuses (`capture_missing`).
 | `search-audit` | replay the logged misses against the current search index and print the rank each gets now; read-only, and unverifiable (exit 3) unless the index is current | no |
 | `lint-quotes` | check every election's quotes against its utterance | no |
 | `verify` | verify the hash chain and every payload, then replay the `child-of` forest and fail with exit 4 on the first break; `--system` checks the claim | no |
-| `doctor` | refresh the search index, then print the database path, schema version, search-index state, expired claims and stale claims (no lease stamp, older than 7 days) with a release command it never runs | no |
+| `doctor` | refresh the search index, then print the database path, schema version, search-index state, expired claims and stale claims (no lease stamp, older than 7 days) with a release command it never runs (a session hand-off's names `reclaim-handoff` instead) | no |
 | `export` | write events after the watermark; `--commit`, `--push`, `--check` | no |
 | `backup` | online backup with an integrity check | no |
 | `restore` | replay an export into a fresh database | new file |

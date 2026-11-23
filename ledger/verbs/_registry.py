@@ -42,6 +42,7 @@ from ledger.verbs import pick
 from ledger.verbs import query
 from ledger.verbs import questions
 from ledger.verbs import ready
+from ledger.verbs import reclaim_handoff
 from ledger.verbs import restore
 from ledger.verbs import resume
 from ledger.verbs import search
@@ -83,6 +84,7 @@ MODULES = (
     query,
     questions,
     ready,
+    reclaim_handoff,
     restore,
     resume,
     search,
