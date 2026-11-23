@@ -1,4 +1,4 @@
-"""No sequence of generic CLI write verbs, without `restore --accept-loop-events`, closes an item, links a merge, or writes a loop-reserved event kind. In-process callers are trusted; the boundary defended is the CLI/process boundary. The one verb that reaches this module is the dedicated `ledger reclaim-handoff`, which writes only a dead session hand-off's recovery, through `reclaim_handoff` and its whole guard.
+"""No sequence of generic CLI write verbs, without `restore --accept-loop-events`, closes an item, links a merge, or writes a loop-reserved event kind. In-process callers are trusted; the boundary defended is the CLI/process boundary. The one verb that reaches this module is the dedicated `ledger reclaim-handoff`: it calls `reclaim_handoff`, whose whole guard it cannot skip, so the only events it can write are a dead session hand-off's recovery.
 
 Internal writer for item-loop events that generic ledger verbs cannot append.
 Each external side effect is represented by an intent before it runs and a
@@ -821,7 +821,12 @@ def close_item(
     model: str | None = None,
     session: str | None = None,
 ) -> Event:
-    """Append ``loop.closed``; with ``holder``, only past ``check_holder`` (live)."""
+    """Append ``loop.closed``; with ``holder``, only past ``check_holder`` (live).
+
+    ``merge_done_event_id`` must be a ``loop.done`` of a ``merge`` on the item
+    whose outcome is not ``seat-lost``: a seat-lost done records that the seat
+    was lost, not that anything merged (``loop-merge-done-required``).
+    """
     payload: dict[str, Any] = {"merge_done_event_id": merge_done_event_id}
     if outcome:
         payload["outcome"] = outcome
@@ -830,7 +835,8 @@ def close_item(
 
     def merged(conn: sqlite3.Connection) -> None:
         row = conn.execute(
-            "SELECT kind, item_id, json_extract(payload, '$.operation') AS operation "
+            "SELECT kind, item_id, json_extract(payload, '$.operation') AS operation, "
+            "json_extract(payload, '$.outcome') AS outcome "
             "FROM events WHERE id = ?",
             (merge_done_event_id,),
         ).fetchone()
@@ -839,6 +845,7 @@ def close_item(
             or row["kind"] != "loop.done"
             or row["item_id"] != item_id
             or row["operation"] != "merge"
+            or row["outcome"] == LOOP_RECLAIM_DECLARATION
         ):
             raise ValidationError("loop-merge-done-required")
         if holder is not None:
@@ -1076,6 +1083,11 @@ def _reclaim_guard(ledger: Ledger, item_id: str, payload: Mapping[str, Any]) -> 
     if not found or found[0]["kind"] != "loop.intent" or found[0]["item_id"] != item_id:
         raise ValidationError("reclaim-handoff-missing")
     intent = found[0]
+    # A merge step is never recovered: its seat-lost loop.done would name the
+    # operation every merge reader looks for (close_item, decisions), and no
+    # merge happened.
+    if json.loads(intent["payload"])["operation"] == "merge":
+        raise ValidationError("reclaim-merge-step")
     open_intents = _rows(conn, _OPEN_INTENTS_SQL, (item_id,))
     if intent["payload_version"] == LOOP_HAND_OFF_VERSION:
         # The reader rule, unchanged: two open hand-offs refuse
@@ -1214,6 +1226,11 @@ def reclaim_handoff(
     false is not proof of holding the claim. Any other request under that
     key is an ``IdempotencyConflict``. Retry stamps (actor, harness, model,
     session) are ignored, as for the other loop writes.
+
+    The target may be a version 2 hand-off (always a build) or a version 1
+    session step of any operation but ``merge``: a merge step refuses
+    ``reclaim-merge-step``, since its seat-lost ``loop.done`` would read as a
+    merge.
 
     Otherwise ``_reclaim_guard`` runs inside the transaction, then three
     events are written: the ``loop.reclaimed`` marker; the target's

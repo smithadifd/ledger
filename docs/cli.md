@@ -163,7 +163,9 @@ characters naming what shows it. It is attribution, not authentication.
 One transaction writes the `loop.reclaimed` marker, the old operation's
 `loop.done` with outcome `seat-lost`, and the successor's claim with
 `prior_holder`, the item's current spec version and a lease of the configured
-`claim_ttl_seconds`; all three or none. The successor then opens a new
+`claim_ttl_seconds`; all three or none. A version 1 session step whose
+operation is `merge` is refused (`reclaim-merge-step`): its seat-lost
+`loop.done` would read as a merge. The successor then opens a new
 operation id for its own hand-off. Every refusal exits 3 and writes nothing;
 the refusal names are in docs/embedding.md. A ticket pass on the item that no
 matching end released refuses `reclaim-pass-live:<pass>`: end the dead pass
@@ -1074,14 +1076,19 @@ reason}` when they cannot be read); each item has `item_id`, `holder`,
 `release_command`, the command as one string, and `session_hand_off`. An item is never in both
 lists, and neither list changes the exit code. A stale claim of an unfinished
 session hand-off (a loop-managed item whose open intent is a version 2
-hand-off, or a version 1 one with the loop writer's session rewrite) gets no
-command: a `state --status open` would not move the loop's claim, and its
+hand-off, or a version 1 one with the loop writer's session rewrite; a
+`merge` step among them is one `reclaim-handoff` refuses, `reclaim-merge-step`)
+gets no command: a `state --status open` would not move the loop's claim, and its
 recovery, `reclaim-handoff`, needs a successor and evidence doctor cannot
 know. Its line ends `session hand-off: intent event N; recover it with
 reclaim-handoff --declare-seat-lost, naming the successor and the evidence
 (ledger reclaim-handoff --help)` instead of `release:`, and its JSON row has
 `release_command` `null` and `session_hand_off` as `{intent_event_id,
 operation, operation_id}`; every other row has `session_hand_off` `null`.
+When doctor cannot read whether one item is a session hand-off, only that
+row reads `status` `unknown` with a `reason`, no release command and
+`session_hand_off` `null`, and its line says so; the other rows are as
+above.
 
 **`verify [--system NAME]`** Walk the hash chain and re-validate every
 payload. With `--system`, also require the database's claim to be `NAME`.

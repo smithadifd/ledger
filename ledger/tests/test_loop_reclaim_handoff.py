@@ -15,6 +15,7 @@ import io
 import json
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -25,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from ledger import lease, loop, store
+from ledger import decisions, lease, loop, store
 from ledger.cli import main
 from ledger.export import (
     event_filename,
@@ -1269,3 +1270,122 @@ def test_cli5_a_version_1_session_hand_off_gets_the_same_advice(tmp_path: Path, 
     [row] = json.loads(ok(monkeypatch, path, "--json", "doctor"))["data"]["stale_claims"]["items"]
     assert row["release_command"] is None
     assert row["session_hand_off"]["intent_event_id"] == intent.id
+
+
+# --- M: session steps of other operations; merge steps; seat-lost merge dones ----
+
+
+@pytest.mark.parametrize("operation", ["review", "decision", "ping"])
+def test_m1_a_version_1_session_step_of_another_operation_is_recovered(bare: str, operation: str) -> None:
+    intent = hand_off_v1(bare, operation=operation)
+    result = reclaim(bare, **request(bare, intent))
+    assert result.created is True
+    assert result.done.payload == {
+        "operation": operation, "operation_id": "op-1", "intent_event_id": intent.id,
+        "outcome": "seat-lost", "source": f"event:{result.reclaimed.id}",
+    }
+    assert result.claim.payload["claim"] == SUCC
+    with open_ledger(bare, create=False) as ledger:
+        assert operation_state(ledger, ITEM, operation, "op-1").state == "finished"
+
+
+def test_m2_a_merge_session_step_is_never_recovered(bare: str) -> None:
+    intent = hand_off_v1(bare, operation="merge")
+    assert_refused(bare, "reclaim-merge-step", **request(bare, intent))
+    with open_ledger(bare, create=False) as ledger:
+        assert operation_state(ledger, ITEM, "merge", "op-1").state == "started"
+
+
+def _seat_lost_merge(db: str) -> Event:
+    """A merge loop.done whose outcome is seat-lost, as a restored chain or an
+    in-process caller could write one (the recovery never does)."""
+    with open_ledger(db, create=False) as ledger:
+        claim_operation(ledger, ITEM, "merge", "merge-1", holder=PRED)
+        return finish_operation(ledger, ITEM, "merge", "merge-1", outcome="seat-lost")
+
+
+def _real_merge(db: str) -> Event:
+    with open_ledger(db, create=False) as ledger:
+        claim_operation(ledger, ITEM, "merge", "merge-2", holder=PRED)
+        return finish_operation(ledger, ITEM, "merge", "merge-2", outcome="merged")
+
+
+def test_m3_close_item_takes_no_seat_lost_merge_done(bare: str) -> None:
+    lost = _seat_lost_merge(bare)
+    before = all_events(bare)
+    with open_ledger(bare, create=False) as ledger:
+        with pytest.raises(ValidationError, match="^loop-merge-done-required$"):
+            close_item(ledger, ITEM, lost.id, idempotency_key="close-lost")
+    assert all_events(bare) == before
+    merged = _real_merge(bare)
+    with open_ledger(bare, create=False) as ledger:
+        close_item(ledger, ITEM, merged.id, idempotency_key="close-merged")
+        assert ledger.item(ITEM)["status"] == "closed"
+
+
+def _settle(db: str, source_event_id: int, key: str) -> Event:
+    with open_ledger(db, create=False) as ledger:
+        return ledger.append(
+            kind="decision.recorded",
+            payload={
+                "who": "the owner", "who_kind": "person", "standing": "settled",
+                "effect": "ship it", "tags": [{"type": "ticket", "id": ITEM}],
+                "verbatim": "ship it", "phase": "close", "source_event_id": source_event_id,
+            },
+            item_id=ITEM,
+            idempotency_key=key,
+        )
+
+
+def test_m4_a_seat_lost_merge_done_settles_no_decision(bare: str) -> None:
+    lost = _seat_lost_merge(bare)
+    before = all_events(bare)
+    with pytest.raises(ValidationError, match="^source-event-cannot-settle:loop.done$"):
+        _settle(bare, lost.id, "settle-lost")
+    assert all_events(bare) == before
+    merged = _real_merge(bare)
+    assert _settle(bare, merged.id, "settle-merged").payload["source_event_id"] == merged.id
+    rows = {
+        name: {"kind": "loop.done", "provenance_class": None, "payload": json.dumps(payload)}
+        for name, payload in (
+            ("lost", {"operation": "merge", "outcome": "seat-lost"}),
+            ("merged", {"operation": "merge", "outcome": "merged"}),
+            ("bare", {"operation": "merge"}),
+        )
+    }
+    assert [decisions.is_settling(rows[name]) for name in ("lost", "merged", "bare")] == [False, True, True]
+
+
+def test_cli6_one_items_unreadable_hand_off_marks_only_its_row(tmp_path: Path, monkeypatch, clock) -> None:
+    path = str(tmp_path / "ledger.db")
+    clock.at(-8 * DAY)
+    file_item(monkeypatch, path)
+    file_item(monkeypatch, path, OTHER_ITEM, spec=False)
+    take(path)
+    hand_off_v2(path)
+    ok(monkeypatch, path, "state", OTHER_ITEM, "--status", "claimed", "--owner", "old-seat")
+    clock.real()
+    real = loop.session_hand_off
+
+    def failing(conn, item_id):
+        if item_id == ITEM:
+            raise sqlite3.OperationalError("injected read failure")
+        return real(conn, item_id)
+
+    monkeypatch.setattr(loop, "session_hand_off", failing)
+    stale = json.loads(ok(monkeypatch, path, "--json", "doctor"))["data"]["stale_claims"]
+    assert stale["status"] == "ok"
+    rows = {row["item_id"]: row for row in stale["items"]}
+    failed = rows[ITEM]
+    assert (failed["status"], failed["reason"]) == ("unknown", "OperationalError: injected read failure")
+    assert (failed["release_command"], failed["session_hand_off"]) == (None, None)
+    assert "status" not in rows[OTHER_ITEM]
+    assert "state --status open" in rows[OTHER_ITEM]["release_command"]
+    text = ok(monkeypatch, path, "doctor")
+    [line] = [ln for ln in text.splitlines() if ln.startswith(f"stale claim: {ITEM}\t")]
+    assert line.endswith(
+        "\tunknown: could not read whether it is a session hand-off "
+        "(OperationalError: injected read failure); see ledger doctor --json"
+    )
+    [other] = [ln for ln in text.splitlines() if ln.startswith(f"stale claim: {OTHER_ITEM}\t")]
+    assert "\trelease: " in other

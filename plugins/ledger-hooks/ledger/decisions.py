@@ -30,9 +30,10 @@ import json
 import sqlite3
 from typing import Any, Mapping
 
-from .schema import ValidationError
+from .schema import LOOP_RECLAIM_DECLARATION, ValidationError
 
-# Kinds that can settle a decision. loop.done counts only for a merge.
+# Kinds that can settle a decision. loop.done counts only for a merge, and
+# never one whose outcome is seat-lost (a lost seat, not a merge).
 SETTLING_KINDS = frozenset({
     "outside.recorded",
     "decision.elected",
@@ -60,7 +61,11 @@ def is_settling(row: Mapping[str, Any]) -> bool:
     if kind in SETTLING_KINDS:
         return True
     if kind == "loop.done":
-        return json.loads(row["payload"]).get("operation") == "merge"
+        payload = json.loads(row["payload"])
+        return (
+            payload.get("operation") == "merge"
+            and payload.get("outcome") != LOOP_RECLAIM_DECLARATION
+        )
     return False
 
 

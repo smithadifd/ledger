@@ -111,8 +111,8 @@ operation instead of repeating it. Once an item is loop-managed:
 The guarantee is about the process boundary: no sequence of generic CLI
 write verbs can write a reserved kind, close a loop-managed item or link its
 PR. The one dedicated verb that reaches the loop writer, `reclaim-handoff`,
-writes only a dead session hand-off's recovery, through `reclaim_handoff`
-and its whole guard (below).
+calls `reclaim_handoff`, whose whole guard (below) it cannot skip, so the
+only events it can write are a dead session hand-off's recovery.
 In-process callers that import `ledger.loop` are trusted. `restore` refuses
 an export that contains loop events unless `--accept-loop-events` is passed.
 
@@ -219,7 +219,9 @@ what the writes land on): the configured claim TTL
 (`missing-item:<item>`, `loop-item-not-managed:<item>`); it is not closed
 or blocked (`reclaim-item-closed`, `reclaim-item-blocked`); its latest state
 is its latest claim-bearing event (`reclaim-no-current-claim`); the intent
-is a `loop.intent` on the item (`reclaim-handoff-missing`) and still open: a
+is a `loop.intent` on the item (`reclaim-handoff-missing`) and not a `merge`
+step (`reclaim-merge-step`: its seat-lost `loop.done` would read as a merge,
+so a merge step is never recovered) and still open: a
 version 2 one is the item's open hand-off by the reader rule
 (`loop-hand-off-ambiguous:<item>` for two), a version 1 one has no matching
 `loop.done` (`reclaim-handoff-changed`); no other unfinished session-mode
@@ -268,6 +270,11 @@ claim, predecessor, declarant, authority or evidence for the same hand-off is
 an `IdempotencyConflict`, so a hand-off is recovered once. The generic
 writers refuse `reserved-kind:loop.reclaimed`; `restore` takes the kind only
 with `--accept-loop-events`.
+
+A seat-lost `loop.done` of a `merge` is never a merge: `close_item` refuses
+it as `merge_done_event_id` (`loop-merge-done-required`), and it settles no
+decision (`source-event-cannot-settle:loop.done`). The recovery never writes
+one; a restored chain or an in-process caller could.
 
 `take_item`, the runner's takeover of an expired lease and the orderly seat
 roll (finish, release, take) are unchanged: none of them recovers a session

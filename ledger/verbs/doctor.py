@@ -306,7 +306,9 @@ def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
     unfinished session-mode operation on the item) gets ``release_command``
     ``None`` and ``session_hand_off`` set to that operation: its recovery is
     ``reclaim-handoff``, never a generic release. Every other row has
-    ``session_hand_off`` ``None``."""
+    ``session_hand_off`` ``None``. When that read fails for one item, only
+    its row reads ``status`` ``unknown`` with a ``reason`` and no release
+    command (it may be a session hand-off); the other rows are unaffected."""
     try:
         conn = _connect_readonly(resolved)
         conn.row_factory = sqlite3.Row
@@ -318,7 +320,17 @@ def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
             for row in lease.stale_claims(conn):
                 if row["item_id"] in listed:
                     continue
-                hand_off = loop.session_hand_off(conn, row["item_id"])
+                try:
+                    hand_off = loop.session_hand_off(conn, row["item_id"])
+                except Exception as exc:  # this row only; never the whole list
+                    row.update(
+                        session_hand_off=None,
+                        release_command=None,
+                        status="unknown",
+                        reason=f"{type(exc).__name__}: {exc}",
+                    )
+                    items.append(row)
+                    continue
                 row["session_hand_off"] = hand_off
                 if hand_off is not None:
                     row["release_command"] = None
@@ -342,6 +354,11 @@ def _stale_claims(resolved: Path, ctx: Context, expired: dict) -> dict:
 
 def _stale_line(c: dict) -> str:
     head = f"stale claim: {c['item_id']}\tholder={c['holder']}\tage={c['age_seconds']}s"
+    if c.get("status") == "unknown":
+        return (
+            f"{head}\tunknown: could not read whether it is a session hand-off "
+            f"({_one_line(c['reason'])}); see ledger doctor --json\n"
+        )
     hand_off = c.get("session_hand_off")
     if hand_off is not None:
         # No command: the successor and the evidence are the caller's to name.
