@@ -718,6 +718,7 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
         "new",
         "note",
         "pick",
+        "reclaim-handoff",
         "restore",
         "spec",
         "state",
@@ -1019,6 +1020,32 @@ def test_seeded_generic_cli_sequences_cannot_close_link_merge_or_forge_marker(
                     rng.choice(("review-receipt", "brief", "packet", "retro", "other")),
                 )
                 assert code == 0, err
+            elif action == "reclaim-handoff":
+                # The one dedicated verb that writes loop events. These items
+                # have no session hand-off, so it refuses whatever it is given,
+                # with or without the declaration, and writes nothing.
+                code, _out, err = invoke(
+                    monkeypatch,
+                    db,
+                    "reclaim-handoff",
+                    item_id,
+                    "--intent",
+                    str(managed.id),
+                    "--claim",
+                    str(rng.randrange(1, 50)),
+                    "--from",
+                    f"claimant-{rng.randrange(4)}",
+                    "--to",
+                    "seat-x@forged",
+                    *rng.choice(((), ("--declare-seat-lost",))),
+                    "--authority",
+                    rng.choice(("operator", "successor")),
+                    "--declared-by",
+                    "seat-x@forged",
+                    "--evidence",
+                    f"property {suffix}",
+                )
+                assert code == 3, f"reclaim-handoff recovered an item with no session hand-off: {err}"
             elif action == "restore":
                 dest = tmp_path / f"property-restore-{suffix}.db"
                 code, _out, err = invoke(

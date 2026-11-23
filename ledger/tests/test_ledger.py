@@ -105,6 +105,8 @@ def test_every_v1_kind_is_registered() -> None:
         "loop.done",
         "loop.intent",
         "loop.managed",
+        # reclaim_handoff alone writes it (test_loop_reclaim_handoff covers it).
+        "loop.reclaimed",
         "ledger.system",
         # set_spec alone writes it (test_item_spec covers it).
         "item.spec",

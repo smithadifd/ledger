@@ -96,6 +96,7 @@ writer in `ledger/loop.py`:
 | `loop.managed` | the item is handed to the loop |
 | `loop.intent` | the loop is about to perform an external side effect, one of `build`, `decision`, `review`, `merge` or `ping`; payload version 2 is a hand-off (below) |
 | `loop.done` | that side effect finished, with its result |
+| `loop.reclaimed` | a dead session hand-off's claim moved to a named successor (below) |
 | `loop.closed` | the loop closed the item |
 
 Each side effect is an intent before it runs and a done event after it
@@ -107,8 +108,11 @@ operation instead of repeating it. Once an item is loop-managed:
   and every other generic writer are refused `reserved-transition:loop-pr`;
 - notes starting with `work:` or `loop:` are reserved for it.
 
-The guarantee is about the process boundary: no sequence of CLI write verbs
-can write a reserved kind, close a loop-managed item or link its PR.
+The guarantee is about the process boundary: no sequence of generic CLI
+write verbs can write a reserved kind, close a loop-managed item or link its
+PR. The one dedicated verb that reaches the loop writer, `reclaim-handoff`,
+calls `reclaim_handoff`, whose whole guard (below) it cannot skip, so the
+only events it can write are a dead session hand-off's recovery.
 In-process callers that import `ledger.loop` are trusted. `restore` refuses
 an export that contains loop events unless `--accept-loop-events` is passed.
 
@@ -175,6 +179,107 @@ export holding one: `verify`, `verify_export` and
 `restore --accept-loop-events` stop with `unknown-version:loop.intent:2`, and
 `export --commit` refuses the record. Its `export-item` prints the event
 without checking it. Upgrade every reader before anything writes a hand-off.
+
+### Reclaiming a dead session hand-off
+
+A session-mode step (`claim_operation` with `hand_off=True`) leaves the
+holder's claim without an expiry, so no heartbeat is needed while the session
+works, and no takeover by time can happen. A seat that dies inside one would
+hold the item for good. `ledger.loop.reclaim_handoff(ledger, item_id, *,
+intent_event_id, claim_event_id, prior_holder, holder, declare_seat_lost,
+authority, declared_by, evidence)` (and the `ledger reclaim-handoff` verb,
+which calls it) moves that one claim to a named successor.
+
+The ledger cannot discover or authenticate a process's death, so the caller
+declares it: `declare_seat_lost=True`, on an `authority` of `operator` or
+`successor`, by `declared_by`, with `evidence`. A successor declaring on its
+own authority names itself (`declared_by` equals `holder`). This is a
+trusted-caller declaration, not authentication: anyone who can run the CLI
+can make it. Before declaring, the caller stops the predecessor and its
+workers and ends its ticket pass; the ledger checks what it has recorded, and
+cannot stop a still-running process from writing later.
+
+**Grammar**, checked before anything is read: no declaration is
+`reclaim-declaration-required`; `item_id` a non-empty string
+(`missing-key:item_id`, `bad-type:item_id`, the store's own check); `holder` is
+`<seat>@<session>`, each part one ASCII token (letters, digits, `.`, `_`,
+`-`, starting with a letter or digit, 1 to 64 characters;
+`reclaim-successor-invalid`). Then the `loop.reclaimed` schema:
+`intent_event_id` and `claim_event_id` positive integers, never booleans;
+`prior_holder` a non-empty string, compared by exact equality; `authority`
+`operator` or `successor`; `declared_by` and `evidence` one line of 1 to 300
+characters (`missing-key:<field>`, `bad-type:<field>`, `too-long:<field>`,
+`not-single-line:<field>`, `too-large:<field>`); a successor equal to the
+predecessor (`reclaim-same-holder`); a successor declaring as someone else
+(`reclaim-authority-invalid`). The payload holds exactly the eight keys.
+
+**Guard**, in order, inside the write's transaction (so it reads exactly
+what the writes land on): the configured claim TTL
+(`reclaim-bad-ttl`); the item exists and is loop-managed
+(`missing-item:<item>`, `loop-item-not-managed:<item>`); it is not closed
+or blocked (`reclaim-item-closed`, `reclaim-item-blocked`); its latest state
+is its latest claim-bearing event (`reclaim-no-current-claim`); the intent
+is a `loop.intent` on the item (`reclaim-handoff-missing`) and still open: a
+version 2 one is the item's open hand-off by the reader rule
+(`loop-hand-off-ambiguous:<item>` for two), a version 1 one has no matching
+`loop.done` (`reclaim-handoff-changed`); it is not a `merge` step
+(`reclaim-merge-step`: its seat-lost `loop.done` would read as a merge, so a
+merge step is never recovered; a finished one reads `reclaim-handoff-changed`
+first); no other unfinished session-mode
+operation is on the item (`reclaim-session-ambiguous`); the operation has its
+session rewrite, the unstamped claim the loop writer wrote in the intent's
+own transaction, and the current claim has no expiry, even an expired one
+being refused (`reclaim-not-session-claim`); the current claim is
+`claim_event_id` and every claim-bearing event from the rewrite to it names
+`prior_holder` without an expiry (`reclaim-claim-changed`); and no ticket
+pass on the item is outstanding.
+
+**Ticket passes.** A pass begins with an `item.note` keyed
+`ticket-pass/<item>/<pass>/record` whose text is `ticket-pass:v2 ` and a
+JSON object with exactly `id` (that pass), `host`, `started_at`, `holder`
+and `lease`, or with a `session.opened` keyed
+`ticket-pass/<item>/<pass>/claimed`; only the `session.closed` keyed
+`ticket-pass/<item>/<pass>/released` on the same item ends it, and only after
+it began. An outstanding pass refuses `reclaim-pass-live:<pass>`. Anything
+else under the `ticket-pass/` key prefix, or a note framed `ticket-pass:`,
+that is not exactly one of these (another item's key, another role, the wrong
+kind, an unknown version, a malformed record) refuses
+`reclaim-pass-unreadable:<item>`: it is never read as an ended pass. The
+recovery writes no pass record and releases no parent lease.
+
+**Writes**, all in one transaction, or none: the `loop.reclaimed` marker
+(key `loop:<item>:reclaim:<intent event id>`; actor, harness, model and
+session are the caller's); the target's `loop.done` with outcome `seat-lost`
+and source `event:<marker id>`, under the key `finish_operation` uses, with
+no holder check and no restamp, so the old operation can never record another
+result; and the successor's `item.state`, `{"status": "claimed", "claim":
+<holder>, "prior_holder": <predecessor>, "expires_at": ...,
+"spec_version": ...}` (the configured claim TTL from now, and the item's
+current spec version when it has one), keyed `loop:<item>:reclaim:<intent
+event id>:claim`. It returns `HandoffReclaim(reclaimed, done, claim,
+created)`. Afterwards the item has no open hand-off; the predecessor's
+progress, results and hand-offs fail the normal holder check; the successor
+renews its lease like any loop claim and hands off again under a new
+operation id.
+
+**Retries.** The same request again checks the stored marker, done and
+claim (`reclaim-record-incomplete` unless all three are there as written,
+one after the other) and returns them with `created` false, writing nothing
+and checking nothing current: it renews no lease, so `created` false is not
+proof of holding the claim. Retry stamps are ignored. Another successor,
+claim, predecessor, declarant, authority or evidence for the same hand-off is
+an `IdempotencyConflict`, so a hand-off is recovered once. The generic
+writers refuse `reserved-kind:loop.reclaimed`; `restore` takes the kind only
+with `--accept-loop-events`.
+
+A seat-lost `loop.done` of a `merge` is never a merge: `close_item` refuses
+it as `merge_done_event_id` (`loop-merge-done-required`), and it settles no
+decision (`source-event-cannot-settle:loop.done`). The recovery never writes
+one; a restored chain or an in-process caller could.
+
+`take_item`, the runner's takeover of an expired lease and the orderly seat
+roll (finish, release, take) are unchanged: none of them recovers a session
+claim, and `reclaim_handoff` refuses a stamped one.
 
 ### The pull request link
 

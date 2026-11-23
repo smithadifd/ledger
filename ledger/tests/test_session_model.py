@@ -1039,11 +1039,23 @@ def _writer_case(verb: str, monkeypatch, db: str, tmp_path: Path) -> tuple[list[
         hook = {"hook_event_name": "UserPromptSubmit", "prompt": "hello there",
                 "session_id": S1, "prompt_id": "p-1"}
         return ["capture", "--kind", "prompt"], json.dumps(hook)
+    if verb == "reclaim-handoff":
+        from ledger.loop import claim_operation, take_item
+
+        with open_ledger(db, create=False) as lg:
+            take_item(lg, ITEM, "seat-a@s1", idempotency_key="manage", claim_key="take")
+            intent = claim_operation(
+                lg, ITEM, "build", "build-1", holder="seat-a@s1", hand_off=True
+            ).event
+        return ["reclaim-handoff", ITEM, "--intent", str(intent.id), "--claim", str(intent.id + 1),
+                "--from", "seat-a@s1", "--to", "seat-b@s2", "--declare-seat-lost",
+                "--authority", "operator", "--declared-by", "op", "--evidence", "e"], ""
     raise AssertionError(verb)
 
 
 WRITER_VERBS = ["new", "append", "append-many", "note", "link", "state", "spec", "doc",
-                "elect", "pick", "entity", "claim", "claim-system", "guidance", "capture"]
+                "elect", "pick", "entity", "claim", "claim-system", "guidance", "capture",
+                "reclaim-handoff"]
 
 
 @pytest.mark.parametrize("verb", WRITER_VERBS)

@@ -1,4 +1,4 @@
-"""No sequence of generic CLI write verbs, without `restore --accept-loop-events`, closes an item, links a merge, or writes a loop-reserved event kind. In-process callers are trusted; the boundary defended is the CLI/process boundary.
+"""No sequence of generic CLI write verbs, without `restore --accept-loop-events`, closes an item, links a merge, or writes a loop-reserved event kind. In-process callers are trusted; the boundary defended is the CLI/process boundary. The one verb that reaches this module is the dedicated `ledger reclaim-handoff`: it calls `reclaim_handoff`, whose whole guard it cannot skip, so the only events it can write are a dead session hand-off's recovery.
 
 Internal writer for item-loop events that generic ledger verbs cannot append.
 Each external side effect is represented by an intent before it runs and a
@@ -8,6 +8,7 @@ reconciles a started operation instead of repeating it.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -19,10 +20,14 @@ from .schema import (
     _RECEIPT_REPO,
     LOOP_HAND_OFF_VERSION,
     LOOP_OPERATIONS,
+    LOOP_RECLAIM_DECLARATION,
+    LOOP_RECLAIM_KIND,
+    LOOP_RECLAIM_SUCCESSOR,
     ValidationError,
     _check_field,
+    validate_payload,
 )
-from .store import Event, Ledger, _event_from_row, canonical_dumps
+from .store import Event, Ledger, _event_from_row, canonical_dumps, item_is_loop_managed
 
 _LOOP_WRITER_CAPABILITY = object()
 
@@ -395,7 +400,8 @@ def take_item(
     ``holder``) or the loop resuming in runner mode (``restamp_claim``)
     stamps it again with a fresh lease. So a live session is never taken
     over, and a dead runner loop is still reclaimed after the TTL.
-    Reclaiming a dead session-mode claim is not handled here (a follow-up).
+    A dead session-mode claim is never taken here: ``reclaim_handoff``
+    moves it, on an explicit seat-lost declaration, never on elapsed time.
 
     ``claim_key`` must be unique per take: a takeover can recur on one item.
     """
@@ -815,7 +821,12 @@ def close_item(
     model: str | None = None,
     session: str | None = None,
 ) -> Event:
-    """Append ``loop.closed``; with ``holder``, only past ``check_holder`` (live)."""
+    """Append ``loop.closed``; with ``holder``, only past ``check_holder`` (live).
+
+    ``merge_done_event_id`` must be a ``loop.done`` of a ``merge`` on the item
+    whose outcome is not ``seat-lost``: a seat-lost done records that the seat
+    was lost, not that anything merged (``loop-merge-done-required``).
+    """
     payload: dict[str, Any] = {"merge_done_event_id": merge_done_event_id}
     if outcome:
         payload["outcome"] = outcome
@@ -824,7 +835,8 @@ def close_item(
 
     def merged(conn: sqlite3.Connection) -> None:
         row = conn.execute(
-            "SELECT kind, item_id, json_extract(payload, '$.operation') AS operation "
+            "SELECT kind, item_id, json_extract(payload, '$.operation') AS operation, "
+            "json_extract(payload, '$.outcome') AS outcome "
             "FROM events WHERE id = ?",
             (merge_done_event_id,),
         ).fetchone()
@@ -833,6 +845,7 @@ def close_item(
             or row["kind"] != "loop.done"
             or row["item_id"] != item_id
             or row["operation"] != "merge"
+            or row["outcome"] == LOOP_RECLAIM_DECLARATION
         ):
             raise ValidationError("loop-merge-done-required")
         if holder is not None:
@@ -850,7 +863,465 @@ def close_item(
     )
 
 
+# --- Reclaiming a dead session hand-off ---------------------------------------
+
+
+@dataclass(frozen=True)
+class HandoffReclaim:
+    """A session hand-off's recovery: its ``loop.reclaimed`` marker, the old
+    operation's ``loop.done`` and the successor's claim, and whether this call
+    wrote them (``created`` false for an exact retry)."""
+
+    reclaimed: Event
+    done: Event
+    claim: Event
+    created: bool
+
+
+# An item's loop.intent events, of any payload version, that no loop.done on
+# the item names by the same operation and operation id: the reader rule of
+# _OPEN_HAND_OFFS_SQL without its version filter.
+_OPEN_INTENTS_SQL = (
+    "SELECT intent.* FROM events AS intent "
+    "WHERE intent.item_id = ? AND intent.kind = 'loop.intent' "
+    "AND NOT EXISTS (SELECT 1 FROM events AS done "
+    "WHERE done.item_id = intent.item_id AND done.kind = 'loop.done' "
+    "AND json_extract(done.payload, '$.operation') = "
+    "json_extract(intent.payload, '$.operation') "
+    "AND json_extract(done.payload, '$.operation_id') = "
+    "json_extract(intent.payload, '$.operation_id')) "
+    "ORDER BY intent.id"
+)
+
+# The claim-bearing events of an item between two event ids, inclusive: the
+# holder each names and its own lease stamp.
+_CLAIMS_BETWEEN_SQL = (
+    f"SELECT claim.id AS id, {_HOLDER_SQL} AS holder, "
+    "json_extract(claim.payload, '$.expires_at') AS expires_at "
+    "FROM events AS claim "
+    f"WHERE claim.item_id = ? AND claim.kind = 'item.state' AND {_HOLDER_SQL} IS NOT NULL "
+    "AND claim.id >= ? AND claim.id <= ? ORDER BY claim.id"
+)
+
+# The ticket pass protocol (the adapter bar's): a pass begins with its record
+# (an item.note) or, in the old shape, a session.opened; only its
+# session.closed ends it. The key's last part names which.
+_PASS_KEY_PREFIX = "ticket-pass/"
+_PASS_ROLES = {"record": "item.note", "claimed": "session.opened", "released": "session.closed"}
+_PASS_RECORD_FRAME = "ticket-pass:"
+_PASS_RECORD_V2 = "ticket-pass:v2 "
+_PASS_RECORD_KEYS = frozenset(("id", "host", "started_at", "holder", "lease"))
+_PASS_ID = re.compile(r"[0-9a-f]+")
+
+
+def _rows(conn: sqlite3.Connection, sql: str, params: tuple[Any, ...]) -> list[sqlite3.Row]:
+    cursor = conn.execute(sql, params)
+    cursor.row_factory = sqlite3.Row
+    return cursor.fetchall()
+
+
+def _event_by_key(conn: sqlite3.Connection, key: str) -> Event | None:
+    rows = _rows(conn, "SELECT * FROM events WHERE idempotency_key = ?", (key,))
+    return _event_from_row(rows[0]) if rows else None
+
+
+def _session_rewrite(conn: sqlite3.Connection, intent: sqlite3.Row) -> sqlite3.Row | None:
+    """The claim rewrite ``claim_operation`` with ``hand_off`` wrote with
+    ``intent``, else None: the proof that the operation ran in session mode.
+
+    Only the loop writer's own rewrite counts. It is the ``item.state`` under
+    the operation's ``loop:<item>:<operation>:<operation id>:hand-off`` key,
+    on the intent's item, written in the intent's own transaction (so it is
+    the very next event), whose payload is exactly the unstamped claim
+    ``{"status": "claimed", "claim": <holder>}``, and which carries no
+    harness (the loop writer stamps none; every CLI write carries
+    ``LEDGER_HARNESS``). An unstamped claim without it, or an event a generic
+    writer put under that key, never makes an operation a session hand-off.
+    """
+    payload = json.loads(intent["payload"])
+    item_id = intent["item_id"]
+    rows = _rows(
+        conn,
+        "SELECT * FROM events WHERE idempotency_key = ?",
+        (f"loop:{item_id}:{payload['operation']}:{payload['operation_id']}:hand-off",),
+    )
+    if not rows:
+        return None
+    row = rows[0]
+    claim = json.loads(row["payload"])
+    if (
+        row["kind"] != "item.state"
+        or row["item_id"] != item_id
+        or int(row["id"]) != int(intent["id"]) + 1
+        or set(claim) != {"status", "claim"}
+        or claim["status"] != "claimed"
+        or row["harness"] is not None
+    ):
+        return None
+    return row
+
+
+def _is_session_operation(conn: sqlite3.Connection, intent: sqlite3.Row) -> bool:
+    """A hand-off (payload version 2), or a version 1 intent with its session rewrite."""
+    return (
+        intent["payload_version"] == LOOP_HAND_OFF_VERSION
+        or _session_rewrite(conn, intent) is not None
+    )
+
+
+def session_hand_off(conn: sqlite3.Connection, item_id: str) -> dict[str, Any] | None:
+    """The item's first unfinished session-mode operation, else None. Read only.
+
+    An operation is session-mode when its intent is a hand-off (payload
+    version 2) or a version 1 intent whose session rewrite
+    (``_session_rewrite``) proves ``hand_off``; it is unfinished while no
+    ``loop.done`` on the item names its operation and operation id. Returns
+    the intent's event id, operation and operation id. ``doctor`` reads it so
+    it never offers a generic ``state --status open`` for such a claim.
+    """
+    if not item_is_loop_managed(conn, item_id):
+        return None
+    for intent in _rows(conn, _OPEN_INTENTS_SQL, (item_id,)):
+        if _is_session_operation(conn, intent):
+            payload = json.loads(intent["payload"])
+            return {
+                "intent_event_id": int(intent["id"]),
+                "operation": payload["operation"],
+                "operation_id": payload["operation_id"],
+            }
+    return None
+
+
+def _outstanding_pass(conn: sqlite3.Connection, item_id: str) -> str | None:
+    """The id of the item's first ticket pass that nothing has ended, else None.
+
+    DESIGN (the pass protocol): a pass begins with an ``item.note`` keyed
+    ``ticket-pass/<item>/<pass>/record`` whose text is ``ticket-pass:v2 ``
+    and then a JSON object with exactly ``id`` (that pass), ``host``,
+    ``started_at``, ``holder`` and ``lease``, or, in the old shape, with a
+    ``session.opened`` keyed ``ticket-pass/<item>/<pass>/claimed``. Only the
+    ``session.closed`` keyed ``ticket-pass/<item>/<pass>/released`` on the
+    same item ends it, and only after it began. Any other event under the
+    ``ticket-pass/`` key prefix, or any note framed ``ticket-pass:``, that is
+    not exactly one of these (another item's key, another role, the wrong
+    kind, a pass id that is not lowercase hex, an unknown version, a body
+    that is not such an object, a record naming another pass) is never read
+    as completion: ``reclaim-pass-unreadable:<item>`` is raised.
+    """
+    unreadable = f"reclaim-pass-unreadable:{item_id}"
+    prefix = f"{_PASS_KEY_PREFIX}{item_id}/"
+    live: dict[str, None] = {}
+    for row in _rows(
+        conn,
+        "SELECT kind, idempotency_key, payload FROM events WHERE item_id = ? ORDER BY id",
+        (item_id,),
+    ):
+        key = row["idempotency_key"] or ""
+        text = json.loads(row["payload"]).get("text") if row["kind"] == "item.note" else None
+        framed = isinstance(text, str) and text.startswith(_PASS_RECORD_FRAME)
+        if not key.startswith(_PASS_KEY_PREFIX) and not framed:
+            continue
+        parts = key[len(prefix):].split("/") if key.startswith(prefix) else []
+        if (
+            len(parts) != 2
+            or _PASS_ID.fullmatch(parts[0]) is None
+            or _PASS_ROLES.get(parts[1]) != row["kind"]
+        ):
+            raise ValidationError(unreadable)
+        pass_id, role = parts
+        if role == "record":
+            if not framed or not text.startswith(_PASS_RECORD_V2):
+                raise ValidationError(unreadable)
+            try:
+                record = json.loads(text[len(_PASS_RECORD_V2):])
+            except ValueError:
+                raise ValidationError(unreadable) from None
+            if type(record) is not dict or set(record) != _PASS_RECORD_KEYS or record["id"] != pass_id:
+                raise ValidationError(unreadable)
+        if role == "released":
+            live.pop(pass_id, None)
+        else:
+            live[pass_id] = None
+    return next(iter(live), None)
+
+
+def _reclaim_guard(ledger: Ledger, item_id: str, payload: Mapping[str, Any]) -> dict[str, Any]:
+    """Every check of a new recovery, in order, inside the write's transaction.
+
+    Run as the marker's precondition, so every read is under the
+    transaction's write lock and sees exactly what the three appends land
+    on. Each refusal raises ``ValidationError`` and the transaction rolls
+    back. Returns what the appends need: the TTL, the item's current spec
+    version and the target's operation and operation id.
+    """
+    conn = ledger._conn
+    try:
+        ttl = lease.check_ttl(lease.ttl_for_db(ledger.path), "ttl_seconds")
+    except lease.LeaseConfigError as exc:
+        raise ValidationError("reclaim-bad-ttl") from exc
+    items = _rows(conn, "SELECT * FROM v_items WHERE item_id = ?", (item_id,))
+    if not items:
+        raise ValidationError(f"missing-item:{item_id}")
+    item = items[0]
+    if not item_is_loop_managed(conn, item_id):
+        raise ValidationError(f"loop-item-not-managed:{item_id}")
+    if item["status"] == "closed":
+        raise ValidationError("reclaim-item-closed")
+    if item["status"] == "blocked":
+        raise ValidationError("reclaim-item-blocked")
+    # The current named claim: the item's latest state is its latest
+    # claim-bearing event, and it is a claim.
+    claim = _latest_claim(conn, item_id)
+    if (
+        claim is None
+        or item["status"] != "claimed"
+        or item["state_event_id"] != claim["claim_event_id"]
+    ):
+        raise ValidationError("reclaim-no-current-claim")
+    # The target: the exact intent the declarant observed, on this item.
+    found = _rows(conn, "SELECT * FROM events WHERE id = ?", (payload["intent_event_id"],))
+    if not found or found[0]["kind"] != "loop.intent" or found[0]["item_id"] != item_id:
+        raise ValidationError("reclaim-handoff-missing")
+    intent = found[0]
+    open_intents = _rows(conn, _OPEN_INTENTS_SQL, (item_id,))
+    if intent["payload_version"] == LOOP_HAND_OFF_VERSION:
+        # The reader rule, unchanged: two open hand-offs refuse
+        # loop-hand-off-ambiguous:<item>; a finished one is not current.
+        current = _open_hand_off(conn, item_id)
+        if current is None or current["id"] != intent["id"]:
+            raise ValidationError("reclaim-handoff-changed")
+    elif all(row["id"] != intent["id"] for row in open_intents):
+        raise ValidationError("reclaim-handoff-changed")
+    # A merge step is never recovered: its seat-lost loop.done would name the
+    # operation every merge reader looks for (close_item, decisions), and no
+    # merge happened. Checked once the step is known to be open, so a
+    # finished one reads reclaim-handoff-changed.
+    if json.loads(intent["payload"])["operation"] == "merge":
+        raise ValidationError("reclaim-merge-step")
+    # The target is the item's only unfinished session-mode operation.
+    for row in open_intents:
+        if row["id"] != intent["id"] and _is_session_operation(conn, row):
+            raise ValidationError("reclaim-session-ambiguous")
+    rewrite = _session_rewrite(conn, intent)
+    if rewrite is None:
+        raise ValidationError("reclaim-not-session-claim")
+    if claim["expires_at"] is not None:
+        raise ValidationError("reclaim-not-session-claim")
+    if claim["claim_event_id"] != payload["claim_event_id"]:
+        raise ValidationError("reclaim-claim-changed")
+    # Continuous ownership: every claim-bearing event from the session
+    # rewrite to the current claim names the predecessor, unstamped.
+    for between in _rows(
+        conn, _CLAIMS_BETWEEN_SQL, (item_id, int(rewrite["id"]), claim["claim_event_id"])
+    ):
+        if between["holder"] != payload["prior_holder"] or between["expires_at"] is not None:
+            raise ValidationError("reclaim-claim-changed")
+    pass_id = _outstanding_pass(conn, item_id)
+    if pass_id is not None:
+        raise ValidationError(f"reclaim-pass-live:{pass_id}")
+    target = json.loads(intent["payload"])
+    return {
+        "ttl": ttl,
+        "spec_version": item["spec_version"],
+        "operation": target["operation"],
+        "operation_id": target["operation_id"],
+    }
+
+
+def _reclaimed_record(
+    conn: sqlite3.Connection, item_id: str, marker: Event
+) -> tuple[Event, Event]:
+    """The ``loop.done`` and the claim the recovery ``marker`` was written
+    with, checked against it; ``reclaim-record-incomplete`` unless both are
+    there exactly as ``reclaim_handoff`` writes them, right after it."""
+    incomplete = "reclaim-record-incomplete"
+    intent_id = marker.payload["intent_event_id"]
+    found = _rows(conn, "SELECT * FROM events WHERE id = ?", (intent_id,))
+    if not found or found[0]["kind"] != "loop.intent" or found[0]["item_id"] != item_id:
+        raise ValidationError(incomplete)
+    target = json.loads(found[0]["payload"])
+    operation, operation_id = target["operation"], target["operation_id"]
+    done = _event_by_key(conn, f"loop:{item_id}:{operation}:{operation_id}:done")
+    claim = _event_by_key(conn, f"loop:{item_id}:reclaim:{intent_id}:claim")
+    if done is None or claim is None:
+        raise ValidationError(incomplete)
+    if (
+        done.kind != "loop.done"
+        or done.item_id != item_id
+        or done.id != marker.id + 1
+        or done.payload != {
+            "operation": operation,
+            "operation_id": operation_id,
+            "intent_event_id": intent_id,
+            "outcome": LOOP_RECLAIM_DECLARATION,
+            "source": f"event:{marker.id}",
+        }
+    ):
+        raise ValidationError(incomplete)
+    if (
+        claim.kind != "item.state"
+        or claim.item_id != item_id
+        or claim.id != done.id + 1
+        or claim.payload.get("status") != "claimed"
+        or claim.payload.get("claim") != marker.payload["holder"]
+        or claim.payload.get("prior_holder") != marker.payload["prior_holder"]
+        or "expires_at" not in claim.payload
+    ):
+        raise ValidationError(incomplete)
+    return done, claim
+
+
+def reclaim_handoff(
+    ledger: Ledger,
+    item_id: str,
+    *,
+    intent_event_id: int | None = None,
+    claim_event_id: int | None = None,
+    prior_holder: str | None = None,
+    holder: str | None = None,
+    declare_seat_lost: bool = False,
+    authority: str | None = None,
+    declared_by: str | None = None,
+    evidence: str | None = None,
+    actor: str | None = None,
+    harness: str | None = None,
+    model: str | None = None,
+    session: str | None = None,
+) -> HandoffReclaim:
+    """Move a dead session hand-off's claim to a named successor, in ONE transaction.
+
+    DESIGN (the invariant): a recovery transfers one exact, unfinished
+    session-mode claim from its recorded predecessor to one named successor
+    only after an explicit seat-lost declaration and while no ticket pass
+    may remain live. The marker, the old operation's completion and the
+    successor's claim commit together or not at all, and a retry never
+    grants authority again.
+
+    The ledger cannot see a process die. The caller declares it
+    (``declare_seat_lost=True``), on an ``authority`` of ``operator`` or
+    ``successor`` (a successor declares as itself: ``declared_by`` equals
+    ``holder``), with ``evidence`` (one line, at most 300 characters). That
+    is attribution, not authentication. The caller first stops the
+    predecessor and its workers and ends its ticket pass; nothing here ends
+    a pass or releases a parent's lease.
+
+    Grammar, checked before the transaction: no declaration is
+    ``reclaim-declaration-required``; ``holder`` is
+    ``<seat>@<session>``, each part one ASCII token of 1 to 64 characters
+    (``reclaim-successor-invalid``); then the ``loop.reclaimed`` schema:
+    ``intent_event_id`` and ``claim_event_id`` positive integers, never
+    booleans; ``prior_holder`` a non-empty string, compared exactly;
+    ``authority`` ``operator`` or ``successor``; ``declared_by`` and
+    ``evidence`` one line of 1 to 300 characters (``missing-key:<field>``,
+    ``bad-type:<field>``, ``too-long:<field>``, ``not-single-line:<field>``,
+    ``too-large:<field>``); ``reclaim-same-holder``;
+    ``reclaim-authority-invalid``. The store refuses an ``item_id`` that is
+    not a non-empty string (``missing-key:item_id``, ``bad-type:item_id``)
+    before anything else is read.
+
+    An exact retry (the same request, under the key
+    ``loop:<item>:reclaim:<intent_event_id>``) checks the stored marker, done
+    and claim (``reclaim-record-incomplete`` unless all three are there as
+    this writes them) and returns them with ``created`` false, writing
+    nothing and checking nothing current: it renews no lease, so ``created``
+    false is not proof of holding the claim. Any other request under that
+    key is an ``IdempotencyConflict``. Retry stamps (actor, harness, model,
+    session) are ignored, as for the other loop writes.
+
+    The target may be a version 2 hand-off (always a build) or a version 1
+    session step of any operation but ``merge``: a merge step refuses
+    ``reclaim-merge-step``, since its seat-lost ``loop.done`` would read as a
+    merge.
+
+    Otherwise ``_reclaim_guard`` runs inside the transaction, then three
+    events are written: the ``loop.reclaimed`` marker; the target's
+    ``loop.done`` (outcome ``seat-lost``, source ``event:<marker id>``),
+    with no holder check and no restamp, under the key ``finish_operation``
+    uses, so the old operation can never record another result; and the
+    successor's leased claim (``claim`` the successor, ``prior_holder``, the
+    item's current ``spec_version`` when it has one, and ``expires_at`` the
+    configured claim TTL from now), keyed ``loop:<item>:reclaim:<intent
+    event id>:claim``. Every refusal writes nothing.
+    """
+    if declare_seat_lost is not True:
+        raise ValidationError("reclaim-declaration-required")
+    if type(holder) is str and holder and re.fullmatch(LOOP_RECLAIM_SUCCESSOR, holder) is None:
+        raise ValidationError("reclaim-successor-invalid")
+    request = {
+        "intent_event_id": intent_event_id,
+        "claim_event_id": claim_event_id,
+        "prior_holder": prior_holder,
+        "holder": holder,
+        "declaration": LOOP_RECLAIM_DECLARATION,
+        "authority": authority,
+        "declared_by": declared_by,
+        "evidence": evidence,
+    }
+    payload = validate_payload(
+        LOOP_RECLAIM_KIND, {key: value for key, value in request.items() if value is not None}
+    )
+    marker_key = f"loop:{item_id}:reclaim:{payload['intent_event_id']}"
+    metadata = _metadata(actor, harness, model, session)
+    facts: dict[str, Any] = {}
+    created = False
+
+    def guard(conn: sqlite3.Connection) -> None:
+        nonlocal created
+        facts.update(_reclaim_guard(ledger, item_id, payload))
+        created = True
+
+    with ledger.transaction():
+        marker = ledger._append_loop_event(
+            _LOOP_WRITER_CAPABILITY,
+            ignore_retry_attribution=True,
+            kind=LOOP_RECLAIM_KIND,
+            payload=payload,
+            item_id=item_id,
+            idempotency_key=marker_key,
+            precondition=guard,
+            **metadata,
+        )
+        if not created:
+            # An exact retry: the store found the marker under its key and
+            # ran no guard. The stored recovery is returned; nothing is written.
+            done, claim = _reclaimed_record(ledger._conn, item_id, marker)
+            return HandoffReclaim(marker, done, claim, created=False)
+        operation, operation_id = facts["operation"], facts["operation_id"]
+        done = ledger._append_loop_event(
+            _LOOP_WRITER_CAPABILITY,
+            ignore_retry_attribution=True,
+            kind="loop.done",
+            payload={
+                "operation": operation,
+                "operation_id": operation_id,
+                "intent_event_id": payload["intent_event_id"],
+                "outcome": LOOP_RECLAIM_DECLARATION,
+                "source": f"event:{marker.id}",
+            },
+            item_id=item_id,
+            idempotency_key=f"loop:{item_id}:{operation}:{operation_id}:done",
+            **metadata,
+        )
+        lease_payload: dict[str, Any] = {
+            "status": "claimed",
+            "claim": payload["holder"],
+            "prior_holder": payload["prior_holder"],
+            "expires_at": lease.expires_at(facts["ttl"]),
+        }
+        if facts["spec_version"] is not None:
+            lease_payload["spec_version"] = facts["spec_version"]
+        claim = ledger.append(
+            kind="item.state",
+            payload=lease_payload,
+            item_id=item_id,
+            idempotency_key=f"{marker_key}:claim",
+            **metadata,
+        )
+    return HandoffReclaim(marker, done, claim, created=True)
+
+
 __all__ = [
+    "HandoffReclaim",
     "OperationState",
     "PullRequestLink",
     "check_holder",
@@ -860,8 +1331,10 @@ __all__ = [
     "manage_item",
     "open_hand_off",
     "operation_state",
+    "reclaim_handoff",
     "record_progress",
     "restamp_claim",
+    "session_hand_off",
     "start_operation",
     "take_item",
 ]

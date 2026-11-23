@@ -32,6 +32,18 @@ LOOP_OPERATIONS = ("build", "decision", "review", "merge", "ping")
 LOOP_HAND_OFF_VERSION = 2
 LOOP_HAND_OFF_OPERATION = "build"
 LOOP_HAND_OFF_SEAMS = ("build", "review", "outward")
+# The recovery of a session hand-off whose seat is lost: a loop.reclaimed
+# event, which only ledger.loop.reclaim_handoff writes (the dedicated
+# ``ledger reclaim-handoff`` verb calls it). It records an explicit
+# declaration, never elapsed time: who declared the seat lost, on what
+# authority and with what evidence, and the successor the claim moved to.
+LOOP_RECLAIM_KIND = "loop.reclaimed"
+LOOP_RECLAIM_DECLARATION = "seat-lost"
+LOOP_RECLAIM_AUTHORITIES = ("operator", "successor")
+# The successor is session-qualified: <seat>@<session>, each part one ASCII
+# token of the hand-off's controller shape (letters, digits, ".", "_" and
+# "-", starting with a letter or digit, 1 to 64 characters).
+LOOP_RECLAIM_SUCCESSOR = r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}@[A-Za-z0-9][A-Za-z0-9._-]{0,63}"
 # A decision's standing is a position, never a ticket status: these values
 # share nothing with ITEM_STATUSES, and only decision events carry them.
 STANDINGS = ("lean", "settled", "superseded")
@@ -318,6 +330,21 @@ def _check_receipt(payload: Mapping[str, Any]) -> None:
         seen.add(finding["id"])
 
 
+def _check_reclaim(payload: Mapping[str, Any]) -> None:
+    """The rules across a ``loop.reclaimed`` payload's fields; its fields
+    have passed their own checks.
+
+    The successor is never the predecessor (``reclaim-same-holder``). A
+    successor declaring on its own authority names itself as the declarant
+    (``reclaim-authority-invalid``): the declaration stays an assertion, not
+    authentication, but it is attributable to the name that gains the claim.
+    """
+    if payload["holder"] == payload["prior_holder"]:
+        _fail("reclaim-same-holder")
+    if payload["authority"] == "successor" and payload["declared_by"] != payload["holder"]:
+        _fail("reclaim-authority-invalid")
+
+
 # item_id: "required" | "optional" | "absent" (refused when given)
 SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
     ("item.created", 1): {
@@ -601,6 +628,27 @@ SCHEMAS: dict[tuple[str, int], dict[str, Any]] = {
             "source": _SOURCE,
         },
     },
+    # A dead session hand-off's recovery (ledger.loop.reclaim_handoff):
+    # exactly these keys. The intent and claim event ids are the hand-off and
+    # the claim the declarant observed; prior_holder is the recorded
+    # predecessor, compared by exact equality; holder is the successor the
+    # claim moved to. Written in one transaction with the old operation's
+    # loop.done (outcome seat-lost) and the successor's leased claim.
+    (LOOP_RECLAIM_KIND, 1): {
+        "item_id": "required",
+        "required": {
+            "intent_event_id": _EVENT_ID,
+            "claim_event_id": _EVENT_ID,
+            "prior_holder": {"type": "string", "min_len": 1},
+            "holder": {"type": "string", "pattern": LOOP_RECLAIM_SUCCESSOR},
+            "declaration": {"enum": (LOOP_RECLAIM_DECLARATION,)},
+            "authority": {"enum": LOOP_RECLAIM_AUTHORITIES},
+            "declared_by": _REF,
+            "evidence": _REF,
+        },
+        "optional": {},
+        "check": _check_reclaim,
+    },
     ("loop.closed", 1): {
         "item_id": "required",
         "required": {
@@ -880,6 +928,7 @@ DURABILITY: dict[str, str] = {
     "loop.managed": DURABLE,
     "loop.intent": DURABLE,
     "loop.done": DURABLE,
+    LOOP_RECLAIM_KIND: DURABLE,
     "loop.closed": DURABLE,
     SYSTEM_CLAIM_KIND: DURABLE,
     RECEIPT_KIND: DURABLE,
