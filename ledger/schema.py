@@ -253,8 +253,11 @@ CITED_GRANT_ID = "grant:review-round-past-cap"
 _INT_MAX = 2**63 - 1  # SQLite integer ceiling
 _EVENT_ID = {"type": "integer", "min": 1, "max": _INT_MAX}
 # owner/repo, lowercase only: ledger link's character set casefolded. An
-# uppercase letter is refused, never folded.
-_RECEIPT_REPO = {"type": "string", "max_len": 200, "pattern": r"[a-z0-9_.-]+/[a-z0-9_.-]+"}
+# uppercase letter or a segment made only of dots is refused, never folded.
+_RECEIPT_REPO = {
+    "type": "string", "max_len": 200,
+    "pattern": r"(?!\.+/)[a-z0-9_.-]+/(?!\.+\Z)[a-z0-9_.-]+",
+}
 _RECEIPT_COMMIT = {"type": "string", "pattern": r"[0-9a-f]{40}"}
 # One token: a lane, a family or a tier. The ledger holds no list of either.
 _RECEIPT_TOKEN = {"type": "string", "min_len": 1, "max_len": 64,
@@ -275,6 +278,19 @@ _IMPORTED_FROM = {
     },
     "optional": {},
 }
+
+
+def _receipt_pr_number(number: str) -> int | None:
+    """Read a canonical positive ASCII decimal under the receipt pr rule.
+
+    Callers check the target's grammar first. Bound the text before int()
+    so even a stored number beyond Python's conversion limit is harmless.
+    """
+    maximum = str(_EVENT_ID["max"])
+    if len(number) > len(maximum) or (len(number) == len(maximum) and number > maximum):
+        return None
+    return int(number)
+
 
 # Merge records carry a full PR URL; stored links may also use the short
 # form, resolved by receipts.pr_item. Keys use casefolded repository names.

@@ -71,6 +71,7 @@ from .schema import (
     MERGE_INTENT_KIND,
     RECEIPT_DOC_ROLE,
     RECEIPT_KIND,
+    _receipt_pr_number,
     validate_item_id,
     validate_payload,
 )
@@ -109,7 +110,10 @@ def _pull_request(target: Any) -> tuple[str, str, int] | None:
     for pattern in (_PR_URL, _PR_SHORT):
         match = pattern.fullmatch(target)
         if match is not None:
-            return match.group(1).casefold(), match.group(2).casefold(), int(match.group(3))
+            number = _receipt_pr_number(match.group(3))
+            if number is None:
+                return None
+            return match.group(1).casefold(), match.group(2).casefold(), number
     return None
 
 
@@ -118,8 +122,10 @@ def pr_item(lg: Ledger, url: Any) -> str:
     names the pull request ``url``.
 
     ``url`` must be exactly ``https://github.com/<owner>/<repo>/pull/<N>``,
-    else ``bad_pr_target``. A stored target names the same pull request when
-    it is in the URL form or the ``owner/repo#N`` form with the same owner
+    with N under the receipt number rule (1 to 2^63-1), else ``bad_pr_target``.
+    Out-of-range stored numbers match nothing. A stored target names the
+    same pull request when it is in the URL form or the ``owner/repo#N`` form
+    with the same owner
     and repo, casefolded, and the same number; a bare ``#N`` and any other
     stored target match nothing, and so does a link of another rel. No item:
     ``pr_item_missing``. Two or more: ``pr_item_ambiguous``, naming the item
