@@ -156,8 +156,10 @@ WORD_LIMIT words.
 """
 from __future__ import annotations
 
+import json
 import re
 import shlex
+import sqlite3
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
@@ -165,9 +167,9 @@ from typing import Any, Callable, Iterable, Iterator, Mapping
 
 from . import lease
 from .export import decay_boundary, decayed
-from .schema import SPEC_KIND
+from .schema import LOOP_HAND_OFF_VERSION, SPEC_KIND, validate_payload
 from .search import DECIDED_PREFIX
-from .store import Ledger
+from .store import ChainBroken, Ledger, _event_from_row
 
 WORD_LIMIT = 400
 FOOTER = "This card is a projection; the events are the authority"
@@ -508,6 +510,7 @@ class Card:
     shown_status: str | None = None
     expired_holder: str | None = None
     expires_at: str | None = None
+    hand_off: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Structured form of the same content the text card shows."""
@@ -557,6 +560,7 @@ class Card:
             out["recorded_status"] = self.status
             out["expired_holder"] = self.expired_holder
             out["expires_at"] = self.expires_at
+        out["hand_off"] = self.hand_off
         return out
 
 
@@ -1254,6 +1258,15 @@ def _render_card(card: Card, order: list[str]) -> str:
     )
     if moved:
         parts.append(moved)
+    if card.hand_off is not None:
+        if card.hand_off.get("unreadable"):
+            parts.append("hand-off: unreadable")
+        else:
+            seams = card.hand_off["seams"]
+            parts.append(
+                f"hand-off: controller={card.hand_off['controller']}; seams: "
+                + ", ".join(f"{name}={seams[name]}" for name in ("build", "review", "outward"))
+            )
     parts += [
         "",
         "## Decisions",
@@ -2107,6 +2120,44 @@ def project_item(
         return _project_item(lg, item, pointers=pointers, program=program, full=full)
 
 
+def _card_events(lg: Ledger) -> list[Any]:
+    try:
+        return lg.events()
+    except (json.JSONDecodeError, ChainBroken):
+        # Only hand-off payloads may be unreadable on a card. Keep their
+        # metadata (revision/hash/source ids); the shared reader below reads
+        # the real payload and reports it unreadable, never absent.
+        events = []
+        for row in lg._conn.execute("SELECT * FROM events ORDER BY id"):
+            try:
+                event = _event_from_row(row)
+            except (json.JSONDecodeError, ChainBroken):
+                if row["kind"] != "loop.intent" or row["payload_version"] != LOOP_HAND_OFF_VERSION:
+                    raise
+                event = _event_from_row({**row, "payload": "{}"})
+            events.append(event)
+        return events
+
+
+def _project_hand_off(lg: Ledger, item_id: str) -> dict[str, Any] | None:
+    """Use the loop's one reader; an unreadable hand-off is never absence."""
+    # loop -> receipts -> verbs imports card, so defer until projection.
+    from .loop import open_hand_off
+
+    try:
+        intent = open_hand_off(lg, item_id)
+        if intent is None:
+            return None
+        payload = validate_payload(intent.kind, dict(intent.payload), intent.payload_version)
+    except (sqlite3.Error, ValueError, TypeError, ChainBroken):
+        return {"unreadable": True}
+    return {
+        "event_id": intent.id,
+        "controller": payload["controller"],
+        "seams": dict(payload["seams"]),
+    }
+
+
 def _project_item(
     lg: Ledger,
     item: Mapping[str, Any],
@@ -2116,7 +2167,7 @@ def _project_item(
     full: bool,
 ) -> Card:
     item_id = item["item_id"]
-    events = lg.events()
+    events = _card_events(lg)
     tail = events[-1]
     own_events = [event for event in events if event.item_id == item_id]
     boundary = decay_boundary(own_events, item["status"] == "closed")
@@ -2208,6 +2259,9 @@ def _project_item(
     spec_claim = claim_spec_version(own_events, item)
     if spec is not None:
         base.add(spec.id)
+    hand_off = _project_hand_off(lg, item_id)
+    if hand_off is not None and "event_id" in hand_off:
+        base.add(hand_off["event_id"])
     card = Card(
         item_id=item_id,
         type=item["type"],
@@ -2235,6 +2289,7 @@ def _project_item(
         spec_hash=None if spec is None else spec.payload.get("content_hash"),
         spec_claim_hash=spec_content_hash(own_events, spec_claim),
         program=program,
+        hand_off=hand_off,
     )
     if full:
         # The full card names every event it was projected from, including

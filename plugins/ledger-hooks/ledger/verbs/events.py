@@ -45,7 +45,7 @@ _FILTERS = (
 )
 _COLUMNS = (
     "SELECT id, kind, item_id, actor, harness, model, session, "
-    "recorded_at, payload FROM v_events"
+    "recorded_at, payload, payload_version FROM v_events"
 )
 # Every character ``str.splitlines`` splits a line on. All of them are
 # non-printable today; naming them keeps text output on one line per event
@@ -162,6 +162,7 @@ def _event(row) -> dict:
         "session": row["session"],
         "recorded_at": row["recorded_at"],
         "payload": payload,
+        "payload_version": row["payload_version"],
     }
 
 
