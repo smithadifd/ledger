@@ -123,24 +123,11 @@ def run(args, ctx: Context) -> Result:
                     exit_code=EXIT_NOT_FOUND,
                 )
             status = current["status"]
-            if status not in ("open", CLAIM_STATUS):
-                code = {"closed": "item_closed", "blocked": "item_blocked"}.get(
-                    status, "item_status"
-                )
+            if status not in ("open", CLAIM_STATUS, "blocked"):
+                code = "item_closed" if status == "closed" else "item_status"
                 raise CliError(
                     f"item cannot be claimed in status {status!r}",
                     code=code,
-                    exit_code=EXIT_REFUSED,
-                )
-            stopped = conn.execute(
-                "SELECT 1 FROM events WHERE item_id = ? AND kind = 'item.stopped' "
-                "AND id > ? LIMIT 1",
-                (args.item, current["state_event_id"] or current["created_event_id"]),
-            ).fetchone()
-            if stopped is not None:
-                raise CliError(
-                    f"item is stopped: {args.item}",
-                    code="item_stopped",
                     exit_code=EXIT_REFUSED,
                 )
             if _loop_held_by(conn, current, args.item, requester) != loop_held:

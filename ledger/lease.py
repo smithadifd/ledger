@@ -89,6 +89,8 @@ def _different_holder(row, requester, requester_claim) -> bool:
     holder = row["owner"] or row["claim"]
     if requester_claim is _UNSET_CLAIM:
         return bool(holder and requester and holder != requester)
+    if row["owner"] and row["claim"] is None:
+        return row["owner"] != requester
     return (holder, row["claim"]) != (requester, requester_claim)
 
 
@@ -113,8 +115,9 @@ def guard_claim(row, lease_row, requester, moment, recorded_prior, *, requester_
 
     Another holder's live claim is refused; an expired one may be taken over
     only when ``recorded_prior`` names exactly that holder.
-    Supplying ``requester_claim`` compares both names; omitting it retains
-    the single-holder contract used by the loop writer.
+    Supplying ``requester_claim`` compares both names, except an owner-only
+    lease matches any claim by that owner. Omitting it retains the
+    single-holder contract used by the loop writer.
     """
     expected = takeover_holder(
         row, lease_row, requester, moment, requester_claim=requester_claim

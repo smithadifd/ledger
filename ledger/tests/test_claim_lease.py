@@ -411,27 +411,19 @@ def test_claim_checks_expected_revision_under_lock(db, monkeypatch, expected) ->
     ]
 
 
-@pytest.mark.parametrize("terminal", ["closed", "stopped", "blocked"])
-def test_claim_refuses_non_claimable_item_without_writing(db, monkeypatch, terminal) -> None:
+def test_claim_refuses_closed_item_without_writing(db, monkeypatch) -> None:
     lg = open_ledger(db)
     try:
-        if terminal == "stopped":
-            lg.append(
-                kind="item.stopped", item_id="it-1",
-                payload={"point": "work stopped", "phase": "build"},
-                idempotency_key="stop",
-            )
-        else:
-            lg.append(
-                kind="item.state", item_id="it-1",
-                payload={"status": terminal}, idempotency_key="terminal",
-            )
+        lg.append(
+            kind="item.state", item_id="it-1",
+            payload={"status": "closed"}, idempotency_key="closed",
+        )
     finally:
         lg.close()
     before = events(db)
     code, body, _ = run(monkeypatch, db, "alice", "claim", "it-1")
-    assert code == 3, f"claim must refuse item_{terminal} before writing"
-    assert body["error"]["code"] == f"item_{terminal}"
+    assert code == 3, "claim must refuse item_closed before writing"
+    assert body["error"]["code"] == "item_closed"
     assert events(db) == before
 
 
@@ -550,3 +542,69 @@ def test_claim_stopped_item_can_be_explicitly_reopened(db, monkeypatch) -> None:
     code, body, err = run(monkeypatch, db, "alice", "claim", "it-1")
     assert code == 0, err
     assert body["data"]["event"]["payload"]["status"] == "claimed"
+
+
+@pytest.mark.parametrize("requester", ["alice", "bob"])
+def test_claim_after_stop_and_resume(db, monkeypatch, clock, requester) -> None:
+    clock.at(-5 * HOUR)
+    assert run(monkeypatch, db, "alice", "claim", "it-1")[0] == 0
+    assert run(
+        monkeypatch, db, "alice", "append", "--kind", "item.stopped",
+        "--item", "it-1", "--payload",
+        json.dumps({"point": "continue the work", "phase": "build"}),
+    )[0] == 0
+    # The original holder can renew a live lease; another holder needs expiry.
+    if requester != "alice":
+        clock.real()
+    before = events(db)
+    code, body, err = run(monkeypatch, db, requester, "resume")
+    assert code == 0, err
+    assert body["data"]["items"][0]["item_id"] == "it-1"
+    assert events(db) == before
+    code, body, err = run(monkeypatch, db, requester, "claim", "it-1")
+    assert code == 0, f"stopped item must remain claimable after resume: {body}"
+    payload = body["data"]["event"]["payload"]
+    assert (payload["owner"], payload["claim"]) == (requester, requester)
+    assert len(events(db)) == len(before) + 1
+
+
+def test_claim_blocked_item(db, monkeypatch) -> None:
+    assert run(
+        monkeypatch, db, "alice", "state", "it-1", "--status", "blocked",
+    )[0] == 0
+    code, body, err = run(monkeypatch, db, "alice", "claim", "it-1")
+    assert code == 0, f"non-closed known status must remain claimable: {body}"
+    assert body["data"]["event"]["payload"]["status"] == "claimed"
+
+
+@pytest.mark.parametrize("claim_name", [None, "task"])
+def test_claim_owner_only_lease_renewal(db, monkeypatch, claim_name) -> None:
+    assert run(
+        monkeypatch, db, "alice", "state", "it-1",
+        "--status", "claimed", "--owner", "alice",
+    )[0] == 0
+    before = events(db)
+    flags = ["--claim", claim_name] if claim_name else []
+    code, body, err = run(
+        monkeypatch, db, "requester", "claim", "it-1", "--owner", "alice", *flags,
+    )
+    assert code == 0, f"owner-only lease must accept its owner: {body}"
+    payload = body["data"]["event"]["payload"]
+    assert (payload["owner"], payload["claim"]) == ("alice", claim_name or "requester")
+    assert "prior_holder" not in payload
+    assert len(events(db)) == len(before) + 1
+
+
+def test_claim_owner_only_lease_refuses_different_owner(db, monkeypatch) -> None:
+    assert run(
+        monkeypatch, db, "alice", "state", "it-1",
+        "--status", "claimed", "--owner", "alice",
+    )[0] == 0
+    before = events(db)
+    code, body, _ = run(
+        monkeypatch, db, "bob", "claim", "it-1", "--owner", "bob",
+    )
+    assert code == 3, "owner-only lease must refuse another owner"
+    assert body["error"]["code"] == "claimed"
+    assert body["error"]["message"] == "item already claimed by alice"
+    assert events(db) == before
