@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from ledger.cli import main
+from ledger.loop import claim_operation, finish_operation, take_item
 from ledger.search import MAX_LIMIT
 from ledger.store import open_ledger
 from ledger.verbs import EXIT_NOT_FOUND, EXIT_OK, EXIT_USAGE
@@ -23,6 +24,7 @@ EVENT_KEYS = {
     "session",
     "recorded_at",
     "payload",
+    "payload_version",
 }
 DATA_KEYS = {"events", "limit", "truncated"}
 
@@ -233,6 +235,31 @@ def test_json_keys_are_exactly_the_listed_set(tmp_path, monkeypatch):
     for event in body["data"]["events"]:
         assert set(event) == EVENT_KEYS
         assert isinstance(event["payload"], dict)
+
+
+@pytest.mark.parametrize("by_id", [False, True])
+def test_json_preserves_stored_payload_versions(tmp_path, monkeypatch, by_id):
+    db = seed(tmp_path / "ledger.db")
+    with open_ledger(db) as lg:
+        take_item(lg, "it-1", "builder", idempotency_key="manage", claim_key="take")
+        intent_v1 = claim_operation(lg, "it-1", "build", "build-v1", holder="builder").event
+        finish_operation(lg, "it-1", "build", "build-v1", holder="builder")
+        intent_v2 = claim_operation(
+            lg, "it-1", "build", "build-v2", holder="builder", hand_off=True,
+            controller="director",
+            seams={"build": "builder", "review": "reviewer", "outward": "draft-pr"},
+        ).event
+        stored = {event.id: event.payload_version for event in lg.events()}
+    args = ["events"]
+    if by_id:
+        args += ["--id", str(intent_v1.id), "--id", str(intent_v2.id)]
+        stored = {intent_v1.id: 1, intent_v2.id: 2}
+    code, body, err = run_json(monkeypatch, db, *args)
+    assert code == EXIT_OK, err
+    actual = {event["id"]: event["payload_version"] for event in body["data"]["events"]}
+    assert actual == stored
+    assert actual[intent_v1.id] == 1
+    assert actual[intent_v2.id] == 2
 
 
 def test_text_form_is_one_line_per_event(tmp_path, monkeypatch):

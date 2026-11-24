@@ -698,7 +698,9 @@ recorded time with the same date forms and the same refusals as `query`.
 `--kind` may be repeated (any of the given kinds). Filters combine with AND.
 Exit 1 when nothing matches. `--json` carries
 `{events, limit, truncated}`; each event is
-`{id, kind, item_id, actor, harness, model, session, recorded_at, payload}`.
+`{id, kind, item_id, actor, harness, model, session, recorded_at, payload, payload_version}`.
+`payload_version` is the stored integer: a version 2 `loop.intent` is a
+hand-off, distinct from a version 1 intent without inspecting its payload.
 The text form is one event per line: recorded time, kind, item, actor and a
 payload summary, tab-separated. An empty column prints `-`, and a tab, newline
 or other non-printable character in a column prints escaped (`\t`, `\n`), so
@@ -764,6 +766,16 @@ each. The next step names at most five blockers; its `(+K cut; COMMAND)` for
 the rest names the same commands by the same kinds, so blockers held only by
 other items' `blocks` links point at the `query --blocks` command, not at
 `export-item`.
+
+An open hand-off adds one line after the spec: `hand-off: controller=NAME;
+seams: build=NAME, review=NAME, outward=NAME`. It uses the loop's shared
+open-hand-off reader: a version 2 `loop.intent` remains open until a
+`loop.done` on the same item names the same operation and operation id.
+A version 1 intent is not a hand-off. With none open, the text is unchanged.
+An unreadable or ambiguous hand-off prints `hand-off: unreadable` rather
+than disappearing or crashing. `--json` appends `hand_off`: `null` with
+none, `{event_id, controller, seams}` while open, or `{"unreadable": true}`
+when it cannot be read. Existing fields keep their names and relative order.
 
 With `--json`, `truncated` lists the names of what the card cut and `cuts`
 carries one entry for each marker the text form prints, in the same order:

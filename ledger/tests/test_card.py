@@ -29,6 +29,7 @@ from ledger.card import (
     word_count,
 )
 from ledger.cli import main
+from ledger.loop import claim_operation, finish_operation, take_item
 from ledger.schema import ITEM_TYPES
 from ledger.store import open_ledger
 from ledger.verbs import EXIT_NOT_FOUND, EXIT_REFUSED, discover_verbs
@@ -120,6 +121,113 @@ def test_all_item_types_render(tmp_path: Path, item_type: str) -> None:
     assert f"title: synthetic-{item_type}" in text
     assert f"# {item_id}" in text
     lg.close()
+
+
+@pytest.fixture
+def handed_off_item(tmp_path):
+    with open_ledger(_db(tmp_path)) as lg:
+        _create(lg, "it-1", "ticket")
+        take_item(lg, "it-1", "builder", idempotency_key="manage", claim_key="take")
+        intent = claim_operation(
+            lg, "it-1", "build", "build-1", holder="builder", hand_off=True,
+            controller="director",
+            seams={"build": "omp-builder", "review": "review-gate", "outward": "draft-pr"},
+        ).event
+        yield lg, intent
+
+
+@pytest.mark.parametrize("full", [False, True])
+def test_card_shows_open_hand_off(handed_off_item, full, monkeypatch):
+    lg, intent = handed_off_item
+    card = project_card(lg, "it-1", full=full)
+    assert (
+        "hand-off: controller=director; seams: build=omp-builder, "
+        "review=review-gate, outward=draft-pr\n"
+    ) in format_card(card)
+    assert card.as_dict()["hand_off"] == {
+        "event_id": intent.id,
+        "controller": "director",
+        "seams": {"build": "omp-builder", "review": "review-gate", "outward": "draft-pr"},
+    }
+    assert intent.id in card.source_event_ids
+    args = ["--db", str(lg.path), "card", "it-1"]
+    if full:
+        args.append("--full")
+    code, text, err = invoke(monkeypatch, args)
+    assert code == 0, err
+    assert "hand-off: controller=director;" in text
+
+
+def test_card_drops_hand_off_after_matching_done(handed_off_item, monkeypatch):
+    lg, _intent = handed_off_item
+    finish_operation(lg, "it-1", "build", "build-1", holder="builder")
+    card = project_card(lg, "it-1")
+    assert "hand-off:" not in format_card(card)
+    assert card.as_dict()["hand_off"] is None
+    code, text, err = invoke(monkeypatch, ["--db", str(lg.path), "card", "it-1"])
+    assert code == 0, err
+    assert "hand-off:" not in text
+
+
+@pytest.mark.parametrize("payload_change", [
+    {"controller": None},
+    {"seams": {"build": "builder"}},
+    "{",
+    "null",
+    "[]",
+])
+def test_card_reports_unreadable_hand_off(handed_off_item, payload_change):
+    lg, intent = handed_off_item
+    # Model a restored/corrupt payload that the writer would refuse.
+    lg._conn.execute("DROP TRIGGER events_no_update")
+    lg._conn.execute(
+        "UPDATE events SET payload = ? WHERE id = ?",
+        (
+            json.dumps({**intent.payload, **payload_change})
+            if isinstance(payload_change, dict) else payload_change,
+            intent.id,
+        ),
+    )
+    lg._conn.commit()
+    card = project_card(lg, "it-1")
+    assert "hand-off: unreadable\n" in format_card(card)
+    assert card.as_dict()["hand_off"] == {"unreadable": True}
+
+
+def test_card_without_hand_off_keeps_fixed_text(tmp_path):
+    with open_ledger(_db(tmp_path)) as lg:
+        created = _create(lg, "it-1", "ticket")
+        card = project_card(lg, "it-1")
+    assert format_card(card) == (
+        "# it-1\n"
+        f"revision: {created.id} {created.hash}\n"
+        "source_event_ids: 1\n"
+        "type: ticket\n"
+        "title: synthetic-item\n"
+        "status: open\n"
+        "owner: -\n"
+        "claim: -\n"
+        "spec -\n"
+        "\n## Decisions\n(none)\n"
+        "\n## Open questions\n(none)\n"
+        "\n## Next step\nResume with: ledger resume --item=it-1\n"
+        "\n## Links\n(none)\n"
+        "\n## Blockers\n(none)\n"
+        "\n## Notes\n(none)\n"
+        "\nThis card is a projection; the events are the authority "
+        "(ledger export-item -- it-1)\n"
+    )
+    assert card.as_dict()["hand_off"] is None
+
+
+def test_card_v1_build_intent_is_not_a_hand_off(tmp_path):
+    with open_ledger(_db(tmp_path)) as lg:
+        _create(lg, "it-1", "ticket")
+        take_item(lg, "it-1", "builder", idempotency_key="manage", claim_key="take")
+        claim_operation(lg, "it-1", "build", "build-1", holder="builder")
+        card = project_card(lg, "it-1")
+    assert "hand-off:" not in format_card(card)
+    assert card.as_dict()["hand_off"] is None
 
 
 def _bulky_item(lg, item_id="it-1"):
