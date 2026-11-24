@@ -516,7 +516,7 @@ captured and `pick` refuses (`capture_missing`).
 | `new` | create an item (`topic`, `ticket`, `initiative`, `decision`, `gate`, `guidance`), optionally keyed by a source locator | yes |
 | `note` | append a note to an item | yes |
 | `state` | set an item's status (`open`, `claimed`, `blocked`, `closed`), owner, claim or blocker | yes |
-| `claim` | claim an item with a lease, optionally capped by `--capacity` | yes |
+| `claim` | lease an open or claimed item, optionally capped by `--capacity` and checked with `--expect-revision ID\|none`; `--claim` defaults the owner to that name | yes |
 | `reclaim-handoff` | move a dead session hand-off's claim to a named successor on an explicit `--declare-seat-lost` with its authority and evidence; refused while a ticket pass on the item may be live | yes |
 | `claim-system` | claim this database for a system such as `work` or `home`; the same name again writes no event, but opening the database for writing applies any pending migration (an older copy then refuses the file); another name is refused | yes |
 | `link` | link an item to a PR, branch, session, URL or another item; `duplicate-of` also closes it | yes |

@@ -138,9 +138,21 @@ ledger note it-1a2b3c4d5e6f "tried the retry; it worked"
 **`state ITEM --status STATUS [--owner O] [--claim C] [--blocked-by X] [--expect-revision ID]`**
 Set the item's status.
 
-**`claim ITEM [--owner O] [--claim C] [--ttl SECONDS] [--capacity N]`**
-Claim the item with a lease. The holder defaults to the actor. `--capacity`
-refuses the claim when N items are already claimed.
+**`claim ITEM [--owner O] [--claim C] [--ttl SECONDS] [--capacity N] [--expect-revision ID|none]`**
+Claim an open or claimed item with a lease. With `--claim` but no `--owner`,
+the owner defaults to the claim name; with neither flag, both default to the actor.
+A live lease conflicts if either owner or claim differs (exact string equality);
+a lease naming only a claim accepts a join whose owner and claim both match it.
+`--capacity` refuses the claim when N items are already claimed.
+`--expect-revision` uses the same positive event id or literal `none` grammar as
+`append-many`: a mismatch refuses with `stale_revision` (exit 5), naming the
+expected and current revisions and the current writer. Malformed revisions
+refuse with `usage` (exit 2), including `0`, which is not an event id.
+The status and revision checks run inside the append transaction, before writing.
+Closed items refuse with `item_closed`, blocked items with `item_blocked`, and
+unknown statuses with `item_status` (exit 3). An `item.stopped` event newer than
+the latest state refuses with `item_stopped` (exit 3); explicitly setting a new
+open state allows claiming again. Every refusal writes no lease.
 
 **`reclaim-handoff ITEM --intent EVENT_ID --claim EVENT_ID --from HOLDER --to SEAT@SESSION --declare-seat-lost --authority operator|successor --declared-by NAME --evidence REF`**
 Recover a dead session hand-off: move the claim a session-mode step left
