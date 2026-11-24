@@ -23,7 +23,7 @@ from __future__ import annotations
 import argparse
 import re
 
-from ledger.schema import LINK_RELS
+from ledger.schema import LINK_RELS, _receipt_pr_number
 from ledger.store import IdempotencyConflict, current_anchors
 from ledger.verbs import (
     EXIT_NOT_FOUND,
@@ -106,17 +106,19 @@ def _target(args) -> str:
 
 
 _PR_TARGET = re.compile(
-    r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*"
-    r"|#[1-9][0-9]*"
-    r"|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/[1-9][0-9]*"
+    r"(?:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#"
+    r"|#"
+    r"|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/)([1-9][0-9]*)"
 )
 
 
 def _require_pr_target(target: str) -> None:
-    if _PR_TARGET.fullmatch(target):
+    match = _PR_TARGET.fullmatch(target)
+    if match is not None and _receipt_pr_number(match.group(1)) is not None:
         return
     raise CliError(
-        "pr target must be owner/repo#N, #N, or https://github.com/owner/repo/pull/N",
+        "pr target must be owner/repo#N, #N, or https://github.com/owner/repo/pull/N"
+        " with N from 1 to 2^63-1",
         code="bad_pr_target",
         exit_code=EXIT_REFUSED,
     )
