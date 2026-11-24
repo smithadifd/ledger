@@ -382,6 +382,10 @@ def take_item(
     nothing written: the refused seat is not set up to build the item, and
     the holder can still close it.
 
+    Closed and blocked items refuse as ``item_closed`` and ``item_blocked``;
+    any other status except open or claimed refuses as ``item_status``.
+    The status is read under the write lock and checked before either write.
+
     DESIGN: the loop's claim is a lease, exactly like a ``ledger claim``: it
     carries ``expires_at`` (``ttl_seconds`` from now, else the ledger's
     configured claim TTL; a bad config refuses the take, as it refuses
@@ -415,6 +419,14 @@ def take_item(
         conn = ledger._conn
         moment = lease.now()
         row = conn.execute("SELECT * FROM v_items WHERE item_id = ?", (item_id,)).fetchone()
+        if row is not None and row["status"] not in ("open", "claimed"):
+            status = row["status"]
+            code = (
+                "item_closed" if status == "closed"
+                else "item_blocked" if status == "blocked"
+                else "item_status"
+            )
+            raise lease.ClaimRefused(code, f"item cannot be claimed in status {status!r}")
         held = lease.current_lease(conn, item_id)
         prior = lease.takeover_holder(row, held, holder, moment)
         lease.guard_claim(row, held, holder, moment, prior)
