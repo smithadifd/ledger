@@ -12,7 +12,9 @@ from ledger.verbs import (
     UsageError,
     Verb,
     actor_kwargs,
+    add_expect_revision_argument,
     event_dict,
+    expect_revision_value,
     new_key,
     open_db,
     require_item,
@@ -35,6 +37,7 @@ def add_arguments(parser) -> None:
         type=int,
         help="lease length in seconds (default: claim_ttl_seconds in config.json, else 4 hours)",
     )
+    add_expect_revision_argument(parser)
 
 
 def _loop_held_by(conn, row, item_id: str, requester) -> bool:
@@ -60,9 +63,10 @@ def _loop_held_by(conn, row, item_id: str, requester) -> bool:
 
 
 def run(args, ctx: Context) -> Result:
+    expect = expect_revision_value(args)
     if args.capacity is not None and args.capacity < 0:
         raise UsageError("--capacity must be >= 0")
-    owner = args.owner or ctx.actor
+    owner = args.owner or args.claim or ctx.actor
     claim = args.claim or ctx.actor
     if args.ttl is not None:
         try:
@@ -95,7 +99,8 @@ def run(args, ctx: Context) -> Result:
             payload["expires_at"] = lease.expires_at(ttl, at=moment)
         prior = (
             lease.takeover_holder(
-                seen, lease.current_lease(lg._conn, args.item), requester, moment
+                seen, lease.current_lease(lg._conn, args.item), requester, moment,
+                requester_claim=claim,
             )
             if seen is not None
             else None
@@ -117,6 +122,14 @@ def run(args, ctx: Context) -> Result:
                     code="not_found",
                     exit_code=EXIT_NOT_FOUND,
                 )
+            status = current["status"]
+            if status not in ("open", CLAIM_STATUS, "blocked"):
+                code = "item_closed" if status == "closed" else "item_status"
+                raise CliError(
+                    f"item cannot be claimed in status {status!r}",
+                    code=code,
+                    exit_code=EXIT_REFUSED,
+                )
             if _loop_held_by(conn, current, args.item, requester) != loop_held:
                 raise CliError(
                     "the claim changed while this claim was being recorded; retry",
@@ -136,6 +149,7 @@ def run(args, ctx: Context) -> Result:
                     requester,
                     moment,
                     payload.get("prior_holder"),
+                    requester_claim=claim,
                 )
             except lease.ClaimRefused as exc:
                 raise CliError(str(exc), code=exc.code, exit_code=EXIT_REFUSED) from exc
@@ -169,6 +183,7 @@ def run(args, ctx: Context) -> Result:
             item_id=args.item,
             idempotency_key=new_key(),
             precondition=precondition,
+            expect_revision=expect,
             **actor_kwargs(ctx),
         )
     finally:

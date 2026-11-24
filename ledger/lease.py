@@ -82,12 +82,24 @@ def ttl_for_db(db: Path | str) -> int:
         raise LeaseConfigError(str(exc)) from exc
 
 
-def takeover_holder(row, lease_row, requester, moment) -> str | None:
+_UNSET_CLAIM = object()
+
+
+def _different_holder(row, requester, requester_claim) -> bool:
+    holder = row["owner"] or row["claim"]
+    if requester_claim is _UNSET_CLAIM:
+        return bool(holder and requester and holder != requester)
+    if row["owner"] and row["claim"] is None:
+        return row["owner"] != requester
+    return (holder, row["claim"]) != (requester, requester_claim)
+
+
+def takeover_holder(row, lease_row, requester, moment, *, requester_claim=_UNSET_CLAIM) -> str | None:
     """The expired holder a claim by ``requester`` replaces, else None."""
     if row is None or row["status"] != "claimed" or lease_row is None:
         return None
     holder = row["owner"] or row["claim"]
-    if not (holder and requester and holder != requester):
+    if not _different_holder(row, requester, requester_claim):
         return None
     return holder if is_expired(lease_row["expires_at"], at=moment) else None
 
@@ -98,16 +110,21 @@ class ClaimRefused(Exception):
         self.code = code
 
 
-def guard_claim(row, lease_row, requester, moment, recorded_prior) -> None:
+def guard_claim(row, lease_row, requester, moment, recorded_prior, *, requester_claim=_UNSET_CLAIM) -> None:
     """The claim precondition, run inside the write transaction by every claim writer.
 
     Another holder's live claim is refused; an expired one may be taken over
     only when ``recorded_prior`` names exactly that holder.
+    Supplying ``requester_claim`` compares both names, except an owner-only
+    lease matches any claim by that owner. Omitting it retains the
+    single-holder contract used by the loop writer.
     """
-    expected = takeover_holder(row, lease_row, requester, moment)
+    expected = takeover_holder(
+        row, lease_row, requester, moment, requester_claim=requester_claim
+    )
     if row is not None and row["status"] == "claimed" and expected is None:
         holder = row["owner"] or row["claim"]
-        if holder and requester and holder != requester:
+        if _different_holder(row, requester, requester_claim):
             raise ClaimRefused("claimed", f"item already claimed by {holder}")
     if expected != recorded_prior:
         raise ClaimRefused(
